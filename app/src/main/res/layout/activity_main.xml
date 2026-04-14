@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#FFFFFF">
+
+    <!-- 상단 컨트롤 영역 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="12dp">
+
+        <!-- 목적지 입력 + 음성 버튼 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp">
+
+            <EditText
+                android:id="@+id/etDestination"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="목적지를 입력하세요"
+                android:inputType="text"
+                android:padding="12dp"
+                android:textSize="18sp"
+                android:minHeight="52dp"
+                android:background="@android:drawable/edit_text"
+                android:importantForAccessibility="yes"
+                android:contentDescription="목적지 입력" />
+
+            <Button
+                android:id="@+id/btnVoice"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="음성"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:minHeight="52dp"
+                android:layout_marginStart="6dp"
+                android:contentDescription="음성으로 목적지 검색" />
+        </LinearLayout>
+
+        <!-- 버튼 영역 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="8dp">
+
+            <Button
+                android:id="@+id/btnSearch"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="검색"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:minHeight="48dp"
+                android:layout_marginEnd="4dp"
+                android:contentDescription="입력한 목적지 검색" />
+
+            <Button
+                android:id="@+id/btnStart"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="안내 시작"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:minHeight="48dp"
+                android:layout_marginHorizontal="4dp"
+                android:contentDescription="경로 안내 시작" />
+
+            <Button
+                android:id="@+id/btnStop"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="안내 종료"
+                android:textSize="16sp"
+                android:textStyle="bold"
+                android:minHeight="48dp"
+                android:layout_marginStart="4dp"
+                android:contentDescription="경로 안내 종료" />
+        </LinearLayout>
+
+        <!-- 안내 메시지 -->
+        <TextView
+            android:id="@+id/tvGuidance"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textSize="20sp"
+            android:textColor="#1A1A2E"
+            android:textStyle="bold"
+            android:padding="12dp"
+            android:background="#F0F4FF"
+            android:minHeight="56dp"
+            android:gravity="center_vertical" />
+
+    </LinearLayout>
+
+    <!-- TMap 지도 (남은 공간 전체) -->
+    <FrameLayout
+        android:id="@+id/mapContainer"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <!-- 하단 정보 바 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="8dp"
+        android:background="#F5F5F5">
+
+        <TextView
+            android:id="@+id/tvArrivalState"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="#0066CC" />
+
+        <TextView
+            android:id="@+id/tvStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="목적지를 검색하세요"
+            android:textSize="14sp"
+            android:textColor="#333333" />
+
+        <TextView
+            android:id="@+id/tvDistance"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textSize="12sp"
+            android:textColor="#666666" />
+    </LinearLayout>
+
+</LinearLayout>

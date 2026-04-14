@@ -1,0 +1,66 @@
+# ===== Android / Gradle =====
+*.iml
+.gradle/
+build/
+/local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+release/
+
+# build.gradle.kts에서 리다이렉트한 빌드 출력 (참고용 — 프로젝트 외부라 보통 무관)
+# C:/SafeWalkBuild/
+
+# ===== APK / 빌드 산출물 =====
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# ===== Android Studio / IntelliJ =====
+.idea/
+*.iws
+*.ipr
+out/
+
+# ===== Keystore / 서명 =====
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# ===== 비밀/환경 변수 =====
+secrets.properties
+api_keys.properties
+*.env
+.env.*
+
+# ===== Kotlin / Java =====
+*.hprof
+
+# ===== NDK =====
+obj/
+
+# ===== 로그 / 임시 파일 =====
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# ===== Claude Code =====
+.claude/settings.local.json
+.claude/.credentials*
+
+# ===== TMap SDK (라이선스상 재배포 불가 — 개발자센터에서 직접 받아 넣을 것) =====
+app/libs/
+
+# ===== 내부 핸드오프 문서 폴더 (루트 README.md는 제외 안 됨) =====
+/README/
