@@ -45,6 +45,7 @@ import com.example.safewalknav.navigation.ArrivalState
 import com.example.safewalknav.navigation.NavigationManager
 import com.example.safewalknav.navigation.POIResult
 import com.example.safewalknav.navigation.TMapApiClient
+import com.example.safewalknav.util.bearing as sharedBearing
 import com.google.android.gms.common.api.ResolvableApiException
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationServices
@@ -250,6 +251,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+
+        // ===== KMM POC 검증 로그 (확인 후 제거 예정) =====
+        // shared 모듈의 bearing() 함수가 안드로이드 측에서 정상 호출되는지 확인.
+        // 서울시청(37.5665, 126.9780) → 동대문(37.5714, 127.0098) 약 73° (동북동) 기대.
+        val testBearing = sharedBearing(37.5665, 126.9780, 37.5714, 127.0098)
+        Log.d("KMM_POC", "Shared 모듈 bearing 호출 결과: $testBearing° (예상 약 73°)")
+        // ================================================
 
         tts = TextToSpeech(this, this)
         locationTracker = LocationTracker(this)
