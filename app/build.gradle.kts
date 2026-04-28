@@ -68,11 +68,9 @@ dependencies {
     // Google Play Services Location (GPS)
     implementation("com.google.android.gms:play-services-location:21.1.0")
 
-    // OkHttp (TMap REST API 호출용)
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-
-    // Gson (JSON 파싱)
-    implementation("com.google.code.gson:gson:2.10.1")
+    // OkHttp / Gson 의존성은 KMM 마이그레이션으로 제거됨.
+    // TMap REST API 호출은 shared 모듈의 Ktor 기반 TMapApiClient 가 담당.
+    // Ktor Android engine 이 내부적으로 OkHttp 를 사용하므로 결과적으로 같은 transport.
 
     // Kotlin Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
