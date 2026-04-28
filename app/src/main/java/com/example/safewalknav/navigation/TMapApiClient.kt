@@ -1,7 +1,5 @@
 package com.example.safewalknav.navigation
 
-import android.location.Location
-import android.util.Log
 import com.example.safewalknav.BuildConfig
 import com.google.gson.JsonParser
 import kotlinx.coroutines.Dispatchers
@@ -210,6 +208,7 @@ class TMapApiClient {
                     val turnType = properties.get("turnType")?.asInt ?: 0
                     val description = properties.get("description")?.asString ?: ""
                     val distance = properties.get("totalDistance")?.asInt ?: 0
+                    val roadType = properties.get("roadType")?.asInt ?: 0
 
                     waypoints.add(
                         Waypoint(
@@ -218,7 +217,7 @@ class TMapApiClient {
                             turnType = turnType,
                             description = description,
                             distance = distance,
-                            roadType = properties.get("roadType")?.asInt ?: 0,
+                            roadType = roadType,
                             pointType = classifyPointType(turnType, description)
                         )
                     )
@@ -269,18 +268,6 @@ class TMapApiClient {
                 val address = obj.get("upperAddrName")?.asString ?: ""
                 val frontLat = obj.get("frontLat")?.asString?.toDoubleOrNull()
                 val frontLon = obj.get("frontLon")?.asString?.toDoubleOrNull()
-
-                if (rawLat != null && rawLon != null && noorLat != null && noorLon != null) {
-                    val delta = FloatArray(1)
-                    Location.distanceBetween(rawLat, rawLon, noorLat, noorLon, delta)
-                    Log.d(
-                        "TMapPOI",
-                        "$name  raw=($rawLat,$rawLon)  noor=($noorLat,$noorLon)  " +
-                                "front=($frontLat,$frontLon)  Δ(raw↔noor)=${delta[0].toInt()}m"
-                    )
-                } else {
-                    Log.d("TMapPOI", "$name  usingFallback=${rawLat == null}  used=($lat,$lon)")
-                }
 
                 results.add(POIResult(name, lat, lon, address, frontLat, frontLon))
             }

@@ -35,6 +35,7 @@ secrets.properties
 api_keys.properties
 *.env
 .env.*
+app/google-services.json
 
 # ===== Kotlin / Java =====
 *.hprof
@@ -62,5 +63,5 @@ ehthumbs.db
 # ===== TMap SDK (라이선스상 재배포 불가 — 개발자센터에서 직접 받아 넣을 것) =====
 app/libs/
 
-# ===== 내부 핸드오프 문서 폴더 (루트 README.md는 제외 안 됨) =====
-/README/
+# ===== 내부 핸드오프 문서 =====
+/PROJECT_CONTEXT.md

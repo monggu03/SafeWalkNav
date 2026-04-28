@@ -21,6 +21,7 @@ import android.media.AudioTrack
 import android.media.ToneGenerator
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -114,6 +115,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // 효과음
     private var toneGenerator: ToneGenerator? = null
 
+    // 스테레오 비프 재사용 AudioTrack (방향성 비콘에서 700ms마다 재생 → 매 호출 생성 시 GC 압박)
+    private val stereoSampleRate = 44100
+    private val stereoDurationMs = 120
+    private val stereoNumSamples = stereoSampleRate * stereoDurationMs / 1000
+    private val stereoBuffer = ShortArray(stereoNumSamples * 2)
+    private var stereoTrack: AudioTrack? = null
+
     // 안내 자동 반복
     private var autoRepeatJob: Job? = null
 
@@ -128,6 +136,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var hasAccel = false
     private var hasMag = false
     private var currentAzimuth = 0f
+    // 자력계 없는 기기 fallback: GPS bearing을 azimuth로 사용
+    private val magnetometerAvailable: Boolean
+        get() = magnetometer != null
     private var lastBehindAnnounceTime = 0L
 
     // TTS 재생 중 플래그 (비콘 일시정지용)
@@ -227,6 +238,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     // 저역 통과 필터 (±180° 경계 처리)
                     val delta = ((az - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.15f * delta + 360f) % 360f
+                    // CSV 로그용 센서 퓨전 heading을 NavigationManager에 전달
+                    navigationManager.updateCompassHeading(currentAzimuth)
                 }
             }
         }
@@ -241,6 +254,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tts = TextToSpeech(this, this)
         locationTracker = LocationTracker(this)
         navigationManager = NavigationManager(TMapApiClient())
+        // Heading 분석용 CSV 로그 저장 경로 (권한 불필요한 app-scoped 경로)
+        navigationManager.setLogDirectory(getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS))
 
         etDestination = findViewById(R.id.etDestination)
         btnSearch = findViewById(R.id.btnSearch)
@@ -772,6 +787,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     return@collectLatest
                 }
 
+                // 자력계 없는 기기 fallback: GPS bearing(이동 중일 때만 신뢰 가능) → azimuth
+                if (!magnetometerAvailable && location.hasBearing() && location.hasSpeed() && location.speed > 0.5f) {
+                    val gpsBearing = location.bearing
+                    val delta = ((gpsBearing - currentAzimuth + 540f) % 360f) - 180f
+                    currentAzimuth = (currentAzimuth + 0.3f * delta + 360f) % 360f
+                    navigationManager.updateCompassHeading(currentAzimuth)
+                }
+
                 navigationManager.updateLocation(location)
 
                 val dist = LocationTracker.distanceBetween(
@@ -962,30 +985,28 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     /**
-     * 스테레오 PCM 비프 재생. 매 호출마다 AudioTrack 생성/해제.
+     * 스테레오 PCM 비프 재생.
+     * AudioTrack을 한 번만 STREAM 모드로 만들어 재사용한다 (방향성 비콘이 ~500ms마다 호출 → 매번 생성 시 GC 압박).
      * leftVol/rightVol: 0~1 개별 채널 진폭 배율.
      */
     private fun playStereoBeep(leftVol: Float, rightVol: Float, highPitch: Boolean) {
         try {
-            val sampleRate = 44100
-            val durationMs = 120
-            val numSamples = sampleRate * durationMs / 1000
             val freq = if (highPitch) 1320.0 else 880.0
-            val buffer = ShortArray(numSamples * 2)
             val amp = (Short.MAX_VALUE * 0.6).toInt()
             val attack = 200
             val release = 500
-            for (i in 0 until numSamples) {
+            for (i in 0 until stereoNumSamples) {
                 val env = when {
                     i < attack -> i / attack.toFloat()
-                    numSamples - i < release -> (numSamples - i) / release.toFloat()
+                    stereoNumSamples - i < release -> (stereoNumSamples - i) / release.toFloat()
                     else -> 1f
                 }
-                val s = (amp * env * sin(2 * PI * freq * i / sampleRate)).toInt()
-                buffer[i * 2] = (s * leftVol).toInt().coerceIn(-32768, 32767).toShort()
-                buffer[i * 2 + 1] = (s * rightVol).toInt().coerceIn(-32768, 32767).toShort()
+                val s = (amp * env * sin(2 * PI * freq * i / stereoSampleRate)).toInt()
+                stereoBuffer[i * 2] = (s * leftVol).toInt().coerceIn(-32768, 32767).toShort()
+                stereoBuffer[i * 2 + 1] = (s * rightVol).toInt().coerceIn(-32768, 32767).toShort()
             }
-            val track = AudioTrack.Builder()
+
+            val track = stereoTrack ?: AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
@@ -994,23 +1015,31 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 )
                 .setAudioFormat(
                     AudioFormat.Builder()
-                        .setSampleRate(sampleRate)
+                        .setSampleRate(stereoSampleRate)
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                         .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
                         .build()
                 )
-                .setBufferSizeInBytes(buffer.size * 2)
-                .setTransferMode(AudioTrack.MODE_STATIC)
+                .setBufferSizeInBytes(stereoBuffer.size * 2)
+                .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
-            track.write(buffer, 0, buffer.size)
+                .also { stereoTrack = it }
+
+            // 이전 재생이 끝났든 아니든 새 PCM 데이터를 흘려보내기 전에 멈춤+flush
+            try {
+                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) track.pause()
+                track.flush()
+            } catch (_: Exception) {}
+            track.write(stereoBuffer, 0, stereoBuffer.size)
             track.play()
-            lifecycleScope.launch {
-                delay((durationMs + 80).toLong())
-                try { track.stop() } catch (_: Exception) {}
-                try { track.release() } catch (_: Exception) {}
-            }
         } catch (_: Exception) {
         }
+    }
+
+    private fun releaseStereoTrack() {
+        try { stereoTrack?.stop() } catch (_: Exception) {}
+        try { stereoTrack?.release() } catch (_: Exception) {}
+        stereoTrack = null
     }
 
     // ========== 안내 메시지 수신 ==========
@@ -1286,6 +1315,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         directionalBeaconJob?.cancel()
         tts.shutdown()
         toneGenerator?.release()
+        releaseStereoTrack()
         tMapView?.onDestroy()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }

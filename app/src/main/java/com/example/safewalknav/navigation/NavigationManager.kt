@@ -1,9 +1,13 @@
 package com.example.safewalknav.navigation
 
 import android.location.Location
+import android.util.Log
 import com.example.safewalknav.location.LocationTracker
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import java.io.BufferedWriter
+import java.io.File
+import java.io.FileWriter
 import kotlin.math.abs
 
 /**
@@ -58,6 +62,26 @@ class NavigationManager(
     private var lastCornerAnnouncedIdx = -1   // 폴리라인 코너 중복 안내 방지
     private var lastRoadType = -1 // 이전 구간 도로 유형 (전환 안내용)
 
+    // ========== Heading Smoothing (Circular Kalman Filter) ==========
+    // bearing(원형각)은 0/360 경계 문제로 일반 Kalman을 직접 못 씀.
+    // sin/cos 두 직교 성분으로 분해해서 각 성분에 1D Kalman을 돌리고 atan2로 복원.
+    // measurement_noise는 GPS accuracy 기반 동적 설정 (정확도 나쁘면 noise↑ → Kalman gain↓ → 이전 추정값 유지).
+    // tools/heading_analysis.py 의 circular_kalman_filter() 와 동일 파라미터.
+    private var sinEstimate = 0.0   // sin 성분 추정값
+    private var cosEstimate = 1.0   // cos 성분 추정값 (초기값: 북쪽=0도)
+    private var kalmanUncertainty = KALMAN_INITIAL_UNCERTAINTY  // 추정 불확실성
+    private var smoothedHeading = 0f  // 필터링된 heading (degree)
+    private var headingInitialized = false
+    private var lastKalmanGain = 0.0  // 최근 Kalman gain (CSV 로그용)
+
+    // ========== CSV 로그 (Heading 분석용) ==========
+    // MainActivity가 setLogDirectory(context.getExternalFilesDir(DIRECTORY_DOCUMENTS))로 지정.
+    // 미지정이면 로그 비활성.
+    private var logDirectory: File? = null
+    private var logWriter: BufferedWriter? = null
+    // MainActivity 센서 퓨전(가속도+자력계) azimuth. 미갱신이면 -1.
+    private var latestCompassHeading: Float = -1f
+
     // 도착지 주변 정보 캐시 (API 반복 호출 방지)
     private var cachedNearbyPOIs: List<POIResult> = emptyList()
     private var cachedAddress: String? = null
@@ -68,6 +92,25 @@ class NavigationManager(
         private set
     var destinationFrontLon: Double? = null
         private set
+
+    // ========== 외부 주입 (로깅/센서) ==========
+
+    /**
+     * CSV 로그 저장 디렉터리 지정.
+     * MainActivity onCreate에서 `context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)`로 한 번 호출한다.
+     * targetSdk 34 환경에서 권한 없이 쓰기 가능한 app-scoped 경로를 사용한다.
+     */
+    fun setLogDirectory(dir: File?) {
+        logDirectory = dir
+    }
+
+    /**
+     * MainActivity의 센서 퓨전(가속도+자력계) azimuth를 최신값으로 받는다.
+     * CSV `rotation_vector_heading` 필드 기록용. heading 판정 로직 자체는 GPS bearing 기반 그대로 유지.
+     */
+    fun updateCompassHeading(azimuth: Float) {
+        latestCompassHeading = azimuth
+    }
 
     // ========== 경로 탐색 ==========
 
@@ -117,6 +160,17 @@ class NavigationManager(
         lastCornerAnnouncedIdx = -1
         lastRoadType = if (route.waypoints.isNotEmpty()) route.waypoints[0].roadType else -1
 
+        // Heading Kalman 상태 리셋
+        sinEstimate = 0.0
+        cosEstimate = 1.0
+        kalmanUncertainty = KALMAN_INITIAL_UNCERTAINTY
+        smoothedHeading = 0f
+        headingInitialized = false
+        lastKalmanGain = 0.0
+
+        // CSV 로그 시작 (logDirectory 미지정이면 no-op)
+        openLogWriter()
+
         val totalMin = route.totalTime / 60
         val totalM = route.totalDistance
         _guidanceMessage.value =
@@ -145,6 +199,17 @@ class NavigationManager(
         arrivalInfoLoaded = false
         consecutiveDeviationCount = 0
         consecutiveRerouteCount = 0
+
+        // Heading Kalman 상태 리셋
+        sinEstimate = 0.0
+        cosEstimate = 1.0
+        kalmanUncertainty = KALMAN_INITIAL_UNCERTAINTY
+        smoothedHeading = 0f
+        headingInitialized = false
+        lastKalmanGain = 0.0
+
+        // CSV 로그 종료
+        closeLogWriter()
     }
 
     private fun onArrived() {
@@ -156,6 +221,17 @@ class NavigationManager(
         lastSpokenMessage = ""
         consecutiveDeviationCount = 0
         consecutiveRerouteCount = 0
+
+        // Heading Kalman 상태 리셋
+        sinEstimate = 0.0
+        cosEstimate = 1.0
+        kalmanUncertainty = KALMAN_INITIAL_UNCERTAINTY
+        smoothedHeading = 0f
+        headingInitialized = false
+        lastKalmanGain = 0.0
+
+        // CSV 로그 종료
+        closeLogWriter()
     }
 
     // ========== 경로 추종 ==========
@@ -166,9 +242,14 @@ class NavigationManager(
 
         val currentLat = location.latitude
         val currentLon = location.longitude
-        val userBearing = location.bearing
         val speed = location.speed  // m/s
+        val rawBearing = location.bearing
+        // GPS accuracy는 Kalman measurement_noise로 사용 (정확도 나쁘면 측정 영향력↓)
         val accuracy = if (location.hasAccuracy()) location.accuracy else 10f
+        val userBearing = updateSmoothedHeading(rawBearing, speed, accuracy)
+
+        // CSV 로그 기록 (기존 로직에 영향 없음, writer 미초기화 시 no-op)
+        writeLogRow(rawBearing, speed, accuracy, currentLat, currentLon)
 
         // 도착 판정은 실제 POI 또는 입구(frontLat) 중 더 가까운 쪽 기준
         val distToDest = LocationTracker.distanceBetween(
@@ -202,8 +283,13 @@ class NavigationManager(
         // 경로 위에 있으면 연속 재탐색 카운트 리셋
         consecutiveRerouteCount = 0
 
+        // Forward-Only Waypoint 동기화 (지나간 waypoint를 다시 잡는 문제 방지)
+        currentRoute?.let {
+            syncWaypointIndexForwardOnly(it, currentLat, currentLon)
+        }
+
         // waypoint 안내
-        updateWaypointGuidance(currentLat, currentLon, userBearing)
+        updateWaypointGuidance(currentLat, currentLon)
 
         // 폴리라인 기반 코너 선제 안내 (T-Map waypoint 누락 보완)
         if (_arrivalState.value == ArrivalState.FAR) {
@@ -444,6 +530,14 @@ class NavigationManager(
         const val STATIONARY_SPEED = 0.5f           // 정지 판정 속도 (m/s)
         const val BASE_REROUTE_COOLDOWN = 15_000L   // 기본 재탐색 쿨다운 (ms)
         const val MAX_REROUTE_COOLDOWN = 60_000L    // 최대 재탐색 쿨다운 (ms)
+
+        // ----- Circular Kalman Filter 파라미터 -----
+        // tools/heading_analysis.py 의 circular_kalman_filter() 와 동일 값.
+        const val KALMAN_INITIAL_UNCERTAINTY = 10.0  // 초기 추정 불확실성
+        const val KALMAN_PROCESS_NOISE = 0.5         // 보행자 방향 변화 불확실성
+        const val KALMAN_MEAS_NOISE_GAIN = 3.0       // accuracy 1m → 측정노이즈 3.0
+        const val KALMAN_MEAS_NOISE_FLOOR = 5.0      // accuracy가 매우 좋아도 최소 noise
+        const val KALMAN_STATIONARY_NOISE = 999.0    // 정지 시 GPS bearing 무시
     }
 
     /**
@@ -521,10 +615,9 @@ class NavigationManager(
         }
 
         // 가장 가까운 지점 인덱스 갱신 (뒤로는 안 감)
+        // waypoint 동기화는 updateLocation()에서 syncWaypointIndexForwardOnly로 처리
         if (closestIndex > currentRoutePointIndex) {
             currentRoutePointIndex = closestIndex
-            // routePoint 진행에 맞춰 waypoint 자동 동기화
-            syncWaypointIndex(route)
         }
 
         return minDist
@@ -555,33 +648,69 @@ class NavigationManager(
      * 판정 조건: waypoint이 경로상 현재 위치(currentRoutePointIndex)보다 뒤에 있을 때만 건너뜀
      * → 단순 거리 비교로 "앞에 있는 waypoint"를 실수로 건너뛰는 문제 방지
      */
-    private fun syncWaypointIndex(route: TMapRoute) {
-        if (route.routePoints.size < 2) return
+    /**
+     * Forward-Only Waypoint Selection Algorithm
+     *
+     * 기존 문제: 단순 거리 기반으로 가장 가까운 waypoint를 선택하면
+     * U자 도로에서 이미 지나간 waypoint를 다시 타겟으로 잡음.
+     *
+     * 해결:
+     * 1. currentWaypointIndex는 절대 뒤로 가지 않는다 (forward-only)
+     * 2. 후보 범위를 currentWaypointIndex ~ +3으로 한정한다
+     * 3. 후보 중 경로상 진행 방향(±90도 이내)에 있는 것만 인정한다
+     * 4. 현재 waypoint에 도달 판정(10m 이내 + 경로상 통과)되면 다음으로 전진
+     */
+    private fun syncWaypointIndexForwardOnly(
+        route: TMapRoute,
+        currentLat: Double,
+        currentLon: Double
+    ) {
+        val waypoints = route.waypoints
+        if (waypoints.isEmpty()) return
 
-        while (currentWaypointIndex < route.waypoints.size) {
-            val wp = route.waypoints[currentWaypointIndex]
+        // Step 1: 현재 waypoint 통과 판정
+        // 현재 타겟 waypoint에 10m 이내이고, 경로상 이미 지나갔으면 전진
+        while (currentWaypointIndex < waypoints.size) {
+            val wp = waypoints[currentWaypointIndex]
+            val distToWp = LocationTracker.distanceBetween(
+                currentLat, currentLon, wp.lat, wp.lon
+            )
 
-            // waypoint에 가장 가까운 routePoint 인덱스를 찾아서
-            // 현재 routePointIndex보다 뒤에 있으면 "지나간 것"으로 판정
-            var closestRouteIdx = 0
-            var closestDist = Float.MAX_VALUE
-            val searchEnd = minOf(route.routePoints.size, currentRoutePointIndex + 15)
-            for (i in maxOf(0, currentRoutePointIndex - 10) until searchEnd) {
-                val rp = route.routePoints[i]
-                val d = LocationTracker.distanceBetween(wp.lat, wp.lon, rp.lat, rp.lon)
-                if (d < closestDist) {
-                    closestDist = d
-                    closestRouteIdx = i
-                }
-            }
+            if (distToWp > 10f) break  // 아직 멀면 중단
 
-            // waypoint의 경로상 위치가 현재 진행 위치보다 뒤에 있으면 건너뛰기
-            if (closestRouteIdx < currentRoutePointIndex - 2) {
+            // 경로상 통과 확인: waypoint에 가장 가까운 routePoint 인덱스가
+            // 현재 routePoint 진행 인덱스보다 뒤에 있는지 확인
+            val wpRouteIdx = findClosestRoutePointIndex(route, wp.lat, wp.lon)
+            if (wpRouteIdx <= currentRoutePointIndex + 2) {
+                // 경로상 이미 지나갔거나 거의 같은 위치 → 전진
                 currentWaypointIndex++
             } else {
-                break
+                break  // 아직 경로상 도달 안 함
             }
         }
+
+    }
+
+    private fun findClosestRoutePointIndex(
+        route: TMapRoute,
+        lat: Double, lon: Double
+    ): Int {
+        val pts = route.routePoints
+        if (pts.isEmpty()) return 0
+
+        var minDist = Float.MAX_VALUE
+        var minIdx = 0
+        val searchStart = maxOf(0, currentRoutePointIndex - 5)
+        val searchEnd = minOf(pts.size, currentRoutePointIndex + 40)
+
+        for (i in searchStart until searchEnd) {
+            val d = LocationTracker.distanceBetween(lat, lon, pts[i].lat, pts[i].lon)
+            if (d < minDist) {
+                minDist = d
+                minIdx = i
+            }
+        }
+        return minIdx
     }
 
     /**
@@ -637,7 +766,7 @@ class NavigationManager(
     // ========== Waypoint 안내 ==========
 
     private fun updateWaypointGuidance(
-        currentLat: Double, currentLon: Double, userBearing: Float
+        currentLat: Double, currentLon: Double
     ) {
         val route = currentRoute ?: return
         if (currentWaypointIndex >= route.waypoints.size) return
@@ -698,35 +827,75 @@ class NavigationManager(
         val distToNext = LocationTracker.distanceBetween(
             currentLat, currentLon, nextWaypoint.lat, nextWaypoint.lon
         )
-        // 다음 waypoint이 가까우면 waypoint 안내와 충돌 방지
-        if (distToNext <= 25f) return
+
+        // 횡단보도 구간 여부 — 진입 직전 ~ 통과 직후 윈도우.
+        // 횡단보도에서는 직진 유지가 안전상 매우 중요하므로 임계값/쿨다운을 강화한다.
+        val onCrosswalk = isOnCrosswalkSegment(currentLat, currentLon)
+
+        // 다음 waypoint와의 충돌 방지 게이트:
+        //   일반:    25m (waypoint 사전 안내 30m 윈도우와 자연스럽게 분리)
+        //   횡단보도: 5m  (도착 임박 직전까지 cross-track 보정을 살려둠)
+        val waypointGuard = if (onCrosswalk) 5f else 25f
+        if (distToNext <= waypointGuard) return
 
         // 정지 상태에서는 bearing 부정확 — 방향 보정 안내는 생략, 위치 안내만
         val stationary = speed < 0.5f
 
-        // 경로 진행 방향 계산 (앞으로 ~10m lookahead)
-        val routeBearing = computeRouteBearingAhead(10f) ?: return
+        // 경로 진행 방향 계산 (앞으로 ~25m lookahead — 완만한 곡률도 감지)
+        val routeBearing = computeRouteBearingAhead(25f) ?: return
 
         val now = System.currentTimeMillis()
 
-        // 점진적/회전 보정 (최근 8초 내 유사 안내 없었을 때)
-        if (!stationary) {
+        // 횡단보도 구간 강화 임계값:
+        //   bearing diff: 15° → 10°
+        //   cross-track:  2m  → 1.0m
+        //   쿨다운:        6s  → 3s
+        val cooldownMs = if (onCrosswalk) 3_000L else 6_000L
+        val bearingThreshold = if (onCrosswalk) 10f else 15f
+        val crossTrackThreshold = if (onCrosswalk) 1.0f else 2f
+
+        // 점진적 곡선 대응: bearing 차이 + 측면 이탈(cross-track) 둘 다 판정
+        if (!stationary && now - lastStraightGuidanceTime >= cooldownMs) {
             val diff = angleDiff(routeBearing, userBearing)
             val absDiff = abs(diff)
-            if (absDiff >= 20f && now - lastStraightGuidanceTime >= 8_000L) {
+            val crossTrack = computeSignedCrossTrack(currentLat, currentLon)
+            val absCross = abs(crossTrack)
+
+            // 1. bearing 기반 (큰 편차 우선)
+            if (absDiff >= bearingThreshold) {
                 lastStraightGuidanceTime = now
                 val side = if (diff > 0) "오른쪽" else "왼쪽"
-                val message = if (absDiff >= 45f) {
-                    "${side}으로 도세요"
+                val message = if (onCrosswalk) {
+                    // 횡단보도에서는 짧고 즉각적인 멘트로 — 직진 유지에 집중
+                    "횡단보도. 약간 ${side}으로"
+                } else when {
+                    absDiff >= 90f -> "방향이 크게 벗어났습니다. ${side}으로 돌아주세요"
+                    absDiff >= 45f -> "${side}으로 방향을 틀어주세요"
+                    else -> "약간 ${side}으로 가세요"
+                }
+                speak(message, forceRepeat = true)
+                return
+            }
+
+            // 2. cross-track 기반 (완만한 곡선에서 점진적 측면 드리프트 감지)
+            // crossTrack > 0 → 사용자가 경로 왼쪽에 있음 → 오른쪽으로 가야 함
+            if (absCross >= crossTrackThreshold) {
+                lastStraightGuidanceTime = now
+                val side = if (crossTrack > 0) "오른쪽" else "왼쪽"
+                val message = if (onCrosswalk) {
+                    "횡단보도. 약간 ${side}으로"
+                } else if (absCross >= 5f) {
+                    "${side}으로 이동하세요"
                 } else {
-                    "${side}으로 살짝 꺾으세요"
+                    "약간 ${side}으로 가세요"
                 }
                 speak(message, forceRepeat = true)
                 return
             }
         }
 
-        // 직진 안내 (20초 간격 유지)
+        // 직진 안내 (20초 간격 유지) — 횡단보도에서는 직진 안내 자체는 생략 (중복 방지)
+        if (onCrosswalk) return
         if (now - lastStraightGuidanceTime < 20_000L) return
         lastStraightGuidanceTime = now
 
@@ -736,6 +905,56 @@ class NavigationManager(
             "${distToDestination.toInt()}미터"
         }
         speak("직진하세요. 목적지까지 $distText")
+    }
+
+    /**
+     * waypoint가 횡단보도 관련인지 판정.
+     * - pointType == "CROSSWALK"
+     * - turnType 211~217: T-Map 횡단보도 안내 코드 그룹 (211 횡단보도, 212~217 좌/우/8/10/2/4시 방향 횡단보도)
+     */
+    private fun isCrosswalkWaypoint(wp: Waypoint): Boolean {
+        return wp.pointType == "CROSSWALK" || wp.turnType in 211..217
+    }
+
+    /**
+     * 현재 위치가 횡단보도 구간(진입 직전 ~ 통과 직후) 안에 있는지.
+     *
+     * 활성화 윈도우:
+     *   1. 다음 waypoint가 횡단보도이고 30m 이내 → 진입 직전
+     *   2. 직전 waypoint가 횡단보도이고 20m 이내 → 통과 직후 (인도 복귀까지)
+     *
+     * 이 윈도우 안에서는 provideDirectionalGuidance() 가 임계값을 강화해서
+     * 작은 쏠림도 즉시 보정 안내한다.
+     */
+    private fun isOnCrosswalkSegment(currentLat: Double, currentLon: Double): Boolean {
+        val route = currentRoute ?: return false
+        val waypoints = route.waypoints
+        if (waypoints.isEmpty()) return false
+
+        // 1) 다음 waypoint = 진입 예정 횡단보도
+        if (currentWaypointIndex < waypoints.size) {
+            val next = waypoints[currentWaypointIndex]
+            if (isCrosswalkWaypoint(next)) {
+                val dist = LocationTracker.distanceBetween(
+                    currentLat, currentLon, next.lat, next.lon
+                )
+                if (dist <= 30f) return true
+            }
+        }
+
+        // 2) 직전 waypoint = 방금 통과한 횡단보도
+        val prevIdx = currentWaypointIndex - 1
+        if (prevIdx in waypoints.indices) {
+            val prev = waypoints[prevIdx]
+            if (isCrosswalkWaypoint(prev)) {
+                val dist = LocationTracker.distanceBetween(
+                    currentLat, currentLon, prev.lat, prev.lon
+                )
+                if (dist <= 20f) return true
+            }
+        }
+
+        return false
     }
 
     /**
@@ -794,6 +1013,45 @@ class NavigationManager(
     }
 
     /**
+     * 현재 경로 선분에 대한 부호 있는 수직 이탈 (cross-track error, 미터)
+     *
+     * 완만한 곡선 도로에서 사용자가 직진만 하면 경로 선에서 점점 벗어나게 된다.
+     * bearing 차이가 아직 작을 때에도 이 측면 드리프트는 감지 가능.
+     *
+     * @return 양수면 경로의 왼쪽으로 이탈, 음수면 오른쪽으로 이탈, 0이면 경로 위
+     *         → 양수일 때 사용자는 "오른쪽으로 가세요" 안내를 받아야 함
+     */
+    private fun computeSignedCrossTrack(
+        currentLat: Double, currentLon: Double
+    ): Float {
+        val route = currentRoute ?: return 0f
+        val pts = route.routePoints
+        if (pts.size < 2) return 0f
+
+        val idx = currentRoutePointIndex.coerceAtMost(pts.size - 2)
+        val a = pts[idx]
+        val b = pts[idx + 1]
+
+        // 현재 위도 기준 로컬 ENU 근사 (x=east, y=north, 단위: m)
+        val latScale = 111320.0
+        val lonScale = 111320.0 * kotlin.math.cos(Math.toRadians(currentLat))
+
+        val ax = (a.lon - currentLon) * lonScale
+        val ay = (a.lat - currentLat) * latScale
+        val bx = (b.lon - currentLon) * lonScale
+        val by = (b.lat - currentLat) * latScale
+
+        val dx = bx - ax
+        val dy = by - ay
+        val len = kotlin.math.sqrt(dx * dx + dy * dy)
+        if (len < 0.001) return 0f
+
+        // P=(0,0) 기준 AP = (-ax,-ay), cross(AB, AP) = dx*(-ay) - dy*(-ax) = dy*ax - dx*ay
+        val cross = dy * ax - dx * ay
+        return (cross / len).toFloat()
+    }
+
+    /**
      * 현재 위치부터 lookAheadMeters 앞까지 경로의 전체 진행 방향 (bearing)
      */
     private fun computeRouteBearingAhead(lookAheadMeters: Float): Float? {
@@ -818,6 +1076,79 @@ class NavigationManager(
 
         val endPt = pts[endIdx]
         return bearing(startPt.lat, startPt.lon, endPt.lat, endPt.lon)
+    }
+
+    /**
+     * Circular Kalman Filter Heading
+     *
+     * 각도 데이터(0~360)를 sin/cos 두 직교 성분으로 분해하여 각각 1D Kalman을 적용한 뒤
+     * atan2로 다시 합성한다. 단순 EMA로는 350°/10° 같은 경계에서 평균이 180°로 잘못 나오는
+     * 문제가 있는데, sin/cos 공간에서는 그런 경계가 사라진다.
+     *
+     * Process noise (KALMAN_PROCESS_NOISE):
+     *   보행자 진행 방향이 한 스텝 사이에 얼마나 바뀔 수 있다고 보는지의 분산 추정.
+     *
+     * Measurement noise (동적):
+     *   - speed < 0.5 m/s: KALMAN_STATIONARY_NOISE (999) — 정지 시 GPS bearing은 잡음 그 자체이므로 사실상 무시
+     *   - 그 외: max(KALMAN_MEAS_NOISE_FLOOR, accuracy * KALMAN_MEAS_NOISE_GAIN)
+     *           accuracy(GPS 수평 정확도, m)가 클수록(=신호 나쁨) 측정을 덜 믿는다.
+     *
+     * Kalman gain K = predicted_uncertainty / (predicted_uncertainty + measurement_noise)
+     *   K가 1에 가까우면 측정값 적극 수용, 0에 가까우면 이전 추정값 유지.
+     *
+     * @param rawHeading GPS bearing 또는 센서 heading (0~360도)
+     * @param speed 현재 이동 속도 (m/s)
+     * @param accuracy GPS 수평 정확도 (m). 작을수록 정확.
+     * @return 필터링된 heading (0~360도)
+     */
+    private fun updateSmoothedHeading(
+        rawHeading: Float, speed: Float, accuracy: Float
+    ): Float {
+        // 초기 1회: 측정값을 그대로 추정값으로 사용
+        if (!headingInitialized) {
+            val rad = Math.toRadians(rawHeading.toDouble())
+            sinEstimate = kotlin.math.sin(rad)
+            cosEstimate = kotlin.math.cos(rad)
+            kalmanUncertainty = KALMAN_INITIAL_UNCERTAINTY
+            smoothedHeading = ((rawHeading % 360f) + 360f) % 360f
+            lastKalmanGain = 1.0
+            headingInitialized = true
+            return smoothedHeading
+        }
+
+        // ----- Predict 단계 -----
+        // 보행자 운동 모델 없이 "방향이 그대로 유지된다" 고 보고 다음 추정의 불확실성만 process noise만큼 키운다.
+        val predictedSin = sinEstimate
+        val predictedCos = cosEstimate
+        val predictedUncertainty = kalmanUncertainty + KALMAN_PROCESS_NOISE
+
+        // ----- Measurement noise 결정 -----
+        val measurementNoise: Double = if (speed < STATIONARY_SPEED) {
+            // 정지 상태: GPS bearing은 사실상 노이즈. 거의 0에 가까운 gain → 추정값 유지.
+            KALMAN_STATIONARY_NOISE
+        } else {
+            kotlin.math.max(
+                KALMAN_MEAS_NOISE_FLOOR,
+                accuracy.toDouble() * KALMAN_MEAS_NOISE_GAIN
+            )
+        }
+
+        // ----- Kalman gain -----
+        val gain = predictedUncertainty / (predictedUncertainty + measurementNoise)
+        lastKalmanGain = gain
+
+        // ----- Update (sin/cos 각각 1D Kalman) -----
+        val rad = Math.toRadians(rawHeading.toDouble())
+        val measSin = kotlin.math.sin(rad)
+        val measCos = kotlin.math.cos(rad)
+
+        sinEstimate = predictedSin + gain * (measSin - predictedSin)
+        cosEstimate = predictedCos + gain * (measCos - predictedCos)
+        kalmanUncertainty = (1.0 - gain) * predictedUncertainty
+
+        val resultRad = kotlin.math.atan2(sinEstimate, cosEstimate)
+        smoothedHeading = ((Math.toDegrees(resultRad) + 360.0) % 360.0).toFloat()
+        return smoothedHeading
     }
 
     /** 두 지점 간 방위각 (0~360) */
@@ -911,5 +1242,70 @@ class NavigationManager(
         if (!forceRepeat && message == lastSpokenMessage) return
         lastSpokenMessage = message
         _guidanceMessage.value = message
+    }
+
+    // ========== CSV 로그 헬퍼 ==========
+
+    /**
+     * 내비게이션 시작 시 새 CSV 파일을 연다.
+     * 포맷: timestamp,raw_bearing,rotation_vector_heading,route_bearing,speed,accuracy,lat,lon
+     * logDirectory가 null이면 no-op.
+     */
+    private fun openLogWriter() {
+        closeLogWriter()
+        val dir = logDirectory ?: return
+        try {
+            if (!dir.exists()) dir.mkdirs()
+            val file = File(dir, "SafeWalk_heading_log_${System.currentTimeMillis()}.csv")
+            val writer = BufferedWriter(FileWriter(file))
+            // 컬럼 추가: kalman_heading, kalman_gain
+            // 기존 heading_analysis.py는 raw_bearing/route_bearing만 보면 되므로 호환성 유지됨
+            writer.write(
+                "timestamp,raw_bearing,rotation_vector_heading,route_bearing," +
+                        "kalman_heading,kalman_gain,speed,accuracy,lat,lon"
+            )
+            writer.newLine()
+            logWriter = writer
+            Log.d("HeadingLog", "CSV 로그 시작: ${file.absolutePath}")
+        } catch (e: Exception) {
+            Log.w("HeadingLog", "CSV 로그 초기화 실패: ${e.message}")
+            logWriter = null
+        }
+    }
+
+    private fun closeLogWriter() {
+        val writer = logWriter ?: return
+        try {
+            writer.flush()
+            writer.close()
+        } catch (e: Exception) {
+            Log.w("HeadingLog", "CSV 로그 종료 실패: ${e.message}")
+        }
+        logWriter = null
+    }
+
+    /**
+     * 매 GPS 업데이트마다 CSV 한 줄 기록.
+     * route_bearing은 computeRouteBearingAhead(25m) 결과, null이면 -1.
+     * rotation_vector_heading은 MainActivity가 updateCompassHeading으로 갱신한 최신값(미갱신 시 -1).
+     */
+    private fun writeLogRow(
+        rawBearing: Float, speed: Float, accuracy: Float,
+        lat: Double, lon: Double
+    ) {
+        val writer = logWriter ?: return
+        try {
+            val routeBearing = computeRouteBearingAhead(25f) ?: -1f
+            // Kalman 미초기화 상태(첫 GPS 도착 전 호출 등) 대비
+            val kalmanHeading = if (headingInitialized) smoothedHeading else -1f
+            val line = "${System.currentTimeMillis()},$rawBearing,$latestCompassHeading," +
+                    "$routeBearing,$kalmanHeading,$lastKalmanGain,$speed,$accuracy,$lat,$lon"
+            writer.write(line)
+            writer.newLine()
+            // 강제 종료 대비 즉시 flush (1Hz 수준이라 오버헤드 무시 가능)
+            writer.flush()
+        } catch (e: Exception) {
+            Log.w("HeadingLog", "CSV 로그 쓰기 실패: ${e.message}")
+        }
     }
 }
