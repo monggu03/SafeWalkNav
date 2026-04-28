@@ -52,6 +52,9 @@ android {
 }
 
 dependencies {
+    // KMM 공통 모듈 (Kotlin Multiplatform shared)
+    implementation(project(":shared"))
+
     // Firebase BoM
     implementation(platform("com.google.firebase:firebase-bom:32.7.0"))
     implementation("com.google.firebase:firebase-analytics")
