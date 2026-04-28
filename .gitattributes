@@ -1,0 +1,40 @@
+# 모든 텍스트 파일은 LF로 (Linux/Mac/GitHub 표준)
+* text=auto eol=lf
+
+# Windows 전용 스크립트는 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 명시적 텍스트 (소스 코드)
+*.kt text eol=lf
+*.kts text eol=lf
+*.java text eol=lf
+*.swift text eol=lf
+*.xml text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.gradle text eol=lf
+*.properties text eol=lf
+*.sh text eol=lf
+*.toml text eol=lf
+
+# 바이너리 (변환 절대 금지)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.aar binary
+*.jar binary
+*.tflite binary
+*.mlpackage binary
+*.pt binary
+*.onnx binary
+*.keystore binary
+*.jks binary
+*.zip binary
+*.apk binary
+*.aab binary
+*.bin binary
