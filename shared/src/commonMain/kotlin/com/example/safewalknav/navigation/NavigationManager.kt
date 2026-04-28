@@ -1,11 +1,7 @@
 package com.example.safewalknav.navigation
 
-import com.example.safewalknav.location.LocationTracker
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import java.io.BufferedWriter
-import java.io.File
-import java.io.FileWriter
 import kotlin.math.abs
 
 /**
@@ -19,7 +15,8 @@ import kotlin.math.abs
  * 4. ARRIVED (2m): 도착 + 주변 랜드마크 확인
  */
 class NavigationManager(
-    private val tMapApiClient: TMapApiClient
+    private val tMapApiClient: TMapApiClient,
+    private val headingLogger: HeadingLogger = NoopHeadingLogger,
 ) {
     var currentRoute: TMapRoute? = null
         private set
@@ -66,10 +63,8 @@ class NavigationManager(
     private val kalmanHeading = KalmanHeading(stationarySpeed = STATIONARY_SPEED)
 
     // ========== CSV 로그 (Heading 분석용) ==========
-    // MainActivity가 setLogDirectory(context.getExternalFilesDir(DIRECTORY_DOCUMENTS))로 지정.
-    // 미지정이면 로그 비활성.
-    private var logDirectory: File? = null
-    private var logWriter: BufferedWriter? = null
+    // 실제 저장은 생성자에서 주입받은 headingLogger 가 담당. 기본값은 NoopHeadingLogger.
+    // Android 실 사용 시 MainActivity 가 AndroidHeadingLogger 를 주입.
     // MainActivity 센서 퓨전(가속도+자력계) azimuth. 미갱신이면 -1.
     private var latestCompassHeading: Float = -1f
 
@@ -84,16 +79,7 @@ class NavigationManager(
     var destinationFrontLon: Double? = null
         private set
 
-    // ========== 외부 주입 (로깅/센서) ==========
-
-    /**
-     * CSV 로그 저장 디렉터리 지정.
-     * MainActivity onCreate에서 `context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)`로 한 번 호출한다.
-     * targetSdk 34 환경에서 권한 없이 쓰기 가능한 app-scoped 경로를 사용한다.
-     */
-    fun setLogDirectory(dir: File?) {
-        logDirectory = dir
-    }
+    // ========== 외부 주입 (센서) ==========
 
     /**
      * MainActivity의 센서 퓨전(가속도+자력계) azimuth를 최신값으로 받는다.
@@ -228,13 +214,13 @@ class NavigationManager(
         writeLogRow(rawBearing, speed, accuracy, currentLat, currentLon)
 
         // 도착 판정은 실제 POI 또는 입구(frontLat) 중 더 가까운 쪽 기준
-        val distToDest = LocationTracker.distanceBetween(
+        val distToDest = distanceBetween(
             currentLat, currentLon, destinationLat, destinationLon
         )
         val fLat = destinationFrontLat
         val fLon = destinationFrontLon
         val distToDestination = if (fLat != null && fLon != null) {
-            val distToFront = LocationTracker.distanceBetween(
+            val distToFront = distanceBetween(
                 currentLat, currentLon, fLat, fLon
             )
             minOf(distToDest, distToFront)
@@ -373,7 +359,7 @@ class NavigationManager(
             }
         } else if (newState == ArrivalState.APPROACHING || newState == ArrivalState.NEAR) {
             // 같은 상태 유지 시: NEAR=2초, APPROACHING=5초 간격 업데이트
-            val now = System.currentTimeMillis()
+            val now = currentTimeMillis()
             val interval = if (newState == ArrivalState.NEAR) 2000L else 5000L
             if (now - lastGuidanceTime < interval) return
             lastGuidanceTime = now
@@ -398,7 +384,7 @@ class NavigationManager(
         return if (speed < 0.3f) {
             "전방"
         } else {
-            LocationTracker.getClockDirection(
+            getClockDirection(
                 currentLat, currentLon,
                 destinationLat, destinationLon,
                 userBearing
@@ -447,13 +433,13 @@ class NavigationManager(
         val fLat = destinationFrontLat ?: return ""
         val fLon = destinationFrontLon ?: return ""
         // frontLat/Lon이 목적지 좌표와 거의 같으면 의미 없음
-        val frontDist = LocationTracker.distanceBetween(destinationLat, destinationLon, fLat, fLon)
+        val frontDist = distanceBetween(destinationLat, destinationLon, fLat, fLon)
         if (frontDist < 2f) return ""
 
         return if (speed < 0.3f) {
             "입구가 근처에 있습니다"
         } else {
-            val dir = LocationTracker.getClockDirection(
+            val dir = getClockDirection(
                 currentLat, currentLon, fLat, fLon, userBearing
             )
             "입구는 ${dir} 방향입니다"
@@ -603,7 +589,7 @@ class NavigationManager(
         var minDist = Float.MAX_VALUE
         for (i in maxOf(0, currentWaypointIndex - 1) until checkRange) {
             val wp = route.waypoints[i]
-            val dist = LocationTracker.distanceBetween(
+            val dist = distanceBetween(
                 currentLat, currentLon, wp.lat, wp.lon
             )
             if (dist < minDist) minDist = dist
@@ -641,7 +627,7 @@ class NavigationManager(
         // 현재 타겟 waypoint에 10m 이내이고, 경로상 이미 지나갔으면 전진
         while (currentWaypointIndex < waypoints.size) {
             val wp = waypoints[currentWaypointIndex]
-            val distToWp = LocationTracker.distanceBetween(
+            val distToWp = distanceBetween(
                 currentLat, currentLon, wp.lat, wp.lon
             )
 
@@ -673,7 +659,7 @@ class NavigationManager(
         val searchEnd = minOf(pts.size, currentRoutePointIndex + 40)
 
         for (i in searchStart until searchEnd) {
-            val d = LocationTracker.distanceBetween(lat, lon, pts[i].lat, pts[i].lon)
+            val d = distanceBetween(lat, lon, pts[i].lat, pts[i].lon)
             if (d < minDist) {
                 minDist = d
                 minIdx = i
@@ -694,7 +680,7 @@ class NavigationManager(
         val dx = bx - ax
         val dy = by - ay
         if (dx == 0.0 && dy == 0.0) {
-            return LocationTracker.distanceBetween(px, py, ax, ay)
+            return distanceBetween(px, py, ax, ay)
         }
 
         val t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)
@@ -702,7 +688,7 @@ class NavigationManager(
 
         val closestLat = ax + clampedT * dx
         val closestLon = ay + clampedT * dy
-        return LocationTracker.distanceBetween(px, py, closestLat, closestLon)
+        return distanceBetween(px, py, closestLat, closestLon)
     }
 
     /**
@@ -710,7 +696,7 @@ class NavigationManager(
      * 연속 재탐색 시 간격이 늘어남: 15초 → 30초 → 60초
      */
     private suspend fun reroute(currentLat: Double, currentLon: Double) {
-        val now = System.currentTimeMillis()
+        val now = currentTimeMillis()
         val cooldown = minOf(
             BASE_REROUTE_COOLDOWN * (1 + consecutiveRerouteCount),
             MAX_REROUTE_COOLDOWN
@@ -741,7 +727,7 @@ class NavigationManager(
         if (currentWaypointIndex >= route.waypoints.size) return
 
         val nextWaypoint = route.waypoints[currentWaypointIndex]
-        val distToNext = LocationTracker.distanceBetween(
+        val distToNext = distanceBetween(
             currentLat, currentLon, nextWaypoint.lat, nextWaypoint.lon
         )
 
@@ -764,7 +750,7 @@ class NavigationManager(
                 speak(message)
             }
             currentWaypointIndex++
-            lastStraightGuidanceTime = System.currentTimeMillis()
+            lastStraightGuidanceTime = currentTimeMillis()
         } else if (distToNext <= 30f && isKeyPoint(nextWaypoint)
             && currentWaypointIndex != lastPreAnnouncedIndex
         ) {
@@ -773,7 +759,7 @@ class NavigationManager(
             val message = "${distToNext.toInt()}미터 앞 ${nextWaypoint.description}"
             speak(message)
             // 사전 안내가 나왔으면 직진 타이머 리셋 (중복 방지)
-            lastStraightGuidanceTime = System.currentTimeMillis()
+            lastStraightGuidanceTime = currentTimeMillis()
         }
     }
 
@@ -793,7 +779,7 @@ class NavigationManager(
         if (route.routePoints.size < 2) return
 
         val nextWaypoint = route.waypoints[currentWaypointIndex]
-        val distToNext = LocationTracker.distanceBetween(
+        val distToNext = distanceBetween(
             currentLat, currentLon, nextWaypoint.lat, nextWaypoint.lon
         )
 
@@ -815,7 +801,7 @@ class NavigationManager(
         // 경로 진행 방향 계산 (앞으로 ~25m lookahead — 완만한 곡률도 감지)
         val routeBearing = computeRouteBearingAhead(25f) ?: return
 
-        val now = System.currentTimeMillis()
+        val now = currentTimeMillis()
 
         // 횡단보도 구간 강화 임계값:
         //   bearing diff: 15° → 10°
@@ -900,7 +886,7 @@ class NavigationManager(
         // 다음 waypoint이 너무 가까우면 waypoint 안내와 충돌
         if (currentWaypointIndex < route.waypoints.size) {
             val wp = route.waypoints[currentWaypointIndex]
-            val distWp = LocationTracker.distanceBetween(
+            val distWp = distanceBetween(
                 currentLat, currentLon, wp.lat, wp.lon
             )
             if (distWp <= 15f) return
@@ -914,7 +900,7 @@ class NavigationManager(
             val a = pts[i]
             val b = pts[i + 1]
             val c = pts[i + 2]
-            val seg = LocationTracker.distanceBetween(a.lat, a.lon, b.lat, b.lon)
+            val seg = distanceBetween(a.lat, a.lon, b.lat, b.lon)
             accumulated += seg
             if (accumulated > 15f) return
 
@@ -926,11 +912,11 @@ class NavigationManager(
                 val cornerIdx = i + 1
                 if (cornerIdx == lastCornerAnnouncedIdx) return
                 // 코너까지 거리 (현재 위치 → 코너점)
-                val distToCorner = LocationTracker.distanceBetween(
+                val distToCorner = distanceBetween(
                     currentLat, currentLon, b.lat, b.lon
                 ).toInt().coerceAtLeast(1)
                 lastCornerAnnouncedIdx = cornerIdx
-                lastStraightGuidanceTime = System.currentTimeMillis()
+                lastStraightGuidanceTime = currentTimeMillis()
                 val side = if (diff > 0) "오른쪽" else "왼쪽"
                 val verb = if (abs(diff) >= 60f) "도세요" else "꺾으세요"
                 speak("${distToCorner}미터 앞 ${side}으로 ${verb}")
@@ -958,7 +944,7 @@ class NavigationManager(
         var accumulated = 0f
         var endIdx = startIdx
         for (i in startIdx until pts.size - 1) {
-            val seg = LocationTracker.distanceBetween(
+            val seg = distanceBetween(
                 pts[i].lat, pts[i].lon, pts[i + 1].lat, pts[i + 1].lon
             )
             accumulated += seg
@@ -1058,70 +1044,39 @@ class NavigationManager(
         _guidanceMessage.value = message
     }
 
-    // ========== CSV 로그 헬퍼 ==========
+    // ========== CSV 로그 위임 ==========
+    // 실제 저장 매체는 headingLogger 가 담당 (Android: AndroidHeadingLogger, 미주입: NoopHeadingLogger).
 
-    /**
-     * 내비게이션 시작 시 새 CSV 파일을 연다.
-     * 포맷: timestamp,raw_bearing,rotation_vector_heading,route_bearing,speed,accuracy,lat,lon
-     * logDirectory가 null이면 no-op.
-     */
     private fun openLogWriter() {
-        closeLogWriter()
-        val dir = logDirectory ?: return
-        try {
-            if (!dir.exists()) dir.mkdirs()
-            val file = File(dir, "SafeWalk_heading_log_${System.currentTimeMillis()}.csv")
-            val writer = BufferedWriter(FileWriter(file))
-            // 컬럼 추가: kalman_heading, kalman_gain
-            // 기존 heading_analysis.py는 raw_bearing/route_bearing만 보면 되므로 호환성 유지됨
-            writer.write(
-                "timestamp,raw_bearing,rotation_vector_heading,route_bearing," +
-                        "kalman_heading,kalman_gain,speed,accuracy,lat,lon"
-            )
-            writer.newLine()
-            logWriter = writer
-            Logger.d("HeadingLog", "CSV 로그 시작: ${file.absolutePath}")
-        } catch (e: Exception) {
-            Logger.w("HeadingLog", "CSV 로그 초기화 실패: ${e.message}")
-            logWriter = null
-        }
+        headingLogger.open()
     }
 
     private fun closeLogWriter() {
-        val writer = logWriter ?: return
-        try {
-            writer.flush()
-            writer.close()
-        } catch (e: Exception) {
-            Logger.w("HeadingLog", "CSV 로그 종료 실패: ${e.message}")
-        }
-        logWriter = null
+        headingLogger.close()
     }
 
     /**
      * 매 GPS 업데이트마다 CSV 한 줄 기록.
-     * route_bearing은 computeRouteBearingAhead(25m) 결과, null이면 -1.
-     * rotation_vector_heading은 MainActivity가 updateCompassHeading으로 갱신한 최신값(미갱신 시 -1).
+     * route_bearing 은 computeRouteBearingAhead(25m) 결과, null 이면 -1.
+     * rotation_vector_heading 은 MainActivity 가 updateCompassHeading 으로 갱신한 최신값(미갱신 시 -1).
+     * Kalman 미초기화 상태(첫 GPS 도착 전 호출 등)에서는 kalmanHeading.current 가 -1 을 돌려준다.
      */
     private fun writeLogRow(
         rawBearing: Float, speed: Float, accuracy: Float,
         lat: Double, lon: Double
     ) {
-        val writer = logWriter ?: return
-        try {
-            val routeBearing = computeRouteBearingAhead(25f) ?: -1f
-            // Kalman 미초기화 상태(첫 GPS 도착 전 호출 등) 대비
-            // KalmanHeading.current 는 미초기화 시 -1 을 돌려준다 (CSV 호환).
-            val kHeading = kalmanHeading.current
-            val kGain = kalmanHeading.gain
-            val line = "${System.currentTimeMillis()},$rawBearing,$latestCompassHeading," +
-                    "$routeBearing,$kHeading,$kGain,$speed,$accuracy,$lat,$lon"
-            writer.write(line)
-            writer.newLine()
-            // 강제 종료 대비 즉시 flush (1Hz 수준이라 오버헤드 무시 가능)
-            writer.flush()
-        } catch (e: Exception) {
-            Logger.w("HeadingLog", "CSV 로그 쓰기 실패: ${e.message}")
-        }
+        val routeBearing = computeRouteBearingAhead(25f) ?: -1f
+        headingLogger.write(
+            timestamp = currentTimeMillis(),
+            rawBearing = rawBearing,
+            rotationVectorHeading = latestCompassHeading,
+            routeBearing = routeBearing,
+            kalmanHeading = kalmanHeading.current,
+            kalmanGain = kalmanHeading.gain,
+            speed = speed,
+            accuracy = accuracy,
+            lat = lat,
+            lon = lon,
+        )
     }
 }
