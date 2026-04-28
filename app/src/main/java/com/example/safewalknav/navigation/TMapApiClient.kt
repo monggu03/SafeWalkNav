@@ -302,14 +302,5 @@ class TMapApiClient {
     }
 }
 
-/**
- * POI 검색 결과
- */
-data class POIResult(
-    val name: String,
-    val lat: Double,
-    val lon: Double,
-    val address: String,
-    val frontLat: Double? = null,
-    val frontLon: Double? = null
-)
+// POIResult 데이터 클래스는 KMM 마이그레이션으로
+// shared/commonMain/.../navigation/POIResult.kt 로 이동됨.
