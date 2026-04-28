@@ -1,7 +1,5 @@
 package com.example.safewalknav.navigation
 
-import android.location.Location
-import android.util.Log
 import com.example.safewalknav.location.LocationTracker
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -214,7 +212,7 @@ class NavigationManager(
 
     // ========== 경로 추종 ==========
 
-    suspend fun updateLocation(location: Location) {
+    suspend fun updateLocation(location: GpsLocation) {
         if (!_isNavigating.value) return
         currentRoute ?: return
 
@@ -222,8 +220,8 @@ class NavigationManager(
         val currentLon = location.longitude
         val speed = location.speed  // m/s
         val rawBearing = location.bearing
-        // GPS accuracy는 Kalman measurement_noise로 사용 (정확도 나쁘면 측정 영향력↓)
-        val accuracy = if (location.hasAccuracy()) location.accuracy else 10f
+        // GPS accuracy 는 GpsLocation 변환 시점에 fallback(10f) 적용되므로 여기선 그대로 사용.
+        val accuracy = location.accuracy
         val userBearing = updateSmoothedHeading(rawBearing, speed, accuracy)
 
         // CSV 로그 기록 (기존 로직에 영향 없음, writer 미초기화 시 no-op)
@@ -1082,9 +1080,9 @@ class NavigationManager(
             )
             writer.newLine()
             logWriter = writer
-            Log.d("HeadingLog", "CSV 로그 시작: ${file.absolutePath}")
+            Logger.d("HeadingLog", "CSV 로그 시작: ${file.absolutePath}")
         } catch (e: Exception) {
-            Log.w("HeadingLog", "CSV 로그 초기화 실패: ${e.message}")
+            Logger.w("HeadingLog", "CSV 로그 초기화 실패: ${e.message}")
             logWriter = null
         }
     }
@@ -1095,7 +1093,7 @@ class NavigationManager(
             writer.flush()
             writer.close()
         } catch (e: Exception) {
-            Log.w("HeadingLog", "CSV 로그 종료 실패: ${e.message}")
+            Logger.w("HeadingLog", "CSV 로그 종료 실패: ${e.message}")
         }
         logWriter = null
     }
@@ -1123,7 +1121,7 @@ class NavigationManager(
             // 강제 종료 대비 즉시 flush (1Hz 수준이라 오버헤드 무시 가능)
             writer.flush()
         } catch (e: Exception) {
-            Log.w("HeadingLog", "CSV 로그 쓰기 실패: ${e.message}")
+            Logger.w("HeadingLog", "CSV 로그 쓰기 실패: ${e.message}")
         }
     }
 }
