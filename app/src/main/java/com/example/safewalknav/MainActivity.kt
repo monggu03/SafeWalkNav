@@ -45,6 +45,7 @@ import com.example.safewalknav.navigation.ArrivalState
 import com.example.safewalknav.navigation.NavigationManager
 import com.example.safewalknav.navigation.POIResult
 import com.example.safewalknav.navigation.TMapApiClient
+import com.example.safewalknav.navigation.toGpsLocation
 import com.google.android.gms.common.api.ResolvableApiException
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationServices
@@ -795,7 +796,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     navigationManager.updateCompassHeading(currentAzimuth)
                 }
 
-                navigationManager.updateLocation(location)
+                navigationManager.updateLocation(location.toGpsLocation())
 
                 val dist = LocationTracker.distanceBetween(
                     location.latitude, location.longitude,
