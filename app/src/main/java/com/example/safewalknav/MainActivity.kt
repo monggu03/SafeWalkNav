@@ -253,7 +253,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         tts = TextToSpeech(this, this)
         locationTracker = LocationTracker(this)
-        navigationManager = NavigationManager(TMapApiClient())
+        navigationManager = NavigationManager(TMapApiClient(BuildConfig.TMAP_APP_KEY))
         // Heading 분석용 CSV 로그 저장 경로 (권한 불필요한 app-scoped 경로)
         navigationManager.setLogDirectory(getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS))
 

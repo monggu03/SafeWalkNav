@@ -3,6 +3,10 @@ plugins {
     id("com.android.library")
 }
 
+val ktorVersion = "2.3.7"           // Kotlin 1.9.22 호환
+val kotlinxSerializationVersion = "1.6.2"
+val coroutinesVersion = "1.7.3"
+
 kotlin {
     androidTarget {
         compilations.all {
@@ -30,10 +34,22 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
-            // POC 단계: 의존성 없이 순수 Kotlin stdlib만
+            // 비동기
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")
+
+            // HTTP — TMap REST API 호출용
+            implementation("io.ktor:ktor-client-core:$ktorVersion")
+
+            // JSON — 응답 텍스트를 JsonElement 트리로 파싱
+            //         (기존 Gson JsonParser 와 동등한 사용감)
+            implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:$kotlinxSerializationVersion")
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
+        }
+        androidMain.dependencies {
+            // Android engine — 내부적으로 OkHttp 사용. 기존 OkHttp 사용 경험 그대로 재사용 가능.
+            implementation("io.ktor:ktor-client-okhttp:$ktorVersion")
         }
     }
 }
