@@ -2,7 +2,9 @@ package com.example.safewalknav.navigation
 
 /**
  * TMap 보행자 경로 데이터 모델
- * TMap REST API 응답을 파싱해서 이 클래스에 담는다
+ * TMap REST API 응답을 파싱해서 이 클래스에 담는다.
+ *
+ * KMM commonMain — Android/iOS 공통.
  */
 data class TMapRoute(
     val totalDistance: Int,        // 전체 거리 (m)
