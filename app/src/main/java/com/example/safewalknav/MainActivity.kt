@@ -41,6 +41,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.safewalknav.location.LocationTracker
+import com.example.safewalknav.navigation.AndroidHeadingLogger
 import com.example.safewalknav.navigation.ArrivalState
 import com.example.safewalknav.navigation.NavigationManager
 import com.example.safewalknav.navigation.POIResult
@@ -254,9 +255,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         tts = TextToSpeech(this, this)
         locationTracker = LocationTracker(this)
-        navigationManager = NavigationManager(TMapApiClient(BuildConfig.TMAP_APP_KEY))
-        // Heading 분석용 CSV 로그 저장 경로 (권한 불필요한 app-scoped 경로)
-        navigationManager.setLogDirectory(getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS))
+        // Heading 분석용 CSV 로그 — app-scoped 경로(권한 불필요)에 저장.
+        // NavigationManager 가 KMM commonMain 에 있으므로 File 의존은 AndroidHeadingLogger 가 흡수.
+        val headingLogger = AndroidHeadingLogger(
+            getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)!!
+        )
+        navigationManager = NavigationManager(
+            TMapApiClient(BuildConfig.TMAP_APP_KEY),
+            headingLogger,
+        )
 
         etDestination = findViewById(R.id.etDestination)
         btnSearch = findViewById(R.id.btnSearch)
