@@ -14,4 +14,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "SafeWalkNav"
-include(":app", ":shared")
+include(":androidApp", ":shared")

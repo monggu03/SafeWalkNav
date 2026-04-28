@@ -42,14 +42,14 @@ SafeWalkNav/
 │       │   └── Time.android.kt             #   actual (System.currentTimeMillis)
 │       └── iosMain/                        # iOS actual (작업 예정)
 │
-├── app/                                    # ⭐ 안드로이드 앱
+├── androidApp/                             # ⭐ 안드로이드 앱
 │   ├── libs/                               #   TMap SDK aar (gitignored, 직접 배치)
 │   ├── google-services.json                #   Firebase 설정 (gitignored)
 │   └── src/main/java/com/example/safewalknav/
 │       ├── MainActivity.kt                 #   UI/센서/오디오/TTS/STT 오케스트레이터
 │       └── location/LocationTracker.kt     #   FusedLocationProvider GPS
 │
-├── iosApp/                                 # ⭐ iOS 앱 (작업 예정)
+├── iosApp/                                 # ⭐ iOS 앱 (작업 예정 — README 참조)
 │
 ├── tools/
 │   ├── heading_analysis.py                 # Kalman Before/After 시각화
@@ -91,10 +91,10 @@ cd SafeWalkNav
 
 라이선스 정책상 SDK `.aar` 파일은 저장소에 포함되어 있지 않습니다. [TMap 개발자센터](https://tmapapi.tmapmobility.com/)에서 직접 받으세요.
 
-`app/libs/` 디렉토리에 다음 두 파일을 배치:
+`androidApp/libs/` 디렉토리에 다음 두 파일을 배치:
 
 ```
-app/libs/
+androidApp/libs/
 ├── vsm-tmap-sdk-v2-android-2.0.0.aar
 └── tmap-sdk-3.5.aar
 ```
@@ -111,7 +111,7 @@ TMAP_APP_KEY=발급받은_앱_키
 
 ### 3. Firebase 설정
 
-[Firebase Console](https://console.firebase.google.com/)에서 프로젝트의 `google-services.json`을 받아 **`app/` 폴더에 직접 배치**합니다. 이 파일도 `.gitignore`로 처리되어 커밋되지 않습니다.
+[Firebase Console](https://console.firebase.google.com/)에서 프로젝트의 `google-services.json`을 받아 **`androidApp/` 폴더에 직접 배치**합니다. 이 파일도 `.gitignore`로 처리되어 커밋되지 않습니다.
 
 > 팀원 간 공유는 카톡/Slack 등으로 직접 전달.
 
@@ -120,20 +120,23 @@ TMAP_APP_KEY=발급받은_앱_키
 Android Studio에서 프로젝트를 열고 Sync 후 실행. CLI 빌드:
 
 ```bash
-./gradlew assembleDebug
+./gradlew :androidApp:assembleDebug
 ```
 
-APK 출력: `app/build/outputs/apk/debug/app-debug.apk`
+APK 출력: `androidApp/build/outputs/apk/debug/androidApp-debug.apk`
 
 ## 설치 및 빌드 (iOS) — 진행 중
 
-`iosApp/` 디렉토리에 Xcode 프로젝트가 추가될 예정입니다. 빌드 흐름:
+`iosApp/` 디렉토리에 골격이 잡혀 있고, 본격 작업 가이드는 `iosApp/README.md` 에 있습니다.
+
+빌드 흐름:
 
 1. macOS + Xcode 15+
-2. `shared` 모듈에서 iOS framework 생성 — `./gradlew :shared:linkPodDebugFrameworkIosArm64`
-3. Xcode에서 `iosApp.xcodeproj` 열기 → 빌드/실행
+2. `shared/build.gradle.kts` 의 iOS 타겟 활성화 (현재 주석 처리됨)
+3. iOS 측 actual 구현(`Logger.ios.kt`, `Time.ios.kt`, `CLLocationConverter.kt`) 작성
+4. `iosApp/iosApp.xcodeproj` 생성 후 SwiftUI 화면 작성
 
-shared 모듈의 iOS 타겟 활성화는 `shared/build.gradle.kts` 의 주석 처리된 `iosX64()/iosArm64()/iosSimulatorArm64()` 블록 해제로 진행.
+상세는 `iosApp/README.md` 참조.
 
 ## 주요 권한 (Android)
 
