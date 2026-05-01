@@ -859,11 +859,12 @@ class NavigationManager(
         lastStraightGuidanceTime = now
 
         val distText = if (distToDestination >= 1000f) {
-            "${String.format("%.1f", distToDestination / 1000f)}킬로"
+            val km = distToDestination / 1000f
+            val rounded = kotlin.math.round(km * 10) / 10
+            "${rounded}킬로"
         } else {
             "${distToDestination.toInt()}미터"
         }
-        speak("직진하세요. 목적지까지 $distText")
     }
 
     // isCrosswalkWaypoint() / isOnCrosswalkSegment() — KMM 마이그레이션으로
