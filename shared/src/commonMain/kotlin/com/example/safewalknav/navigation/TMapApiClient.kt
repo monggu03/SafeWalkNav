@@ -103,14 +103,42 @@ class TMapApiClient(
         }
     }
 
-    /** POI 검색 (목적지 검색) */
-    suspend fun searchPOI(keyword: String): List<POIResult> {
+    /**
+     * POI 검색 (목적지 검색) — 위치 기반 정렬 + 거리 필터.
+     *
+     * @param keyword 검색 키워드 (예: "스타벅스", "동국대")
+     * @param currentLat 사용자 현재 위도 (null 이면 위치 무시 — 옛 동작)
+     * @param currentLon 사용자 현재 경도 (null 이면 위치 무시)
+     * @param radiusKm 검색 반경 (km). 기본 1km. 이 거리 초과 결과는 제외.
+     * @param maxResults 최종 반환 개수. 기본 5. 거리 필터 후 부족하면 더 적게 반환.
+     *
+     * 동작:
+     *   1) TMap API 에 centerLat/centerLon 전달 → 서버가 거리 기준 정렬
+     *   2) 응답을 받으면 currentLat/currentLon 이 있을 때 클라이언트 측에서
+     *      `radiusKm` 초과 결과를 제거하고 가까운 순으로 재정렬
+     *   3) 최종 결과는 maxResults 개 이하 (5 개 미만일 수 있음 — 굳이 채우지 않음)
+     *
+     * 옛 호출부 호환을 위해 위치 인자는 nullable (default null).
+     */
+    suspend fun searchPOI(
+        keyword: String,
+        currentLat: Double? = null,
+        currentLon: Double? = null,
+        radiusKm: Float = 1.0f,
+        maxResults: Int = 5,
+    ): List<POIResult> {
         lastError = null
         return runCatching {
             val response: HttpResponse = httpClient.get("$baseUrl/pois") {
                 parameter("version", 1)
                 parameter("searchKeyword", keyword)
-                parameter("count", 5)
+                // 거리 필터 후에도 maxResults 채울 수 있게 여유분 요청
+                parameter("count", (maxResults * 2).coerceAtMost(20))
+                // 위치 제공 시 서버 거리 기준 정렬
+                if (currentLat != null && currentLon != null) {
+                    parameter("centerLat", currentLat)
+                    parameter("centerLon", currentLon)
+                }
                 headers { append("appKey", appKey) }
             }
 
@@ -119,7 +147,22 @@ class TMapApiClient(
                 return@runCatching emptyList()
             }
 
-            parsePOIResults(response.bodyAsText())
+            val raw = parsePOIResults(response.bodyAsText())
+
+            // 위치 미제공 시 서버 응답 그대로 반환 (옛 동작 호환)
+            if (currentLat == null || currentLon == null) {
+                return@runCatching raw.take(maxResults)
+            }
+
+            // 클라이언트 측 거리 필터 + 재정렬
+            val radiusMeters = radiusKm * 1000f
+            raw.asSequence()
+                .map { poi -> poi to distanceBetween(currentLat, currentLon, poi.lat, poi.lon) }
+                .filter { (_, dist) -> dist <= radiusMeters }
+                .sortedBy { (_, dist) -> dist }
+                .take(maxResults)
+                .map { (poi, _) -> poi }
+                .toList()
         }.getOrElse { e ->
             lastError = mapException(e)
             emptyList()
