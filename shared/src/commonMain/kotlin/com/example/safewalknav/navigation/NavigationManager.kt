@@ -91,8 +91,27 @@ class NavigationManager(
 
     // ========== 경로 탐색 ==========
 
-    suspend fun searchDestination(keyword: String): List<POIResult> {
-        return tMapApiClient.searchPOI(keyword)
+    /**
+     * 목적지 검색 — 사용자 현재 위치 기준 가까운 순으로 정렬 + 1km 이내 필터.
+     *
+     * @param keyword 검색 키워드
+     * @param currentLat 사용자 현재 위도 (null 가능 — 호환성, 다만 현재 위치를 넘기는 게 표준)
+     * @param currentLon 사용자 현재 경도
+     * @param radiusKm 검색 반경 (기본 1km). 이 거리 초과는 결과에서 제외
+     * @return 가까운 순 정렬된 POI 목록 (최대 5개, 1km 안에 결과 없으면 빈 리스트)
+     */
+    suspend fun searchDestination(
+        keyword: String,
+        currentLat: Double? = null,
+        currentLon: Double? = null,
+        radiusKm: Float = 1.0f,
+    ): List<POIResult> {
+        return tMapApiClient.searchPOI(
+            keyword = keyword,
+            currentLat = currentLat,
+            currentLon = currentLon,
+            radiusKm = radiusKm,
+        )
     }
 
     suspend fun startNavigation(
