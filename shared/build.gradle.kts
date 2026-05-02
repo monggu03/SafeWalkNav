@@ -19,7 +19,7 @@ kotlin {
     // iOS 타겟은 macOS + Xcode 환경에서만 안정적으로 빌드됨.
     // POC 단계(Windows)에서는 일시 제외.
     // jiminlyy의 Mac에서 본 마이그레이션 작업 시 아래 블록 활성화.
-    /*
+
     listOf(
         iosX64(),
         iosArm64(),
@@ -30,7 +30,7 @@ kotlin {
             isStatic = true
         }
     }
-    */
+
 
     sourceSets {
         commonMain.dependencies {
@@ -50,6 +50,9 @@ kotlin {
         androidMain.dependencies {
             // Android engine — 내부적으로 OkHttp 사용. 기존 OkHttp 사용 경험 그대로 재사용 가능.
             implementation("io.ktor:ktor-client-okhttp:$ktorVersion")
+        }
+        iosMain.dependencies {
+            implementation("io.ktor:ktor-client-darwin:$ktorVersion")
         }
     }
 }
