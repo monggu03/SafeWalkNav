@@ -574,9 +574,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             tvStatus.text = "검색 중..."
             speakTTS("검색 중입니다.")
 
-            // 현재 위치 (거리 계산용)
+            // 현재 위치 — 거리 기준 정렬 + 1km 이내 필터에 사용
             val currentLocation = locationTracker.getCurrentLocation()
-            val results = navigationManager.searchDestination(keyword)
+            val results = navigationManager.searchDestination(
+                keyword = keyword,
+                currentLat = currentLocation?.latitude,
+                currentLon = currentLocation?.longitude,
+            )
 
             if (results.isEmpty()) {
                 val errorMsg = navigationManager.lastError ?: "검색 결과가 없습니다"
