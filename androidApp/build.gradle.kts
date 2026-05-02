@@ -78,10 +78,10 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0")
 
-    // TMap SDK (지도)
-    implementation(files("libs/vsm-tmap-sdk-v2-android-2.0.0.aar"))
-    implementation(files("libs/tmap-sdk-3.5.aar"))
-    implementation("com.google.flatbuffers:flatbuffers-java:24.3.25")
+    // TMap SDK (지도 widget) — PR-UI(시각장애인 풀스크린) 마이그레이션으로 완전 제거됨.
+    // 시각장애인 사용자 시점에서 지도 화면이 필요 없으므로 SDK aar 의존 + libs/*.aar 파일 모두 삭제.
+    // 길찾기/POI 검색에 쓰는 TMap REST API 는 shared 모듈의 Ktor 기반 TMapApiClient 가 담당 (HTTP appKey 만으로 충분).
+    // 향후 디버그용 지도 시각화가 필요하면 SKT 개발자 포털에서 aar 재다운로드 후 다시 등록.
 
     // ===== ML / 카메라 / 영상 처리 (PR-1: 인프라 셋업) =====
 

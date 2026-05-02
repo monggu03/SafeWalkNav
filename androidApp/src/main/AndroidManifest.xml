@@ -28,7 +28,6 @@
     <application
         android:allowBackup="true"
         android:label="SafeWalkNav"
-        tools:replace="android:label"
         android:supportsRtl="true"
         android:theme="@style/Theme.MaterialComponents.Light.NoActionBar"
         tools:targetApi="31">
