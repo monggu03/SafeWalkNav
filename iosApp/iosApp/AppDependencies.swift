@@ -19,6 +19,8 @@ final class AppDependencies: ObservableObject {
     let tts: TtsManager
     let locationTracker: LocationTracker
     let headingProvider: HeadingProvider
+    let stt: SttManager
+    let trafficLightDetector: TrafficLightDetector
 
     // MARK: - KMM Managers
     let navigationManager: NavigationManager
@@ -58,6 +60,8 @@ final class AppDependencies: ObservableObject {
         self.locationTracker = locationTracker
         self.headingProvider = headingProvider
         self.navigationManager = navigationManager
+        self.stt = SttManager(tts: tts)
         self.navigationViewModel = navigationViewModel
+        self.trafficLightDetector = TrafficLightDetector(tts: tts)
     }
 }

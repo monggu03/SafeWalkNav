@@ -311,7 +311,10 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				"FRAMEWORK_SEARCH_PATHS[arch=*]" = "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "보행자 신호등 감지를 위해 카메라가 필요합니다";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "길안내를 위해 위치 정보가 필요합니다";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "음성 명령 입력을 위해 마이크 사용이 필요합니다.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "음성 명령으로 길 안내를 제어하기 위해 음성 인식이 필요합니다.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -357,7 +360,10 @@
 				ENABLE_USER_SELECTED_FILES = readonly;
 				"FRAMEWORK_SEARCH_PATHS[arch=*]" = "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "보행자 신호등 감지를 위해 카메라가 필요합니다";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "길안내를 위해 위치 정보가 필요합니다";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "음성 명령 입력을 위해 마이크 사용이 필요합니다.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "음성 명령으로 길 안내를 제어하기 위해 음성 인식이 필요합니다.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
