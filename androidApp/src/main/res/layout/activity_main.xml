@@ -1,149 +1,184 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+시각장애인 풀스크린 UI.
+
+설계 원칙:
+- 검은 배경 + 흰/노란 큰 글씨: 저시력자 가독성 + OLED 친화
+- 화면 메인은 음성 안내 메시지 (큰 글씨)
+- TalkBack 호환: 모든 요소에 contentDescription
+- 카메라 프리뷰 영역(cameraPreviewContainer)은 DEBUG 빌드에서만 표시
+  → PR-2(점자블록) / PR-3(신호등) 작업 시 카메라 프리뷰 + 인식 오버레이 그릴 자리
+- TMap 지도 제거: 시각장애인 사용자가 보지 않는 화면 영역 차지 안 함
+
+색상 톤:
+- 배경: #000000 (검정)
+- 메인 텍스트: #FFFFFF (흰)
+- 강조 (안내): #FFD700 (노랑)
+- 위험/종료: #FF4444 (빨강)
+- 안전/도착: #00CC66 (초록)
+-->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="#FFFFFF">
+    android:background="#000000"
+    android:padding="16dp">
 
-    <!-- 상단 컨트롤 영역 -->
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="12dp">
-
-        <!-- 목적지 입력 + 음성 버튼 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginBottom="8dp">
-
-            <EditText
-                android:id="@+id/etDestination"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:hint="목적지를 입력하세요"
-                android:inputType="text"
-                android:padding="12dp"
-                android:textSize="18sp"
-                android:minHeight="52dp"
-                android:background="@android:drawable/edit_text"
-                android:importantForAccessibility="yes"
-                android:contentDescription="목적지 입력" />
-
-            <Button
-                android:id="@+id/btnVoice"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="음성"
-                android:textSize="16sp"
-                android:textStyle="bold"
-                android:minHeight="52dp"
-                android:layout_marginStart="6dp"
-                android:contentDescription="음성으로 목적지 검색" />
-        </LinearLayout>
-
-        <!-- 버튼 영역 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginBottom="8dp">
-
-            <Button
-                android:id="@+id/btnSearch"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="검색"
-                android:textSize="16sp"
-                android:textStyle="bold"
-                android:minHeight="48dp"
-                android:layout_marginEnd="4dp"
-                android:contentDescription="입력한 목적지 검색" />
-
-            <Button
-                android:id="@+id/btnStart"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="안내 시작"
-                android:textSize="16sp"
-                android:textStyle="bold"
-                android:minHeight="48dp"
-                android:layout_marginHorizontal="4dp"
-                android:contentDescription="경로 안내 시작" />
-
-            <Button
-                android:id="@+id/btnStop"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="안내 종료"
-                android:textSize="16sp"
-                android:textStyle="bold"
-                android:minHeight="48dp"
-                android:layout_marginStart="4dp"
-                android:contentDescription="경로 안내 종료" />
-        </LinearLayout>
-
-        <!-- 안내 메시지 -->
-        <TextView
-            android:id="@+id/tvGuidance"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text=""
-            android:textSize="20sp"
-            android:textColor="#1A1A2E"
-            android:textStyle="bold"
-            android:padding="12dp"
-            android:background="#F0F4FF"
-            android:minHeight="56dp"
-            android:gravity="center_vertical" />
-
-    </LinearLayout>
-
-    <!-- TMap 지도 (남은 공간 전체) -->
-    <FrameLayout
-        android:id="@+id/mapContainer"
+    <!-- ========== 메인 안내 메시지 ========== -->
+    <!-- 화면 상단 가장 큰 영역 — 사용자가 가장 자주 시각/음성으로 받을 정보 -->
+    <TextView
+        android:id="@+id/tvGuidance"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1" />
+        android:layout_weight="3"
+        android:text="기기를 흔들어 목적지를 음성으로 입력하세요"
+        android:textSize="32sp"
+        android:textColor="#FFD700"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:padding="16dp"
+        android:contentDescription="현재 안내 메시지 영역"
+        android:importantForAccessibility="yes" />
 
-    <!-- 하단 정보 바 -->
+    <!-- ========== 카메라 프리뷰 + 인식 오버레이 영역 ==========
+         DEBUG 빌드에서만 visibility=VISIBLE (코드에서 제어).
+         PR-2(점자블록) / PR-3(신호등) 가 이 안에 PreviewView + 오버레이 추가. -->
+    <FrameLayout
+        android:id="@+id/cameraPreviewContainer"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="2"
+        android:background="#1A1A1A"
+        android:visibility="gone"
+        android:contentDescription="카메라 프리뷰 영역 (개발 디버그용)" />
+
+    <!-- ========== 도착 상태 + 거리 + 시스템 상태 (컴팩트) ========== -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="8dp"
-        android:background="#F5F5F5">
+        android:layout_marginTop="12dp">
 
         <TextView
             android:id="@+id/tvArrivalState"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text=""
-            android:textSize="16sp"
+            android:textSize="18sp"
             android:textStyle="bold"
-            android:textColor="#0066CC" />
-
-        <TextView
-            android:id="@+id/tvStatus"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="목적지를 검색하세요"
-            android:textSize="14sp"
-            android:textColor="#333333" />
+            android:textColor="#00CC66"
+            android:gravity="center"
+            android:contentDescription="도착 단계 정보" />
 
         <TextView
             android:id="@+id/tvDistance"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text=""
-            android:textSize="12sp"
-            android:textColor="#666666" />
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:gravity="center"
+            android:layout_marginTop="4dp"
+            android:contentDescription="목적지까지 거리" />
+
+        <TextView
+            android:id="@+id/tvStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="GPS 신호 확인 중..."
+            android:textSize="14sp"
+            android:textColor="#888888"
+            android:gravity="center"
+            android:layout_marginTop="4dp"
+            android:contentDescription="시스템 상태 메시지" />
+    </LinearLayout>
+
+    <!-- ========== 텍스트 입력 (시연/fallback용 — 시각장애인 시나리오엔 음성 우선) ========== -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="12dp">
+
+        <EditText
+            android:id="@+id/etDestination"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="목적지 (선택 입력)"
+            android:textColorHint="#888888"
+            android:textColor="#FFFFFF"
+            android:inputType="text"
+            android:padding="12dp"
+            android:textSize="16sp"
+            android:minHeight="48dp"
+            android:background="#222222"
+            android:importantForAccessibility="yes"
+            android:contentDescription="텍스트로 목적지 입력 (음성 입력 권장)" />
+
+        <Button
+            android:id="@+id/btnSearch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="검색"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="#000000"
+            android:backgroundTint="#FFD700"
+            android:minHeight="48dp"
+            android:layout_marginStart="8dp"
+            android:contentDescription="텍스트로 입력한 목적지 검색" />
+    </LinearLayout>
+
+    <!-- ========== 큰 액션 버튼 ========== -->
+    <!-- 시각장애인이 폰 화면 내 어디든 손가락이 닿게 큰 영역 + 큰 글씨 -->
+    <Button
+        android:id="@+id/btnVoice"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="흔들거나 눌러서 음성 명령"
+        android:textSize="22sp"
+        android:textStyle="bold"
+        android:textColor="#000000"
+        android:backgroundTint="#FFD700"
+        android:minHeight="72dp"
+        android:layout_marginTop="12dp"
+        android:contentDescription="음성으로 목적지를 말하거나 명령하세요" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="8dp">
+
+        <Button
+            android:id="@+id/btnStart"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="안내 시작"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#00AA55"
+            android:minHeight="64dp"
+            android:layout_marginEnd="4dp"
+            android:contentDescription="경로 안내 시작" />
+
+        <Button
+            android:id="@+id/btnStop"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="안내 종료"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#CC2222"
+            android:minHeight="64dp"
+            android:layout_marginStart="4dp"
+            android:contentDescription="경로 안내 종료" />
     </LinearLayout>
 
 </LinearLayout>
