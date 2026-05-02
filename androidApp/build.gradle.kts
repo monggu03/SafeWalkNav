@@ -82,4 +82,24 @@ dependencies {
     implementation(files("libs/vsm-tmap-sdk-v2-android-2.0.0.aar"))
     implementation(files("libs/tmap-sdk-3.5.aar"))
     implementation("com.google.flatbuffers:flatbuffers-java:24.3.25")
+
+    // ===== ML / 카메라 / 영상 처리 (PR-1: 인프라 셋업) =====
+
+    // CameraX — 신호등 추론 / 점자블록 추적용 카메라 스트림
+    val cameraxVersion = "1.3.1"
+    implementation("androidx.camera:camera-core:$cameraxVersion")
+    implementation("androidx.camera:camera-camera2:$cameraxVersion")
+    implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
+    implementation("androidx.camera:camera-view:$cameraxVersion")
+
+    // TensorFlow Lite + GPU delegate — 신호등(YOLOv8n) 추론
+    // Galaxy S25 (Adreno 830) 는 GPU delegate 풀 지원
+    // gpu-delegate-plugin 은 옛 API 사용해 lite-gpu:2.14 와 호환 안 됨 → 제외
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+
+    // OpenCV (Android) — 점자블록(노란색) / 횡단보도 줄무늬 검출
+    // quickbirdstudios 패키지: 비공식이지만 안정성 검증된 OpenCV Android 빌드
+    implementation("com.quickbirdstudios:opencv:4.5.3.0")
 }
