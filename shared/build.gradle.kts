@@ -51,6 +51,9 @@ kotlin {
             // Android engine — 내부적으로 OkHttp 사용. 기존 OkHttp 사용 경험 그대로 재사용 가능.
             implementation("io.ktor:ktor-client-okhttp:$ktorVersion")
         }
+        iosMain.dependencies {
+            implementation("io.ktor:ktor-client-darwin:$ktorVersion")
+        }
     }
 }
 

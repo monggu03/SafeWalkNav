@@ -65,3 +65,21 @@ androidApp/libs/
 
 # ===== 내부 핸드오프 문서 =====
 /PROJECT_CONTEXT.md
+
+# iOS API Keys (절대 커밋 금지)
+**/Secrets.plist
+iosApp/iosApp/Secrets.plist
+iosApp/Secrets.plist
+
+# ===== iOS API Keys (절대 커밋 금지) =====
+**/Secrets.plist
+iosApp/iosApp/Secrets.plist
+iosApp/Secrets.plist
+
+# ===== iOS / Xcode =====
+xcuserdata/
+*.xcuserstate
+DerivedData/
+.swiftpm/
+Pods/
+*.xcodeproj/project.xcworkspace/xcuserdata/
