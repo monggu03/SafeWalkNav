@@ -5,10 +5,7 @@ import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Paint
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -52,10 +49,6 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.LocationSettingsRequest
 import com.google.android.gms.location.Priority
-import com.skt.tmap.TMapPoint
-import com.skt.tmap.TMapView
-import com.skt.tmap.overlay.TMapMarkerItem
-import com.skt.tmap.overlay.TMapPolyLine
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -84,10 +77,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var tvDistance: TextView
     private lateinit var tvArrivalState: TextView
 
-    // TMap 지도
-    private var tMapView: TMapView? = null
-    private var mapReady = false
-    private lateinit var locationBitmap: Bitmap
+    // 카메라 프리뷰 컨테이너 (DEBUG 빌드에서만 표시 — PR-2/PR-3 가 이 안에 추가)
+    private var cameraPreviewContainer: FrameLayout? = null
 
     private val LOCATION_PERMISSION_CODE = 1001
     private var trackingJob: Job? = null
@@ -295,142 +286,23 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         } catch (_: Exception) {
         }
 
-        // 현재 위치 파란 점 비트맵
-        locationBitmap = createLocationBitmap()
+        // 카메라 프리뷰 컨테이너 — DEBUG 빌드에서만 표시 (개발/시연 시 인식 결과 시각화용).
+        // 실 사용 시점(릴리스 빌드)엔 시각장애인 사용자에게 보이지 않음.
+        cameraPreviewContainer = findViewById(R.id.cameraPreviewContainer)
+        if (BuildConfig.DEBUG) {
+            cameraPreviewContainer?.visibility = android.view.View.VISIBLE
+        }
 
-        initMap()
         requestLocationPermission()
         checkAndEnableGPS()
         setupButtons()
         observeGuidance()
     }
 
-    // ========== TMap 지도 ==========
-
-    private fun initMap() {
-        tMapView = TMapView(this).apply {
-            setSKTMapApiKey(BuildConfig.TMAP_APP_KEY)
-            setOnApiKeyListenerCallback(object : TMapView.OnApiKeyListenerCallback {
-                override fun onSKTMapApikeySucceed() {
-                    mapReady = true
-                    Log.d("SafeWalkNav", "TMap 지도 준비 완료")
-                }
-
-                override fun onSKTMapApikeyFailed(error: String?) {
-                    Log.e("SafeWalkNav", "TMap API key 실패: $error")
-                }
-            })
-            setCenterPoint(37.5665, 126.9780)
-            setZoomLevel(15)
-        }
-
-        val mapContainer = findViewById<FrameLayout>(R.id.mapContainer)
-        mapContainer.addView(tMapView)
-    }
-
-    /** 현재 위치 파란 점 비트맵 생성 */
-    private fun createLocationBitmap(): Bitmap {
-        val size = 48
-        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bitmap)
-        // 외부 반투명 원
-        canvas.drawCircle(
-            size / 2f, size / 2f, size / 2f,
-            Paint().apply {
-                color = Color.parseColor("#442196F3")
-                style = Paint.Style.FILL
-                isAntiAlias = true
-            }
-        )
-        // 내부 파란 원
-        canvas.drawCircle(
-            size / 2f, size / 2f, size / 4f,
-            Paint().apply {
-                color = Color.parseColor("#2196F3")
-                style = Paint.Style.FILL
-                isAntiAlias = true
-            }
-        )
-        // 흰색 테두리
-        canvas.drawCircle(
-            size / 2f, size / 2f, size / 4f,
-            Paint().apply {
-                color = Color.WHITE
-                style = Paint.Style.STROKE
-                strokeWidth = 3f
-                isAntiAlias = true
-            }
-        )
-        return bitmap
-    }
-
-    /** 경로를 지도에 표시 */
-    private fun drawRouteOnMap() {
-        val map = tMapView ?: return
-        val route = navigationManager.currentRoute ?: return
-
-        map.removeTMapPath()
-        map.removeTMapMarkerItem("destination")
-
-        if (route.routePoints.isNotEmpty()) {
-            val polyline = TMapPolyLine().apply {
-                setID("route")
-                setLineWidth(10f)
-                setLineColor(Color.parseColor("#2196F3"))
-                setLineAlpha(220)
-            }
-            for (pt in route.routePoints) {
-                polyline.addLinePoint(TMapPoint(pt.lat, pt.lon))
-            }
-            map.setTMapPath(polyline)
-
-            val info = map.getDisplayTMapInfo(polyline.linePointList)
-            val zoom = info.zoom.coerceAtMost(15)
-            map.setZoomLevel(zoom)
-            map.setCenterPoint(info.point.latitude, info.point.longitude)
-        }
-
-        // 목적지 빨간 마커
-        val destMarker = TMapMarkerItem().apply {
-            id = "destination"
-            setTMapPoint(
-                TMapPoint(navigationManager.destinationLat, navigationManager.destinationLon)
-            )
-            name = navigationManager.destinationName
-        }
-        map.addTMapMarkerItem(destMarker)
-    }
-
-    /** 현재 위치 업데이트 (파란 점 + 지도 중심) */
-    private fun updateMapPosition(lat: Double, lon: Double) {
-        val map = tMapView ?: return
-        if (!mapReady) return
-
-        val point = TMapPoint(lat, lon)
-
-        // 파란 점 마커
-        val marker = TMapMarkerItem().apply {
-            id = "myLocation"
-            setTMapPoint(point)
-            icon = locationBitmap
-            setPosition(0.5f, 0.5f)
-        }
-        if (map.getMarkerItemFromId("myLocation") == null) {
-            map.addTMapMarkerItem(marker)
-        } else {
-            map.updateTMapMarkerItem(marker)
-        }
-
-        map.setCenterPoint(lat, lon)
-    }
-
-    /** 지도 초기화 */
-    private fun clearMap() {
-        val map = tMapView ?: return
-        map.removeTMapPath()
-        map.removeTMapMarkerItem("destination")
-        map.removeTMapMarkerItem("myLocation")
-    }
+    // ========== 지도 관련 코드는 PR-UI(시각장애인 풀스크린) 마이그레이션으로 제거됨 ==========
+    // 시각장애인 사용자는 지도 화면을 사용하지 않으므로 TMap SDK 의존 코드를 모두 제거.
+    // 시각 정보는 음성(TTS) + 진동 + 오디오 비콘으로 전달.
+    // 시연/디버그용 카메라 프리뷰는 cameraPreviewContainer (DEBUG 빌드 한정) 에 PR-2/PR-3 가 추가.
 
     // ========== 음성 제어 핵심 ==========
 
@@ -569,12 +441,21 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     // ========== 검색 ==========
 
+    /**
+     * 목적지 검색 — Option C 흐름 (시각장애인 UX 합의안)
+     *
+     *   1) 현재 위치를 TMap searchPOI 에 전달 → 서버가 1km 반경 + 거리순 정렬 (PR-A).
+     *   2) 결과 0개면 안내 후 재입력 유도.
+     *   3) 결과 ≥1개 + GPS 신호 OK → 가장 가까운 결과 자동 선택 (사용자 추가 선택 불필요).
+     *   4) GPS 신호 없음 (locationTracker 가 null 반환) → 거리 정렬 불가 → 다이얼로그 fallback
+     *      (시각장애인 시나리오에서는 거의 발생하지 않음 — 시작 시점에 GPS 확인 필수).
+     */
     private fun performSearch(keyword: String) {
         lifecycleScope.launch {
             tvStatus.text = "검색 중..."
             speakTTS("검색 중입니다.")
 
-            // 현재 위치 — 거리 기준 정렬 + 1km 이내 필터에 사용
+            // 현재 위치 — TMapApiClient 가 이 좌표를 중심으로 1km 반경 검색 + 거리순 정렬
             val currentLocation = locationTracker.getCurrentLocation()
             val results = navigationManager.searchDestination(
                 keyword = keyword,
@@ -583,47 +464,42 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             )
 
             if (results.isEmpty()) {
-                val errorMsg = navigationManager.lastError ?: "검색 결과가 없습니다"
+                // network 에러면 lastError, 아니면 1km 이내 결과 없음
+                val errorMsg = navigationManager.lastError
+                    ?: "주변 1킬로미터 이내에 ${keyword} 검색 결과가 없습니다"
                 tvStatus.text = errorMsg
                 playToneError()
-                speakAndListen("$errorMsg. 다시 말씀해주세요.", VoiceMode.IDLE)
+                speakAndListen("$errorMsg. 다른 목적지를 말씀해주세요.", VoiceMode.IDLE)
                 return@launch
             }
 
-            // 각 결과까지 거리 계산
-            val distances: List<Int>? = currentLocation?.let { loc ->
-                results.map { poi ->
-                    LocationTracker.distanceBetween(
-                        loc.latitude, loc.longitude, poi.lat, poi.lon
-                    ).toInt()
+            currentSearchResults = results
+
+            // GPS 없으면 거리 정렬이 무의미 → 다이얼로그 fallback (시각장애인 시나리오에선 드문 경로)
+            if (currentLocation == null) {
+                if (results.size == 1) {
+                    selectDestination(results.first())
+                } else {
+                    showSearchResults(results, null)
                 }
-            }
-
-            // 5km 초과 결과 필터링 (현재 위치가 있을 때만)
-            val (filteredResults, filteredDistances) = if (distances != null) {
-                val pairs = results.zip(distances).filter { it.second <= 5000 }
-                pairs.map { it.first } to pairs.map { it.second }
-            } else {
-                results to null
-            }
-
-            if (filteredResults.isEmpty()) {
-                tvStatus.text = "5km 이내에 결과가 없습니다"
-                playToneError()
-                speakAndListen(
-                    "반경 5킬로미터 이내에 결과가 없습니다. 다른 목적지를 말씀해주세요.",
-                    VoiceMode.IDLE
-                )
                 return@launch
             }
 
-            currentSearchResults = filteredResults
+            // Option C: 가장 가까운 결과 자동 선택. results 는 서버에서 이미 거리순.
+            val nearest = results.first()
+            val nearestDistMeters = LocationTracker.distanceBetween(
+                currentLocation.latitude, currentLocation.longitude,
+                nearest.lat, nearest.lon
+            ).toInt()
+            val distText = formatDistance(nearestDistMeters)
 
-            if (filteredResults.size == 1) {
-                selectDestination(filteredResults.first())
+            val msg = if (results.size == 1) {
+                "${nearest.name}, ${distText} 선택합니다."
             } else {
-                showSearchResults(filteredResults, filteredDistances)
+                "검색 결과 ${results.size}개 중 가장 가까운 ${nearest.name}, ${distText} 선택합니다."
             }
+            speakTTS(msg)
+            selectDestination(nearest)
         }
     }
 
@@ -667,15 +543,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         stopBeacon()
         stopDirectionalBeacon()
         navigationManager.stopNavigation()
-        clearMap()
+        // 지도 제거됨 (PR-UI: 시각장애인 풀스크린 UI)
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        tvStatus.text = "안내 종료"
-        tvGuidance.text = ""
+        // 풀스크린 UI: 메시지 영역만 초기화. 배경색은 layout XML 의 검정 유지.
+        tvStatus.text = "대기 중"
+        tvGuidance.text = "기기를 흔들어 목적지를 음성으로 입력하세요"
         tvDistance.text = ""
         tvArrivalState.text = ""
-        tvArrivalState.setTextColor(Color.parseColor("#0066CC"))
-        tvGuidance.setBackgroundColor(Color.parseColor("#F0F4FF"))
 
         voiceMode = VoiceMode.IDLE
         speakTTS("안내를 종료합니다.")
@@ -769,7 +644,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 voiceMode = VoiceMode.NAVIGATING
                 playToneSuccess()
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                drawRouteOnMap()
+                // 지도 그리기 제거됨 (PR-UI). 시각 정보는 음성/진동/비콘으로 전달.
                 // 경로 요약 음성 안내
                 val summary = getRouteSummary()
                 if (summary.isNotEmpty()) {
@@ -814,12 +689,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     navigationManager.destinationLat, navigationManager.destinationLon
                 )
 
-                val accuracyText = if (location.hasAccuracy()) "±${location.accuracy.toInt()}m" else ""
-                tvDistance.text = "GPS: ${String.format("%.6f", location.latitude)}, ${
-                    String.format("%.6f", location.longitude)
-                } $accuracyText | 목적지까지: ${dist.toInt()}m"
+                // 시각장애인 UI: GPS 좌표는 디버그용 정보. 큰 글씨로 거리만 강조.
+                tvDistance.text = "목적지까지 ${dist.toInt()}m"
+                if (BuildConfig.DEBUG) {
+                    val accuracyText = if (location.hasAccuracy()) "±${location.accuracy.toInt()}m" else ""
+                    val gpsDebug = "GPS ${String.format("%.5f", location.latitude)}, ${
+                        String.format("%.5f", location.longitude)
+                    } $accuracyText"
+                    tvStatus.text = gpsDebug
+                }
 
-                updateMapPosition(location.latitude, location.longitude)
+                // 지도 위치 갱신 제거됨 (PR-UI). 거리 변화는 tvDistance + 비콘으로 전달.
             }
         }
     }
@@ -1072,10 +952,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         playToneAlert()
                     }
 
-                    // 경로 재탐색 완료 시 지도 갱신
-                    if (message.contains("소요됩니다") && navigationManager.isNavigating.value) {
-                        drawRouteOnMap()
-                    }
+                    // 경로 재탐색 완료 시 (지도 갱신 제거됨, PR-UI)
+                    // 음성 안내(message)만으로 사용자에게 새 경로 알림이 충분히 전달됨
                 }
             }
         }
@@ -1089,41 +967,36 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     ArrivalState.ARRIVED -> "도착!"
                 }
 
-                // 상태별 UI 색상 + 지도 줌
+                // 상태별 색상 (시각장애인 풀스크린 UI: 검정 배경 위에서 잘 보이는 톤만 사용)
+                // 지도 줌 제거됨 — 거리 단계는 비콘 빠르기 + 진동으로 표현.
                 when (state) {
                     ArrivalState.FAR -> {
-                        tvArrivalState.setTextColor(Color.parseColor("#666666"))
-                        tvGuidance.setBackgroundColor(Color.parseColor("#F0F4FF"))
+                        tvArrivalState.setTextColor(Color.parseColor("#888888"))
                         stopDirectionalBeacon()
                     }
 
                     ArrivalState.APPROACHING -> {
-                        tvArrivalState.setTextColor(Color.parseColor("#FF9800"))
-                        tvGuidance.setBackgroundColor(Color.parseColor("#FFF3E0"))
+                        tvArrivalState.setTextColor(Color.parseColor("#FFAA33"))
                         vibrateMedium()
-                        // 오디오 비콘 시작
+                        // 오디오 비콘 시작 (거리 가까울수록 빠름)
                         startBeacon()
-                        tMapView?.setZoomLevel(17)
                     }
 
                     ArrivalState.NEAR -> {
-                        tvArrivalState.setTextColor(Color.parseColor("#F44336"))
-                        tvGuidance.setBackgroundColor(Color.parseColor("#FFEBEE"))
+                        tvArrivalState.setTextColor(Color.parseColor("#FF4444"))
                         vibrateMedium()
-                        tMapView?.setZoomLevel(19)
                         // 거리비콘 → 방향비콘 전환 (입구 찾기)
                         stopBeacon()
                         startDirectionalBeacon()
                     }
 
                     ArrivalState.ARRIVED -> {
-                        tvArrivalState.setTextColor(Color.parseColor("#4CAF50"))
-                        tvGuidance.setBackgroundColor(Color.parseColor("#E8F5E9"))
+                        tvArrivalState.setTextColor(Color.parseColor("#00CC66"))
                         stopBeacon()
                         vibrateArrival()
                         playToneSuccess()
                         stopAutoRepeat()
-                        clearMap()
+                        // 지도 클리어 제거됨 (PR-UI)
                         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                         voiceMode = VoiceMode.IDLE
                         // 방향비콘은 계속 유지 (입구 찾기 단계). 종료 버튼 누르면 중지.
@@ -1328,7 +1201,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tts.shutdown()
         toneGenerator?.release()
         releaseStereoTrack()
-        tMapView?.onDestroy()
+        // tMapView 제거됨 (PR-UI)
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 }
