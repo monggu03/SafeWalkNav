@@ -78,15 +78,24 @@ final class NavigationViewModel: ObservableObject {
 
     /// 목적지 키워드로 POI 검색
     func searchDestination(keyword: String) async {
+        guard let currentLoc = locationTracker.currentLocation else {
+            self.errorMessage = "현재 위치를 알 수 없습니다"
+            return
+        }
+        
         do {
-            let results = try await navigationManager.searchDestination(keyword: keyword)
+            let results = try await navigationManager.searchDestination(
+                keyword: keyword,
+                currentLat: KotlinDouble(value: currentLoc.latitude),
+                currentLon: KotlinDouble(value: currentLoc.longitude),
+                radiusKm: 5.0
+            )
             self.searchResults = results
             self.errorMessage = nil
         } catch {
             self.errorMessage = "검색 실패: \(error.localizedDescription)"
         }
     }
-
     /// 선택한 POI로 내비게이션 시작
     func startNavigation(to poi: POIResult) async {
         guard let currentLoc = locationTracker.currentLocation else {
