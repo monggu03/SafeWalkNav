@@ -54,7 +54,7 @@
         android:layout_height="match_parent"
         android:background="#000000"
         android:visibility="gone"
-        android:contentDescription="카메라 프리뷰 영역" />
+        android:importantForAccessibility="no" />
 
     <!-- ========== BEFORE 화면 컨테이너 ==========
          IDLE / LISTENING / SEARCHING 상태에서 visible.
