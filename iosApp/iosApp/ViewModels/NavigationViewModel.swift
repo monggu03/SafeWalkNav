@@ -7,6 +7,7 @@
 //  역할:
 //  - LocationTracker GPS → NavigationManager.updateLocation() 전달
 //  - HeadingProvider heading → NavigationManager.updateCompassHeading() 전달
+//  - DeviceOrientationMonitor 자세 → 비정상 시 음성 보정 요청
 //  - NavigationManager의 StateFlow → Swift @Published로 노출
 //  - 안내 메시지 변화 시 TtsManager로 음성 출력
 //
@@ -42,6 +43,7 @@ final class NavigationViewModel: ObservableObject {
     private let tts: TtsManager
     private let locationTracker: LocationTracker
     private let headingProvider: HeadingProvider
+    private let orientationMonitor: DeviceOrientationMonitor   // ⭐ 추가
 
     /// KMM의 핵심 매니저
     private let navigationManager: NavigationManager
@@ -53,16 +55,26 @@ final class NavigationViewModel: ObservableObject {
     /// 직전 안내 메시지 (TTS 중복 방지)
     private var lastSpokenGuidance: String = ""
 
+    // MARK: - Orientation Alert State (자세 경고 중복 방지)
+    /// 직전에 안내한 자세 문제 (같은 문제 반복 안내 방지)
+    private var lastSpokenIssue: OrientationIssue = .none
+    /// 직전 자세 안내 시각
+    private var lastOrientationSpeakTime: Date = .distantPast
+    /// 같은 문제 재안내 최소 간격 (초)
+    private let orientationRepeatInterval: TimeInterval = 5.0
+
     // MARK: - Init
     init(
         tts: TtsManager,
         locationTracker: LocationTracker,
         headingProvider: HeadingProvider,
+        orientationMonitor: DeviceOrientationMonitor,   // ⭐ 추가
         navigationManager: NavigationManager
     ) {
         self.tts = tts
         self.locationTracker = locationTracker
         self.headingProvider = headingProvider
+        self.orientationMonitor = orientationMonitor    // ⭐ 추가
         self.navigationManager = navigationManager
 
         bindLocationToNavigation()
@@ -78,16 +90,16 @@ final class NavigationViewModel: ObservableObject {
 
     /// 목적지 키워드로 POI 검색
     func searchDestination(keyword: String) async {
-        guard let currentLoc = locationTracker.currentLocation else {
-            self.errorMessage = "현재 위치를 알 수 없습니다"
-            return
-        }
-        
         do {
+            // Provide current location and a default radius (km) to match updated API
+            guard let loc = locationTracker.currentLocation else {
+                self.errorMessage = "현재 위치를 알 수 없습니다"
+                return
+            }
             let results = try await navigationManager.searchDestination(
                 keyword: keyword,
-                currentLat: KotlinDouble(value: currentLoc.latitude),
-                currentLon: KotlinDouble(value: currentLoc.longitude),
+                currentLat: KotlinDouble(value: loc.latitude),
+                currentLon: KotlinDouble(value: loc.longitude),  
                 radiusKm: 5.0
             )
             self.searchResults = results
@@ -96,6 +108,7 @@ final class NavigationViewModel: ObservableObject {
             self.errorMessage = "검색 실패: \(error.localizedDescription)"
         }
     }
+
     /// 선택한 POI로 내비게이션 시작
     func startNavigation(to poi: POIResult) async {
         guard let currentLoc = locationTracker.currentLocation else {
@@ -118,7 +131,8 @@ final class NavigationViewModel: ObservableObject {
                 // 직선 시작이므로 base heading 설정
                 headingProvider.setBaseHeading()
             } else {
-                self.errorMessage = (navigationManager.lastError as String?) ?? "경로를 찾을 수 없습니다"            }
+                self.errorMessage = (navigationManager.lastError as String?) ?? "경로를 찾을 수 없습니다"
+            }
         } catch {
             self.errorMessage = "안내 시작 실패: \(error.localizedDescription)"
         }
@@ -136,8 +150,8 @@ final class NavigationViewModel: ObservableObject {
     /// LocationTracker의 GPS 변화를 NavigationManager에 전달
     private func bindLocationToNavigation() {
         locationTracker.$currentLocation
-            .compactMap { $0 }                          // nil 무시
-            .removeDuplicates { $0 === $1 }            // 같은 객체 중복 무시
+            .compactMap { $0 }
+            .removeDuplicates { $0 === $1 }
             .sink { [weak self] gpsLocation in
                 guard let self else { return }
                 Task {
@@ -163,15 +177,12 @@ final class NavigationViewModel: ObservableObject {
     }
 
     /// NavigationManager의 StateFlow 값들을 주기적으로 polling
-    /// (Kotlin Flow → Swift @Published 변환의 가장 단순한 방법)
-    /// NavigationManager의 StateFlow 값들을 주기적으로 polling
-    /// (Kotlin Flow → Swift @Published 변환의 가장 단순한 방법)
     private func startPollingNavigationState() {
         pollingTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
 
-                // 1. 안내 메시지 polling (KMM에서 Any?로 와서 String 캐스팅 필요)
+                // 1. 안내 메시지 polling
                 let newGuidance = (self.navigationManager.guidanceMessage.value as? String) ?? ""
                 if newGuidance != self.guidanceMessage {
                     self.guidanceMessage = newGuidance
@@ -200,8 +211,11 @@ final class NavigationViewModel: ObservableObject {
                     }
                 }
 
-                // 5. drift correction 음성 안내 (별도 처리)
+                // 5. drift correction 음성 안내
                 self.handleDriftAlertIfNeeded()
+
+                // 6. ⭐ 자세 경고 음성 안내 (신규)
+                self.handleOrientationAlertIfNeeded()
 
                 // 200ms 간격 polling
                 try? await Task.sleep(nanoseconds: 200_000_000)
@@ -217,7 +231,6 @@ final class NavigationViewModel: ObservableObject {
         guard message != lastSpokenGuidance else { return }
         lastSpokenGuidance = message
 
-        // 도착 단계에 따라 priority 조정
         let priority: TtsManager.Priority = (arrivalState == .arrived) ? .high : .normal
         tts.speak(message, priority: priority)
     }
@@ -231,4 +244,41 @@ final class NavigationViewModel: ObservableObject {
         let absDeg = Int(abs(headingProvider.driftDegrees))
         tts.speak("\(direction)으로 \(absDeg)도 벗어났습니다", priority: .high)
     }
+
+    /// ⭐ 자세 경고: pitch/roll/흔들림 비정상 시 음성으로 보정 요청
+    /// - dangerous 상태에서만 음성 안내 (warning은 UI 표시만)
+    /// - 같은 issue가 지속되면 5초마다 재안내
+    /// - 정상 상태로 돌아가면 lastSpokenIssue 리셋
+    private func handleOrientationAlertIfNeeded() {
+        let currentStatus = orientationMonitor.status
+        let currentIssue = orientationMonitor.issue
+
+        // 정상 상태로 돌아왔으면 상태 리셋 (다음 위험 발생 시 즉시 안내 가능)
+        if currentStatus == .normal {
+            lastSpokenIssue = .none
+            return
+        }
+
+        // dangerous 상태에서만 음성 안내 (warning은 화면 UI에만 표시)
+        guard currentStatus == .dangerous else { return }
+        guard currentIssue != .none else { return }
+
+        // 안내 메시지 결정
+        guard let message = currentIssue.ttsMessage else { return }
+
+        let now = Date()
+        let isSameIssue = (currentIssue == lastSpokenIssue)
+        let timeSinceLast = now.timeIntervalSince(lastOrientationSpeakTime)
+
+        // 같은 issue가 5초 이내 반복이면 스킵
+        if isSameIssue && timeSinceLast < orientationRepeatInterval {
+            return
+        }
+
+        // 안내 실행
+        tts.speak(message, priority: .high)
+        lastSpokenIssue = currentIssue
+        lastOrientationSpeakTime = now
+    }
 }
+

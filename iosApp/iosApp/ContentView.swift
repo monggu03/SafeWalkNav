@@ -43,6 +43,7 @@ struct ContentView: View {
                     Image(systemName: "gearshape.fill")
                     Text("상태")
                 }
+
         }
         .onAppear {
             deps.locationTracker.start()
@@ -346,6 +347,37 @@ struct StatusTab: View {
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        
+                    }
+
+                    GroupBox("🎯 IMU 자세 (휴대폰 자세 감시)") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            // 1. 모니터링 상태
+                            Text("모니터링 중: \(deps.orientationMonitor.isMonitoring ? "✅" : "❌")")
+
+                            // 2. 종합 상태 (색상으로 강조)
+                            HStack {
+                                Text("상태:")
+                                Text(statusText(deps.orientationMonitor.status))
+                                    .fontWeight(.bold)
+                                    .foregroundColor(statusColor(deps.orientationMonitor.status))
+                            }
+
+                            // 3. 어떤 문제인지 (경고/위험일 때만 표시)
+                            if deps.orientationMonitor.issue != .none {
+                                Text("문제: \(issueText(deps.orientationMonitor.issue))")
+                                    .foregroundColor(.orange)
+                            }
+
+                            Divider()
+
+                            // 4. 실시간 자세값
+                            Text("Pitch: \(deps.orientationMonitor.pitch, specifier: "%.1f")°")
+                            Text("Roll: \(deps.orientationMonitor.roll, specifier: "%.1f")°")
+                            Text("Yaw: \(deps.orientationMonitor.yaw, specifier: "%.1f")°")
+                            Text("가속도 분산: \(deps.orientationMonitor.accelerationVariance, specifier: "%.2f") m/s²")
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
                     GroupBox("🔊 TTS") {
@@ -428,6 +460,32 @@ struct StatusTab: View {
         case .denied:              return "거부 ❌"
         case .restricted:          return "제한됨"
         @unknown default:          return "?"
+        }
+    }
+    
+    private func statusText(_ status: OrientationStatus) -> String {
+        switch status {
+        case .normal:    return "정상 ✅"
+        case .warning:   return "경고 ⚠️"
+        case .dangerous: return "위험 🚨"
+        }
+    }
+     
+    private func statusColor(_ status: OrientationStatus) -> Color {
+        switch status {
+        case .normal:    return .green
+        case .warning:   return .orange
+        case .dangerous: return .red
+        }
+    }
+     
+    private func issueText(_ issue: OrientationIssue) -> String {
+        switch issue {
+        case .none:         return "-"
+        case .pitchTooLow:  return "휴대폰을 너무 아래로 숙임"
+        case .pitchTooHigh: return "휴대폰을 너무 위로 들음"
+        case .rollTilted:   return "휴대폰이 좌우로 기울어짐"
+        case .shaking:      return "휴대폰이 심하게 흔들림"
         }
     }
 }
