@@ -40,7 +40,12 @@ import android.widget.Toast
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.safewalknav.location.LocationTracker
 import com.example.safewalknav.navigation.AndroidHeadingLogger
@@ -154,6 +159,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     // 마지막 검색어 (디버그 표시 + 0건 시 재시도 안내)
     private var lastSearchKeyword: String = ""
+
+    // ==================== 카메라 (CameraX) ====================
+
+    // NAVIGATING 진입 시 후방 카메라 PreviewView 를 cameraPreviewContainer 에 attach.
+    // 1차 (PR-UX2): 미리보기만 → 시연/사용자에게 "동작 중" 시각 피드백.
+    // 2차 (PR-3, 김수영): ImageAnalysis use case 추가 → 신호등 detection + 횡단보도 줄무늬.
+    private var cameraProvider: ProcessCameraProvider? = null
 
     // ==================== 진동 / 효과음 ====================
 
@@ -370,6 +382,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         directionalBeaconJob?.cancel()
         longPressJob?.cancel()
         arrivedReturnJob?.cancel()
+        stopCamera()
         tts.shutdown()
         toneGenerator?.release()
         releaseStereoTrack()
@@ -418,6 +431,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // IDLE 진입 시 검색 결과 컨테이너 정리 (이전 버튼들 제거)
         if (state == AppState.IDLE) {
             resultsContainer.removeAllViews()
+        }
+
+        // 카메라 lifecycle — NAVIGATING 진입/이탈 시 토글
+        if (state == AppState.NAVIGATING && previous != AppState.NAVIGATING) {
+            startCamera()
+        } else if (previous == AppState.NAVIGATING && state != AppState.NAVIGATING) {
+            stopCamera()
         }
 
         updateDebugInfo()
@@ -1112,6 +1132,69 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
             }
         }
+    }
+
+    // ==================== 카메라 ON/OFF ====================
+
+    /**
+     * 후방 카메라 PreviewView 를 cameraPreviewContainer 에 attach + bindToLifecycle.
+     * 권한 없으면 silent skip — NAVIGATING 자체는 음성/진동/비콘으로 정상 동작.
+     */
+    private fun startCamera() {
+        if (cameraProvider != null) return   // 이미 작동 중
+
+        if (ActivityCompat.checkSelfPermission(
+                this, Manifest.permission.CAMERA
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.w("SafeWalkNav", "Camera permission denied — skip preview")
+            return
+        }
+
+        val pv = PreviewView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            // PreviewView 자체엔 contentDescription 안 부여 (시각장애인은 카메라 영상 안 봄)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        cameraPreviewContainer.removeAllViews()
+        cameraPreviewContainer.addView(pv)
+
+        val future = ProcessCameraProvider.getInstance(this)
+        future.addListener({
+            try {
+                val provider = future.get()
+                cameraProvider = provider
+
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(pv.surfaceProvider)
+                }
+
+                provider.unbindAll()
+                provider.bindToLifecycle(
+                    this,
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview
+                )
+                Log.d("SafeWalkNav", "Camera bound (preview only)")
+            } catch (e: Exception) {
+                Log.e("SafeWalkNav", "Camera bind failed", e)
+                cameraProvider = null
+            }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun stopCamera() {
+        try {
+            cameraProvider?.unbindAll()
+        } catch (_: Exception) {
+        }
+        cameraProvider = null
+        cameraPreviewContainer.removeAllViews()
+        Log.d("SafeWalkNav", "Camera unbound")
     }
 
     // ==================== 진동 패턴 ====================
