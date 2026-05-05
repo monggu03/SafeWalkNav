@@ -1,11 +1,10 @@
 package com.example.safewalknav
 
 import android.Manifest
-import android.app.AlertDialog
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -26,10 +25,16 @@ import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
+import android.util.TypedValue
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityManager
 import android.widget.Button
-import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.IntentSenderRequest
@@ -58,27 +63,74 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
-import kotlin.math.sqrt
 
+/**
+ * 시각장애인 사용자 흐름 — PR-UX1 (사용자 합의안)
+ *
+ * 상태 머신:
+ *
+ *   IDLE  ─ long press 2s ─►  LISTENING (STT)
+ *    ▲                              │
+ *    │                              ▼
+ *    │                         SEARCHING
+ *    │                              │
+ *    │                              ▼
+ *    │      (0건, 3회 미만)    RESULTS  (1~5개 풀스크린 버튼, TalkBack 더블탭으로 선택)
+ *    │      └── 자동 STT 재시도       │
+ *    │                              │ 더블탭
+ *    │                              ▼
+ *    │                         NAVIGATING (카메라 풀스크린)
+ *    │                              │
+ *    │                              ▼
+ *    │                          ARRIVED ── 3초 후 자동 ──┐
+ *    │                                                  │
+ *    └──────────────────────────────────────────────────┘
+ *
+ * 화면:
+ *   - IDLE/LISTENING/SEARCHING: 빈 화면 (DEBUG 빌드만 하단에 디버그 정보)
+ *   - RESULTS: resultsContainer 에 동적으로 1~5개 버튼 (LinearLayout, weight=1 균등 분배)
+ *   - NAVIGATING: cameraPreviewContainer 풀스크린 (PR-3 가 PreviewView 추가)
+ *   - ARRIVED: 짧게 도착 안내 → 자동으로 IDLE 로 복귀
+ *
+ * 트리거:
+ *   - 흔들기 폐기 (가방/주머니 실수 트리거 위험). shakeListener 코드는 보존하되 등록 안 함.
+ *   - long press 2초 = 모든 상태에서 STT 활성화 (IDLE: 목적지 입력, NAVIGATING: 음성 명령)
+ */
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
+
+    // ==================== 상태 ====================
+
+    private enum class AppState {
+        IDLE,         // 빈 화면, long press 대기
+        LISTENING,    // STT 진행 중
+        SEARCHING,    // TMap API 호출 중
+        RESULTS,      // 검색 결과 풀스크린 버튼
+        NAVIGATING,   // 카메라 풀스크린 + 안내
+        ARRIVED       // 도착 후 짧은 안내 (3초 → IDLE)
+    }
+
+    private var appState: AppState = AppState.IDLE
+
+    // ==================== 매니저 ====================
 
     private lateinit var locationTracker: LocationTracker
     private lateinit var navigationManager: NavigationManager
     private lateinit var tts: TextToSpeech
 
-    // UI
-    private lateinit var etDestination: EditText
-    private lateinit var btnSearch: Button
-    private lateinit var btnVoice: Button
-    private lateinit var btnStart: Button
-    private lateinit var btnStop: Button
-    private lateinit var tvStatus: TextView
-    private lateinit var tvGuidance: TextView
-    private lateinit var tvDistance: TextView
-    private lateinit var tvArrivalState: TextView
+    // ==================== UI 참조 ====================
 
-    // 카메라 프리뷰 컨테이너 (DEBUG 빌드에서만 표시 — PR-2/PR-3 가 이 안에 추가)
-    private var cameraPreviewContainer: FrameLayout? = null
+    private lateinit var rootLayout: View
+    private lateinit var cameraPreviewContainer: FrameLayout
+    private lateinit var beforeContainer: ViewGroup
+    private lateinit var tvBeforeHint: TextView
+    private lateinit var resultsContainer: LinearLayout
+    private lateinit var arrivedContainer: ViewGroup
+    private lateinit var tvArrivedName: TextView
+    private lateinit var debugContainer: ViewGroup
+    private lateinit var tvDebugStatus: TextView
+    private lateinit var tvDebugGuidance: TextView
+
+    // ==================== 흐름 ====================
 
     private val LOCATION_PERMISSION_CODE = 1001
     private var trackingJob: Job? = null
@@ -88,59 +140,63 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var gpsDialogDeniedTime = 0L
     private var gpsCheckInProgress = false
 
-    // 음성 제어
-    private enum class VoiceMode { IDLE, SELECTING, NAVIGATING }
+    // long press 2초 — 화면 어디든 터치하고 2초 유지하면 STT
+    private var longPressJob: Job? = null
+    private val LONG_PRESS_MS = 2000L
 
-    private var voiceMode = VoiceMode.IDLE
-    private var currentSearchResults: List<POIResult> = emptyList()
-    private var searchResultDialog: AlertDialog? = null
+    // STT 연속 실패 카운터 — 0건 결과 시 자동 재시도, 3회 누적 시 IDLE 로 복귀
+    private var sttFailureCount = 0
+    private val STT_FAILURE_LIMIT = 3
 
-    // 흔들기 감지
-    private lateinit var sensorManager: SensorManager
-    private var accelerometer: Sensor? = null
-    private var lastShakeTime = 0L
-    private val SHAKE_THRESHOLD = 13f
-    private val SHAKE_COOLDOWN = 2000L
+    // 도착 후 자동 복귀 (3초)
+    private var arrivedReturnJob: Job? = null
+    private val ARRIVED_RETURN_MS = 3000L
 
-    // 진동 피드백
+    // 마지막 검색어 (디버그 표시 + 0건 시 재시도 안내)
+    private var lastSearchKeyword: String = ""
+
+    // ==================== 진동 / 효과음 ====================
+
     private lateinit var vibrator: Vibrator
-
-    // 효과음
     private var toneGenerator: ToneGenerator? = null
 
-    // 스테레오 비프 재사용 AudioTrack (방향성 비콘에서 700ms마다 재생 → 매 호출 생성 시 GC 압박)
+    // 스테레오 비프 재사용 AudioTrack
     private val stereoSampleRate = 44100
     private val stereoDurationMs = 120
     private val stereoNumSamples = stereoSampleRate * stereoDurationMs / 1000
     private val stereoBuffer = ShortArray(stereoNumSamples * 2)
     private var stereoTrack: AudioTrack? = null
 
-    // 안내 자동 반복
-    private var autoRepeatJob: Job? = null
+    // ==================== 안내 비콘 ====================
 
-    // 오디오 비콘 (거리 기반 비프 — 가까울수록 빨라짐)
+    private var autoRepeatJob: Job? = null
     private var beaconJob: Job? = null
 
-    // 방향성 비콘 (나침반 기반 스테레오 패닝 — NEAR 이후 입구 방향 유도)
+    // 방향성 비콘 (NEAR 이후 입구 방향 유도)
     private var directionalBeaconJob: Job? = null
+    private var lastBehindAnnounceTime = 0L
+
+    // ==================== 센서 (방위각 / 가속도) ====================
+
+    private lateinit var sensorManager: SensorManager
+    private var accelerometer: Sensor? = null
     private var magnetometer: Sensor? = null
     private val accelValues = FloatArray(3)
     private val magValues = FloatArray(3)
     private var hasAccel = false
     private var hasMag = false
     private var currentAzimuth = 0f
-    // 자력계 없는 기기 fallback: GPS bearing을 azimuth로 사용
     private val magnetometerAvailable: Boolean
         get() = magnetometer != null
-    private var lastBehindAnnounceTime = 0L
 
-    // TTS 재생 중 플래그 (비콘 일시정지용)
+    // ==================== TTS 상태 ====================
+
     private var ttsSpeaking = false
-
-    // TTS 속도
     private var ttsSpeed = 1.0f
 
-    // GPS 켜기 다이얼로그
+    // ==================== ActivityResultLaunchers ====================
+
+    /** GPS 켜기 다이얼로그 결과 */
     private val gpsEnableLauncher = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
@@ -150,7 +206,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             onGPSEnabled()
         } else {
             gpsDialogDeniedTime = System.currentTimeMillis()
-            // GPS 거부 시에도 앱이 켜졌음을 알리고 안내
             if (ttsReady && !welcomePlayed) {
                 welcomePlayed = true
                 speakTTS("SafeWalkNav입니다. GPS가 꺼져 있어 위치를 확인할 수 없습니다. 설정에서 GPS를 켜주세요.")
@@ -158,7 +213,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // 음성 인식(STT) 결과
+    /** STT 결과 — 성공/실패 모두 처리 */
     private val sttLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -168,45 +223,30 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 ?.firstOrNull()
             if (!text.isNullOrBlank()) {
                 handleVoiceInput(text)
+            } else {
+                onSTTNoMatch()
             }
         } else {
-            // STT 취소/타임아웃 시 안내
-            val hint = when (voiceMode) {
-                VoiceMode.IDLE -> "기기를 흔들어 다시 시도하세요."
-                VoiceMode.SELECTING -> "번호를 선택하려면 기기를 흔들어주세요."
-                VoiceMode.NAVIGATING -> "음성 명령은 기기를 흔들어 시작합니다."
-            }
-            speakTTS(hint)
+            // 사용자 취소 또는 타임아웃 — 재시도 카운터 영향 없음, 안내만
+            speakTTS("음성 입력이 취소되었습니다. 화면을 길게 눌러 다시 시도하세요.")
+            showState(AppState.IDLE)
         }
     }
 
-    // 흔들기 리스너
+    // ==================== 센서 리스너 ====================
+
+    /**
+     * 흔들기 리스너 — PR-UX1 에서 등록 보류 (실수 트리거 위험).
+     * 코드는 보존 — 향후 NAVIGATING 중 음성 명령 트리거로 재도입 가능성.
+     */
     private val shakeListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent?) {
-            event ?: return
-            val x = event.values[0]
-            val y = event.values[1]
-            val z = event.values[2]
-
-            val magnitude = sqrt((x * x + y * y + z * z).toDouble()).toFloat()
-            val acceleration = abs(magnitude - SensorManager.GRAVITY_EARTH)
-
-            if (acceleration > SHAKE_THRESHOLD) {
-                val now = System.currentTimeMillis()
-                if (now - lastShakeTime > SHAKE_COOLDOWN) {
-                    lastShakeTime = now
-                    runOnUiThread {
-                        vibrateShort()
-                        startSTT()
-                    }
-                }
-            }
+            // intentionally unused — see onResume (registration disabled)
         }
-
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
 
-    // 방위각 리스너 (가속도계 + 자력계 → 방위각 계산)
+    /** 가속도계 + 자력계 → 방위각 (저역 통과 필터). 보행쏠림 보정용 — NavigationManager 로 전달. */
     private val orientationListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent?) {
             event ?: return
@@ -228,26 +268,24 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     SensorManager.getOrientation(r, orient)
                     var az = Math.toDegrees(orient[0].toDouble()).toFloat()
                     if (az < 0) az += 360f
-                    // 저역 통과 필터 (±180° 경계 처리)
                     val delta = ((az - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.15f * delta + 360f) % 360f
-                    // CSV 로그용 센서 퓨전 heading을 NavigationManager에 전달
                     navigationManager.updateCompassHeading(currentAzimuth)
                 }
             }
         }
-
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
+
+    // ==================== Activity 라이프사이클 ====================
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // 매니저 초기화
         tts = TextToSpeech(this, this)
         locationTracker = LocationTracker(this)
-        // Heading 분석용 CSV 로그 — app-scoped 경로(권한 불필요)에 저장.
-        // NavigationManager 가 KMM commonMain 에 있으므로 File 의존은 AndroidHeadingLogger 가 흡수.
         val headingLogger = AndroidHeadingLogger(
             getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)!!
         )
@@ -256,22 +294,30 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             headingLogger,
         )
 
-        etDestination = findViewById(R.id.etDestination)
-        btnSearch = findViewById(R.id.btnSearch)
-        btnVoice = findViewById(R.id.btnVoice)
-        btnStart = findViewById(R.id.btnStart)
-        btnStop = findViewById(R.id.btnStop)
-        tvStatus = findViewById(R.id.tvStatus)
-        tvGuidance = findViewById(R.id.tvGuidance)
-        tvDistance = findViewById(R.id.tvDistance)
-        tvArrivalState = findViewById(R.id.tvArrivalState)
+        // View 참조
+        rootLayout = findViewById(R.id.rootLayout)
+        cameraPreviewContainer = findViewById(R.id.cameraPreviewContainer)
+        beforeContainer = findViewById(R.id.beforeContainer)
+        tvBeforeHint = findViewById(R.id.tvBeforeHint)
+        resultsContainer = findViewById(R.id.resultsContainer)
+        arrivedContainer = findViewById(R.id.arrivedContainer)
+        tvArrivedName = findViewById(R.id.tvArrivedName)
+        debugContainer = findViewById(R.id.debugContainer)
+        tvDebugStatus = findViewById(R.id.tvDebugStatus)
+        tvDebugGuidance = findViewById(R.id.tvDebugGuidance)
 
-        // 흔들기 감지 초기화
+        // DEBUG 빌드만 디버그 박스 표시 + 시각 힌트 텍스트 표시
+        if (BuildConfig.DEBUG) {
+            debugContainer.visibility = View.VISIBLE
+            tvBeforeHint.visibility = View.VISIBLE
+            tvBeforeHint.text = "화면을 2초간 길게 눌러주세요"
+        }
+
+        // 센서 / 진동 / 효과음
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         magnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
 
-        // 진동 초기화
         vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
             vm.defaultVibrator
@@ -280,149 +326,188 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         }
 
-        // 효과음 초기화
         try {
             toneGenerator = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)
         } catch (_: Exception) {
         }
 
-        // 카메라 프리뷰 컨테이너 — DEBUG 빌드에서만 표시 (개발/시연 시 인식 결과 시각화용).
-        // 실 사용 시점(릴리스 빌드)엔 시각장애인 사용자에게 보이지 않음.
-        cameraPreviewContainer = findViewById(R.id.cameraPreviewContainer)
-        if (BuildConfig.DEBUG) {
-            cameraPreviewContainer?.visibility = android.view.View.VISIBLE
-        }
-
+        // 권한 + GPS + UI 초기화
         requestLocationPermission()
         checkAndEnableGPS()
-        setupButtons()
+        setupTouchArea()
         observeGuidance()
+        showState(AppState.IDLE)
     }
 
-    // ========== 지도 관련 코드는 PR-UI(시각장애인 풀스크린) 마이그레이션으로 제거됨 ==========
-    // 시각장애인 사용자는 지도 화면을 사용하지 않으므로 TMap SDK 의존 코드를 모두 제거.
-    // 시각 정보는 음성(TTS) + 진동 + 오디오 비콘으로 전달.
-    // 시연/디버그용 카메라 프리뷰는 cameraPreviewContainer (DEBUG 빌드 한정) 에 PR-2/PR-3 가 추가.
+    override fun onResume() {
+        super.onResume()
+        checkAndEnableGPS()
+        // 흔들기 리스너 등록 보류 (PR-UX1: 흔들기 폐기)
+        // 향후 NAVIGATING 중 음성 명령 트리거로 재도입 시 해제 — 그땐 NAVIGATING 상태에서만 등록.
+        // accelerometer?.let {
+        //     sensorManager.registerListener(shakeListener, it, SensorManager.SENSOR_DELAY_UI)
+        // }
 
-    // ========== 음성 제어 핵심 ==========
+        // 방위각 (보행쏠림 보정) — 항상 등록
+        accelerometer?.let {
+            sensorManager.registerListener(orientationListener, it, SensorManager.SENSOR_DELAY_UI)
+        }
+        magnetometer?.let {
+            sensorManager.registerListener(orientationListener, it, SensorManager.SENSOR_DELAY_UI)
+        }
+    }
 
-    private fun handleVoiceInput(text: String) {
-        Log.d("SafeWalkNav", "Voice: '$text' (mode: $voiceMode)")
+    override fun onPause() {
+        super.onPause()
+        sensorManager.unregisterListener(orientationListener)
+    }
 
-        when (voiceMode) {
-            VoiceMode.IDLE -> {
-                if (text.contains("도움") || text.contains("사용법")) {
-                    speakAndListen(
-                        "목적지를 말씀하면 검색하고, 번호로 선택합니다. 목적지를 말씀해주세요.",
-                        VoiceMode.IDLE
-                    )
-                } else {
-                    etDestination.setText(text)
-                    performSearch(text)
-                }
+    override fun onDestroy() {
+        super.onDestroy()
+        trackingJob?.cancel()
+        autoRepeatJob?.cancel()
+        beaconJob?.cancel()
+        directionalBeaconJob?.cancel()
+        longPressJob?.cancel()
+        arrivedReturnJob?.cancel()
+        tts.shutdown()
+        toneGenerator?.release()
+        releaseStereoTrack()
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    // ==================== 상태 전환 ====================
+
+    /**
+     * 화면 컨테이너 visibility 토글 + 디버그 정보 갱신 + 부수 효과 처리.
+     * 모든 상태 전환은 이 함수를 거쳐야 함 — 화면/내부 상태 동기화 보장.
+     */
+    private fun showState(state: AppState) {
+        val previous = appState
+        appState = state
+        Log.d("SafeWalkNav", "AppState: $previous -> $state")
+
+        // 컨테이너 visibility (FrameLayout 위에 쌓인 4개 컨테이너 중 하나만 보이게)
+        when (state) {
+            AppState.IDLE, AppState.LISTENING, AppState.SEARCHING -> {
+                beforeContainer.visibility = View.VISIBLE
+                resultsContainer.visibility = View.GONE
+                arrivedContainer.visibility = View.GONE
+                cameraPreviewContainer.visibility = View.GONE
             }
-
-            VoiceMode.SELECTING -> {
-                val number = parseKoreanNumber(text)
-                if (number != null && number in 1..currentSearchResults.size) {
-                    searchResultDialog?.dismiss()
-                    selectDestination(currentSearchResults[number - 1])
-                } else if (text.contains("다시") || text.contains("취소")) {
-                    searchResultDialog?.dismiss()
-                    speakAndListen("목적지를 다시 말씀해주세요.", VoiceMode.IDLE)
-                } else {
-                    speakAndListen(
-                        "${currentSearchResults.size}번까지 있습니다. 번호를 말씀해주세요.",
-                        VoiceMode.SELECTING
-                    )
-                }
+            AppState.RESULTS -> {
+                beforeContainer.visibility = View.GONE
+                resultsContainer.visibility = View.VISIBLE
+                arrivedContainer.visibility = View.GONE
+                cameraPreviewContainer.visibility = View.GONE
             }
+            AppState.NAVIGATING -> {
+                beforeContainer.visibility = View.GONE
+                resultsContainer.visibility = View.GONE
+                arrivedContainer.visibility = View.GONE
+                cameraPreviewContainer.visibility = View.VISIBLE
+            }
+            AppState.ARRIVED -> {
+                beforeContainer.visibility = View.GONE
+                resultsContainer.visibility = View.GONE
+                arrivedContainer.visibility = View.VISIBLE
+                cameraPreviewContainer.visibility = View.GONE
+            }
+        }
 
-            VoiceMode.NAVIGATING -> {
-                when {
-                    text.contains("종료") || text.contains("그만") || text.contains("멈춰") -> {
-                        stopNavigationFull()
-                    }
+        // IDLE 진입 시 검색 결과 컨테이너 정리 (이전 버튼들 제거)
+        if (state == AppState.IDLE) {
+            resultsContainer.removeAllViews()
+        }
 
-                    text.contains("어디") || text.contains("현재") || text.contains("위치") -> {
-                        val msg = navigationManager.guidanceMessage.value
-                        if (msg.isNotEmpty()) speakTTS(msg)
-                    }
+        updateDebugInfo()
+    }
 
-                    text.contains("다시") || text.contains("반복") -> {
-                        val msg = navigationManager.guidanceMessage.value
-                        if (msg.isNotEmpty()) speakTTS(msg)
-                    }
+    private fun updateDebugInfo() {
+        if (!BuildConfig.DEBUG) return
+        val talkback = if (isTalkBackEnabled()) "ON" else "OFF"
+        val gps = if (gpsReady) "OK" else "?"
+        val last = if (lastSearchKeyword.isEmpty()) "-" else lastSearchKeyword
+        tvDebugStatus.text = "STATE=${appState.name} | GPS=$gps | TalkBack=$talkback | last=$last"
+    }
 
-                    text.contains("빠르게") || text.contains("빨리") -> {
-                        ttsSpeed = (ttsSpeed + 0.25f).coerceAtMost(2.0f)
-                        tts.setSpeechRate(ttsSpeed)
-                        speakTTS("음성 속도를 높였습니다.")
-                    }
+    private fun isTalkBackEnabled(): Boolean {
+        return try {
+            val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
+            am.isEnabled && am.isTouchExplorationEnabled
+        } catch (_: Exception) {
+            false
+        }
+    }
 
-                    text.contains("느리게") || text.contains("천천히") -> {
-                        ttsSpeed = (ttsSpeed - 0.25f).coerceAtLeast(0.5f)
-                        tts.setSpeechRate(ttsSpeed)
-                        speakTTS("음성 속도를 낮췄습니다.")
-                    }
+    // ==================== 사용자 인터랙션 (long press) ====================
 
-                    text.contains("크게") || text.contains("볼륨 올려") -> {
-                        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                        audioManager.adjustStreamVolume(
-                            AudioManager.STREAM_MUSIC,
-                            AudioManager.ADJUST_RAISE,
-                            AudioManager.FLAG_SHOW_UI
-                        )
-                        speakTTS("소리를 키웠습니다.")
+    /**
+     * 화면 전체 long press 2초 → STT 트리거.
+     *
+     * 주의: TalkBack ON 환경에서는 단일 탭이 accessibility focus 로 가로채져서 onTouch 가
+     * 우리 앱에 도달하지 않을 수 있음. TalkBack 사용자는 화면 전체에 부여된
+     * contentDescription 을 듣고 더블탭-홀드로 long press 발화시켜야 함.
+     * 1차 구현: setOnTouchListener (TalkBack OFF 시 가장 단순).
+     * TalkBack 실측 후 호환성 보강 필요하면 setOnLongClickListener 도 병행 등록.
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun setupTouchArea() {
+        rootLayout.setOnTouchListener { _, event ->
+            // long press 활성 상태:
+            //   IDLE / LISTENING → STT 시작
+            //   NAVIGATING → 안내 종료 (사용자 요구: "한 번 더 길게 누르면 종료")
+            // 비활성 상태:
+            //   RESULTS → 각 버튼이 자체 탭/더블탭 받음
+            //   ARRIVED → 3초 후 자동 IDLE 복귀 중
+            //   SEARCHING → API 호출 진행 중
+            if (appState == AppState.RESULTS ||
+                appState == AppState.ARRIVED ||
+                appState == AppState.SEARCHING) {
+                return@setOnTouchListener false
+            }
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    longPressJob?.cancel()
+                    longPressJob = lifecycleScope.launch {
+                        delay(LONG_PRESS_MS)
+                        vibrateMedium()
+                        onLongPressTriggered()
                     }
-
-                    text.contains("작게") || text.contains("볼륨 내려") -> {
-                        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                        audioManager.adjustStreamVolume(
-                            AudioManager.STREAM_MUSIC,
-                            AudioManager.ADJUST_LOWER,
-                            AudioManager.FLAG_SHOW_UI
-                        )
-                        speakTTS("소리를 줄였습니다.")
-                    }
-
-                    text.contains("도움") || text.contains("도움말") -> {
-                        speakTTS("종료, 현재위치, 반복, 빠르게, 느리게, 크게, 작게를 사용할 수 있습니다.")
-                    }
-
-                    else -> {
-                        speakTTS("다시 말씀해주세요.")
-                    }
+                    true
                 }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    longPressJob?.cancel()
+                    longPressJob = null
+                    true
+                }
+                else -> false
             }
         }
     }
 
-    private fun parseKoreanNumber(text: String): Int? {
-        Regex("(\\d+)").find(text)?.value?.toIntOrNull()?.let { return it }
-
-        return when {
-            text.contains("일번") || text.contains("첫") || text.contains("하나") -> 1
-            text.contains("두번") || text.contains("둘") -> 2
-            text.contains("삼번") || text.contains("세번") || text.contains("셋") -> 3
-            text.contains("사번") || text.contains("네번") || text.contains("넷") -> 4
-            text.contains("오번") || text.contains("다섯") -> 5
-            else -> null
+    /** 2초 long press 트리거 — 현재 상태에 따라 다른 동작. */
+    private fun onLongPressTriggered() {
+        when (appState) {
+            AppState.NAVIGATING -> {
+                // 이동 중 안내 종료 — 카메라 화면에서 화면 길게 눌러서 빠져나옴
+                stopNavigationFull()
+            }
+            AppState.IDLE, AppState.LISTENING -> {
+                startSTT()
+            }
+            else -> { /* RESULTS/ARRIVED/SEARCHING 은 setupTouchArea 에서 이미 차단 */ }
         }
-    }
-
-    private fun speakAndListen(message: String, mode: VoiceMode) {
-        voiceMode = mode
-        tts.speak(message, TextToSpeech.QUEUE_ADD, null, "auto_listen")
     }
 
     private fun startSTT() {
+        if (!ttsReady) return
         tts.stop()
+        showState(AppState.LISTENING)
 
-        val prompt = when (voiceMode) {
-            VoiceMode.IDLE -> "목적지를 말씀하세요"
-            VoiceMode.SELECTING -> "번호를 말씀하세요"
-            VoiceMode.NAVIGATING -> "명령을 말씀하세요"
+        val prompt = when (appState) {
+            AppState.NAVIGATING -> "명령을 말씀하세요"
+            else -> "목적지를 말씀하세요"
         }
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(
@@ -436,26 +521,89 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             sttLauncher.launch(intent)
         } catch (e: Exception) {
             Toast.makeText(this, "음성 인식을 사용할 수 없습니다", Toast.LENGTH_SHORT).show()
+            showState(AppState.IDLE)
         }
     }
 
-    // ========== 검색 ==========
+    private fun handleVoiceInput(text: String) {
+        Log.d("SafeWalkNav", "Voice: '$text' (state: $appState)")
 
-    /**
-     * 목적지 검색 — Option C 흐름 (시각장애인 UX 합의안)
-     *
-     *   1) 현재 위치를 TMap searchPOI 에 전달 → 서버가 1km 반경 + 거리순 정렬 (PR-A).
-     *   2) 결과 0개면 안내 후 재입력 유도.
-     *   3) 결과 ≥1개 + GPS 신호 OK → 가장 가까운 결과 자동 선택 (사용자 추가 선택 불필요).
-     *   4) GPS 신호 없음 (locationTracker 가 null 반환) → 거리 정렬 불가 → 다이얼로그 fallback
-     *      (시각장애인 시나리오에서는 거의 발생하지 않음 — 시작 시점에 GPS 확인 필수).
-     */
+        // NAVIGATING 중이면 음성 명령 처리. (현재는 long press 기반이라 NAVIGATING 진입 안 됨,
+        // 향후 NAVIGATING 음성 명령 활성화 시 사용 — 흔들기 또는 별도 트리거.)
+        if (appState == AppState.NAVIGATING) {
+            handleNavigationCommand(text)
+            return
+        }
+
+        // 그 외엔 검색 키워드로 처리
+        sttFailureCount = 0   // 입력 성공 시 재시도 카운터 리셋
+        if (text.contains("도움") || text.contains("사용법")) {
+            speakAndListenIdle("화면을 2초간 길게 눌러 목적지를 말씀하시면, 검색 결과 중에서 선택할 수 있습니다.")
+            return
+        }
+        lastSearchKeyword = text
+        performSearch(text)
+    }
+
+    /** STT 결과는 성공이지만 빈 문자열 — 음성은 들렸으나 인식 실패 */
+    private fun onSTTNoMatch() {
+        sttFailureCount++
+        if (sttFailureCount >= STT_FAILURE_LIMIT) {
+            sttFailureCount = 0
+            speakTTS("음성 인식에 실패했습니다. 화면을 길게 눌러 다시 시도하세요.")
+            showState(AppState.IDLE)
+        } else {
+            // 자동 재시도 (3회 미만)
+            speakAndListenIdle("다시 말씀해주세요.")
+        }
+    }
+
+    private fun handleNavigationCommand(text: String) {
+        when {
+            text.contains("종료") || text.contains("그만") || text.contains("멈춰") -> {
+                stopNavigationFull()
+            }
+            text.contains("어디") || text.contains("현재") || text.contains("위치") ||
+            text.contains("다시") || text.contains("반복") -> {
+                val msg = navigationManager.guidanceMessage.value
+                if (msg.isNotEmpty()) speakTTS(msg)
+            }
+            text.contains("빠르게") || text.contains("빨리") -> {
+                ttsSpeed = (ttsSpeed + 0.25f).coerceAtMost(2.0f)
+                tts.setSpeechRate(ttsSpeed)
+                speakTTS("음성 속도를 높였습니다.")
+            }
+            text.contains("느리게") || text.contains("천천히") -> {
+                ttsSpeed = (ttsSpeed - 0.25f).coerceAtLeast(0.5f)
+                tts.setSpeechRate(ttsSpeed)
+                speakTTS("음성 속도를 낮췄습니다.")
+            }
+            text.contains("크게") || text.contains("볼륨 올려") -> {
+                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
+                speakTTS("소리를 키웠습니다.")
+            }
+            text.contains("작게") || text.contains("볼륨 내려") -> {
+                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+                speakTTS("소리를 줄였습니다.")
+            }
+            text.contains("도움") || text.contains("도움말") -> {
+                speakTTS("종료, 현재위치, 반복, 빠르게, 느리게, 크게, 작게를 사용할 수 있습니다.")
+            }
+            else -> {
+                speakTTS("다시 말씀해주세요.")
+            }
+        }
+    }
+
+    // ==================== 검색 ====================
+
     private fun performSearch(keyword: String) {
-        lifecycleScope.launch {
-            tvStatus.text = "검색 중..."
-            speakTTS("검색 중입니다.")
+        showState(AppState.SEARCHING)
+        speakTTS("검색 중입니다.")
 
-            // 현재 위치 — TMapApiClient 가 이 좌표를 중심으로 1km 반경 검색 + 거리순 정렬
+        lifecycleScope.launch {
             val currentLocation = locationTracker.getCurrentLocation()
             val results = navigationManager.searchDestination(
                 keyword = keyword,
@@ -464,128 +612,148 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             )
 
             if (results.isEmpty()) {
-                // network 에러면 lastError, 아니면 1km 이내 결과 없음
-                val errorMsg = navigationManager.lastError
-                    ?: "주변 1킬로미터 이내에 ${keyword} 검색 결과가 없습니다"
-                tvStatus.text = errorMsg
-                playToneError()
-                speakAndListen("$errorMsg. 다른 목적지를 말씀해주세요.", VoiceMode.IDLE)
+                handleEmptyResults(keyword)
                 return@launch
             }
 
-            currentSearchResults = results
-
-            // GPS 없으면 거리 정렬이 무의미 → 다이얼로그 fallback (시각장애인 시나리오에선 드문 경로)
-            if (currentLocation == null) {
-                if (results.size == 1) {
-                    selectDestination(results.first())
-                } else {
-                    showSearchResults(results, null)
+            // 거리 계산 (현재 위치 있을 때만)
+            val distances: List<Int>? = currentLocation?.let { loc ->
+                results.map { poi ->
+                    LocationTracker.distanceBetween(
+                        loc.latitude, loc.longitude, poi.lat, poi.lon
+                    ).toInt()
                 }
-                return@launch
             }
 
-            // Option C: 가장 가까운 결과 자동 선택. results 는 서버에서 이미 거리순.
-            val nearest = results.first()
-            val nearestDistMeters = LocationTracker.distanceBetween(
-                currentLocation.latitude, currentLocation.longitude,
-                nearest.lat, nearest.lon
-            ).toInt()
-            val distText = formatDistance(nearestDistMeters)
+            // 1개여도 풀스크린 버튼 (사용자 합의안: 일관성)
+            showResultsScreen(results, distances)
+        }
+    }
 
+    /**
+     * 결과 0건 — 자동 STT 재시도 (3회 누적 시 IDLE 로 복귀).
+     */
+    private fun handleEmptyResults(keyword: String) {
+        sttFailureCount++
+        playToneError()
+        if (sttFailureCount >= STT_FAILURE_LIMIT) {
+            sttFailureCount = 0
+            val msg = "주변 1킬로미터 이내에 ${keyword} 검색 결과가 없습니다. 화면을 길게 눌러 다시 시도하세요."
+            speakTTS(msg)
+            showState(AppState.IDLE)
+        } else {
+            val msg = navigationManager.lastError
+                ?: "주변 1킬로미터 이내에 ${keyword} 검색 결과가 없습니다"
+            speakAndListenIdle("$msg. 다른 목적지를 말씀해주세요.")
+        }
+    }
+
+    /**
+     * 검색 결과 풀스크린 — resultsContainer 에 1~5개 버튼 동적 추가.
+     *
+     * TalkBack 인터랙션:
+     *   - 단일 탭 (TalkBack ON) = 버튼 contentDescription 읽기
+     *   - 더블탭 (TalkBack ON) = 선택
+     *   - TalkBack OFF 시 단일 탭으로도 선택 가능 (시연/시각자용)
+     *
+     * 음성 안내: "검색 결과 N개입니다. 위에서부터 하나씩 읽어보세요."
+     * → 사용자가 각 버튼 탭하면 TalkBack 이 가게명 + 거리 + 주소 읽음.
+     */
+    private fun showResultsScreen(results: List<POIResult>, distances: List<Int>?) {
+        showState(AppState.RESULTS)
+        resultsContainer.removeAllViews()
+
+        // TalkBack 분기 전략:
+        //   ON  — 우리 TTS 안 발화. 첫 버튼 contentDescription 에 "검색 결과 N개 중 1번째" 인트로 박아서
+        //         TalkBack 이 첫 focus 잡을 때 한 번에 발화. 우리 TTS 와 시간 겹침 0.
+        //   OFF — 우리 TTS 가 흐름 안내. 각 버튼은 단순 contentDescription.
+        val talkbackOn = isTalkBackEnabled()
+
+        results.forEachIndexed { i, poi ->
+            val distText = distances?.get(i)?.let { formatDistance(it) } ?: ""
+            val button = Button(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    0,
+                    1f   // weight=1 균등 분배
+                ).apply {
+                    setMargins(8, 8, 8, 8)
+                }
+                text = if (distText.isNotEmpty()) "${poi.name}\n$distText" else poi.name
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+                gravity = Gravity.CENTER
+                setTextColor(0xFF000000.toInt())
+                setBackgroundColor(0xFFFFD700.toInt())   // 노랑
+                isAllCaps = false
+
+                // TalkBack 이 읽을 풍부한 설명
+                // 첫 버튼 (i==0) + TalkBack ON 시 검색 결과 전체 안내를 인트로로 포함
+                val intro = when {
+                    talkbackOn && i == 0 -> "검색 결과 ${results.size}개 중 ${i + 1}번째, "
+                    talkbackOn -> "${i + 1}번째, "
+                    else -> ""
+                }
+                val parts = mutableListOf("$intro${poi.name}")
+                if (distText.isNotEmpty()) parts.add("거리 $distText")
+                if (poi.address.isNotEmpty()) parts.add(poi.address)
+                contentDescription = parts.joinToString(", ")
+
+                setOnClickListener {
+                    vibrateShort()
+                    selectDestination(poi)
+                }
+            }
+            resultsContainer.addView(button)
+        }
+
+        // TalkBack OFF 시에만 우리 TTS 발화. ON 일 땐 첫 버튼 focus 때 자동 announce.
+        if (!talkbackOn) {
             val msg = if (results.size == 1) {
-                "${nearest.name}, ${distText} 선택합니다."
+                "검색 결과 1개입니다. 화면 가운데를 눌러 선택하세요."
             } else {
-                "검색 결과 ${results.size}개 중 가장 가까운 ${nearest.name}, ${distText} 선택합니다."
+                "검색 결과 ${results.size}개입니다. 위에서부터 하나씩 읽어보세요."
             }
             speakTTS(msg)
-            selectDestination(nearest)
         }
     }
 
-    // ========== 버튼 ==========
+    private fun selectDestination(selected: POIResult) {
+        lifecycleScope.launch {
+            speakTTS("${selected.name}으로 경로를 탐색합니다.")
 
-    private fun setupButtons() {
-        btnSearch.setOnClickListener {
-            vibrateShort()
-            val keyword = etDestination.text.toString().trim()
-            if (keyword.isEmpty()) {
-                speakAndListen("목적지를 말씀해주세요.", VoiceMode.IDLE)
-                return@setOnClickListener
+            val currentLocation = locationTracker.getCurrentLocation()
+            if (currentLocation == null) {
+                playToneError()
+                speakAndListenIdle("위치를 확인할 수 없습니다. GPS 확인 후 다시 시도하세요.")
+                return@launch
             }
-            performSearch(keyword)
-        }
 
-        btnVoice.setOnClickListener {
-            vibrateShort()
-            startSTT()
-        }
+            val success = navigationManager.startNavigation(
+                startLat = currentLocation.latitude,
+                startLon = currentLocation.longitude,
+                endLat = selected.lat,
+                endLon = selected.lon,
+                endName = selected.name,
+                frontLat = selected.frontLat,
+                frontLon = selected.frontLon
+            )
 
-        btnStart.setOnClickListener {
-            vibrateShort()
-            if (navigationManager.isNavigating.value) {
+            if (success) {
+                showState(AppState.NAVIGATING)
+                playToneSuccess()
+                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+                val summary = getRouteSummary()
+                if (summary.isNotEmpty()) {
+                    speakTTS(summary)
+                }
                 startLocationTracking()
-                speakTTS("위치 추적을 시작합니다.")
+                startAutoRepeat()
             } else {
-                speakAndListen("먼저 목적지를 말씀해주세요.", VoiceMode.IDLE)
+                playToneError()
+                speakAndListenIdle("경로를 찾을 수 없습니다. 다른 목적지를 말씀해주세요.")
             }
         }
-
-        btnStop.setOnClickListener {
-            vibrateShort()
-            stopNavigationFull()
-        }
-    }
-
-    private fun stopNavigationFull() {
-        trackingJob?.cancel()
-        stopAutoRepeat()
-        stopBeacon()
-        stopDirectionalBeacon()
-        navigationManager.stopNavigation()
-        // 지도 제거됨 (PR-UI: 시각장애인 풀스크린 UI)
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        // 풀스크린 UI: 메시지 영역만 초기화. 배경색은 layout XML 의 검정 유지.
-        tvStatus.text = "대기 중"
-        tvGuidance.text = "기기를 흔들어 목적지를 음성으로 입력하세요"
-        tvDistance.text = ""
-        tvArrivalState.text = ""
-
-        voiceMode = VoiceMode.IDLE
-        speakTTS("안내를 종료합니다.")
-    }
-
-    /** 검색 결과 표시 (거리 포함) */
-    private fun showSearchResults(results: List<POIResult>, distances: List<Int>?) {
-        // 음성: "1번 스타벅스 300미터, 2번 ..."
-        val listText = results.mapIndexed { i, poi ->
-            val dist = distances?.get(i)?.let { formatDistance(it) } ?: ""
-            "${i + 1}번, ${poi.name} $dist"
-        }.joinToString(". ")
-
-        // 다이얼로그: 이름 + 주소 + 거리
-        val names = results.mapIndexed { i, poi ->
-            val dist = distances?.get(i)?.let { formatDistance(it) } ?: ""
-            "${i + 1}. ${poi.name} $dist (${poi.address})"
-        }.toTypedArray()
-
-        searchResultDialog = AlertDialog.Builder(this)
-            .setTitle("목적지 선택")
-            .setItems(names) { _, which ->
-                selectDestination(results[which])
-            }
-            .setCancelable(true)
-            .setOnCancelListener {
-                voiceMode = VoiceMode.IDLE
-                speakTTS("목적지를 다시 검색하려면 기기를 흔들어주세요.")
-            }
-            .show()
-
-        // 자동 STT 안 띄움 — TalkBack으로 다이얼로그 항목을 다시 들을 수 있도록
-        // 사용자가 준비되면 기기를 흔들어 번호를 말함
-        voiceMode = VoiceMode.SELECTING
-        speakTTS("검색 결과 ${results.size}개입니다. $listText. 기기를 흔들고 번호를 말씀해주세요.")
     }
 
     /** 거리를 읽기 좋게 포맷 (1200m → "1.2킬로", 300m → "300미터") */
@@ -597,7 +765,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    /** 경로 요약 생성 ("총 800미터, 약 10분, 횡단보도 2개") */
+    /** 경로 요약 ("총 800미터, 약 10분, 횡단보도 2개") */
     private fun getRouteSummary(): String {
         val route = navigationManager.currentRoute ?: return ""
         val totalMin = route.totalTime / 60
@@ -611,65 +779,52 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         return parts.joinToString(", ")
     }
 
-    private fun selectDestination(selected: POIResult) {
-        lifecycleScope.launch {
-            tvStatus.text = "목적지: ${selected.name}"
-            speakTTS("${selected.name}으로 경로를 탐색합니다.")
+    // ==================== 도착 / 종료 ====================
 
-            val currentLocation = locationTracker.getCurrentLocation()
-            if (currentLocation == null) {
-                tvStatus.text = "현재 위치를 가져올 수 없습니다"
-                playToneError()
-                speakAndListen(
-                    "위치를 확인할 수 없습니다. GPS 확인 후 다시 말씀해주세요.",
-                    VoiceMode.IDLE
-                )
-                return@launch
-            }
+    /**
+     * NAVIGATING 종료 — ARRIVED 상태로 전환 후 3초 뒤 자동으로 IDLE 로.
+     */
+    private fun finishNavigation(arrivedName: String) {
+        trackingJob?.cancel()
+        stopAutoRepeat()
+        stopBeacon()
+        navigationManager.stopNavigation()
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-            tvStatus.text = "경로 탐색 중..."
+        tvArrivedName.text = "${arrivedName}에 도착했습니다"
+        showState(AppState.ARRIVED)
 
-            val success = navigationManager.startNavigation(
-                startLat = currentLocation.latitude,
-                startLon = currentLocation.longitude,
-                endLat = selected.lat,
-                endLon = selected.lon,
-                endName = selected.name,
-                frontLat = selected.frontLat,
-                frontLon = selected.frontLon
-            )
-
-            if (success) {
-                tvStatus.text = "안내 중: ${selected.name}"
-                voiceMode = VoiceMode.NAVIGATING
-                playToneSuccess()
-                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                // 지도 그리기 제거됨 (PR-UI). 시각 정보는 음성/진동/비콘으로 전달.
-                // 경로 요약 음성 안내
-                val summary = getRouteSummary()
-                if (summary.isNotEmpty()) {
-                    speakTTS(summary)
-                }
-                startLocationTracking()
-                startAutoRepeat()
-            } else {
-                tvStatus.text = "경로 탐색 실패"
-                playToneError()
-                speakAndListen(
-                    "경로를 찾을 수 없습니다. 다른 목적지를 말씀해주세요.",
-                    VoiceMode.IDLE
-                )
-            }
+        // 3초 후 자동으로 IDLE — 사용자가 화면 안 봐도 다음 검색 흐름 시작 가능
+        arrivedReturnJob?.cancel()
+        arrivedReturnJob = lifecycleScope.launch {
+            delay(ARRIVED_RETURN_MS)
+            stopDirectionalBeacon()  // 방향비콘도 종료
+            speakTTS("다음 목적지를 검색하시려면 화면을 길게 눌러주세요.")
+            showState(AppState.IDLE)
         }
     }
 
-    // ========== GPS 위치 추적 ==========
+    /** 음성 명령 "종료" 또는 사용자가 도중 중단 — ARRIVED 화면 거치지 않고 곧장 IDLE. */
+    private fun stopNavigationFull() {
+        trackingJob?.cancel()
+        stopAutoRepeat()
+        stopBeacon()
+        stopDirectionalBeacon()
+        arrivedReturnJob?.cancel()
+        // navigationManager.stopNavigation() 가 자체적으로 "안내를 종료합니다" 를
+        // guidanceMessage 에 emit 함 → observeGuidance 가 그걸 받아 TTS 재생.
+        // 우리가 여기서 또 speakTTS 호출하면 중복 발화 → 호출 안 함.
+        navigationManager.stopNavigation()
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        showState(AppState.IDLE)
+    }
+
+    // ==================== GPS 위치 추적 ====================
 
     private fun startLocationTracking() {
         trackingJob?.cancel()
         trackingJob = lifecycleScope.launch {
             locationTracker.getLocationUpdates(2000L).collectLatest { location ->
-                // GPS 정확도 낮으면 무시 (25m 이상)
                 if (location.hasAccuracy() && location.accuracy > 25f) {
                     return@collectLatest
                 }
@@ -684,27 +839,22 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                 navigationManager.updateLocation(location.toGpsLocation())
 
-                val dist = LocationTracker.distanceBetween(
-                    location.latitude, location.longitude,
-                    navigationManager.destinationLat, navigationManager.destinationLon
-                )
-
-                // 시각장애인 UI: GPS 좌표는 디버그용 정보. 큰 글씨로 거리만 강조.
-                tvDistance.text = "목적지까지 ${dist.toInt()}m"
+                // 디버그 박스 갱신 (DEBUG 빌드만)
                 if (BuildConfig.DEBUG) {
+                    val dist = LocationTracker.distanceBetween(
+                        location.latitude, location.longitude,
+                        navigationManager.destinationLat, navigationManager.destinationLon
+                    )
                     val accuracyText = if (location.hasAccuracy()) "±${location.accuracy.toInt()}m" else ""
-                    val gpsDebug = "GPS ${String.format("%.5f", location.latitude)}, ${
+                    tvDebugGuidance.text = "GPS ${String.format("%.5f", location.latitude)}, ${
                         String.format("%.5f", location.longitude)
-                    } $accuracyText"
-                    tvStatus.text = gpsDebug
+                    } $accuracyText | dest=${dist.toInt()}m"
                 }
-
-                // 지도 위치 갱신 제거됨 (PR-UI). 거리 변화는 tvDistance + 비콘으로 전달.
             }
         }
     }
 
-    // ========== 안내 자동 반복 ==========
+    // ==================== 안내 자동 반복 ====================
 
     private fun startAutoRepeat() {
         autoRepeatJob?.cancel()
@@ -712,13 +862,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             while (true) {
                 delay(45_000)
                 if (!navigationManager.isNavigating.value) break
-
-                val distText = tvDistance.text.toString()
-                val meters = Regex("목적지까지: (\\d+)m").find(distText)
-                    ?.groupValues?.get(1)
-                if (!meters.isNullOrEmpty()) {
-                    speakTTS("목적지까지 ${meters}미터")
-                }
+                val msg = navigationManager.guidanceMessage.value
+                if (msg.isNotEmpty()) speakTTS(msg)
             }
         }
     }
@@ -728,12 +873,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         autoRepeatJob = null
     }
 
-    // ========== 오디오 비콘 (목적지 접근 시 비프) ==========
+    // ==================== 거리 비콘 ====================
 
     /**
      * 거리 기반 비프음 시작
      * >10m: 3초 간격, 5~10m: 1.5초, 3~5m: 0.8초, <3m: 0.4초
-     * 가까울수록 빨라져서 방향감각 제공
      */
     private fun startBeacon() {
         beaconJob?.cancel()
@@ -753,13 +897,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     else -> 3000L
                 }
 
-                // TTS 재생 중이면 비프 스킵 (음성 안내 방해 방지)
                 if (ttsSpeaking) {
                     delay(interval)
                     continue
                 }
 
-                // 짧은 비프 + 진동 펄스
                 try {
                     val tone = if (dist <= 5f)
                         ToneGenerator.TONE_PROP_BEEP2
@@ -775,9 +917,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         dist <= 5f -> 180
                         else -> 100
                     }
-                    vibrator.vibrate(
-                        VibrationEffect.createOneShot(60, intensity)
-                    )
+                    vibrator.vibrate(VibrationEffect.createOneShot(60, intensity))
                 }
 
                 delay(interval)
@@ -790,12 +930,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         beaconJob = null
     }
 
-    /**
-     * 방향성 비콘 — NEAR 이후 활성
-     * 사용자 헤딩과 목적지 방위 차이를 스테레오 패닝으로 표현.
-     * 왼쪽 소리 → 왼쪽으로 몸 돌리라는 뜻. 소리 균등 = 정면 = 목적지 방향.
-     * 뒤쪽(|각도| > 135°)이면 TTS로 알림.
-     */
+    // ==================== 방향성 비콘 (NEAR 이후 입구 찾기) ====================
+
     private fun startDirectionalBeacon() {
         directionalBeaconJob?.cancel()
         directionalBeaconJob = lifecycleScope.launch {
@@ -806,7 +942,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     continue
                 }
 
-                // 입구 좌표 우선, 없으면 POI 좌표
                 val targetLat = navigationManager.destinationFrontLat
                     ?: navigationManager.destinationLat
                 val targetLon = navigationManager.destinationFrontLon
@@ -821,11 +956,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     latitude = targetLat
                     longitude = targetLon
                 }
-                val bearing = loc.bearingTo(target)  // 북 기준 0~360
+                val bearing = loc.bearingTo(target)
                 var angleDiff = bearing - currentAzimuth
                 while (angleDiff > 180f) angleDiff -= 360f
                 while (angleDiff < -180f) angleDiff += 360f
-                // angleDiff: 음수=왼쪽, 양수=오른쪽, 0=정면, ±180=뒤
 
                 if (ttsSpeaking) {
                     delay(400)
@@ -835,7 +969,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 val (leftVol, rightVol, highPitch) = computeStereoPan(angleDiff)
                 playStereoBeep(leftVol, rightVol, highPitch)
 
-                // 뒤쪽이면 음성 안내 (4초 간격)
                 if (abs(angleDiff) > 135f) {
                     val now = System.currentTimeMillis()
                     if (now - lastBehindAnnounceTime > 4000L) {
@@ -844,7 +977,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     }
                 }
 
-                // 정면 근처일수록 빠른 비트
                 val interval = when {
                     abs(angleDiff) < 15f -> 300L
                     abs(angleDiff) < 45f -> 500L
@@ -860,27 +992,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         directionalBeaconJob = null
     }
 
-    /**
-     * 각도 차이 → (왼쪽 볼륨, 오른쪽 볼륨, 고음 여부) 매핑.
-     * Equal-power pan law. 정면(|각도|<15°)일 때는 고음으로 구분.
-     */
     private fun computeStereoPan(angleDiff: Float): Triple<Float, Float, Boolean> {
         val clamped = angleDiff.coerceIn(-90f, 90f)
-        val pan = clamped / 90f  // -1..+1
+        val pan = clamped / 90f
         val angle = ((pan + 1f) / 2f) * (PI.toFloat() / 2f)
         val left = cos(angle)
         val right = sin(angle)
         val facing = abs(angleDiff) < 15f
-        // 뒤쪽이면 전체 볼륨 낮춤 (시끄럽지 않게, 대신 TTS로 알림)
         val scale = if (abs(angleDiff) > 90f) 0.3f else 1f
         return Triple(left * scale, right * scale, facing)
     }
 
-    /**
-     * 스테레오 PCM 비프 재생.
-     * AudioTrack을 한 번만 STREAM 모드로 만들어 재사용한다 (방향성 비콘이 ~500ms마다 호출 → 매번 생성 시 GC 압박).
-     * leftVol/rightVol: 0~1 개별 채널 진폭 배율.
-     */
     private fun playStereoBeep(leftVol: Float, rightVol: Float, highPitch: Boolean) {
         try {
             val freq = if (highPitch) 1320.0 else 880.0
@@ -917,7 +1039,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 .build()
                 .also { stereoTrack = it }
 
-            // 이전 재생이 끝났든 아니든 새 PCM 데이터를 흘려보내기 전에 멈춤+flush
             try {
                 if (track.playState == AudioTrack.PLAYSTATE_PLAYING) track.pause()
                 track.flush()
@@ -934,15 +1055,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         stereoTrack = null
     }
 
-    // ========== 안내 메시지 수신 ==========
+    // ==================== Guidance Observer ====================
 
     private fun observeGuidance() {
         lifecycleScope.launch {
             navigationManager.guidanceMessage.collectLatest { message ->
                 if (message.isNotEmpty()) {
-                    tvGuidance.text = message
                     speakTTS(message)
                     Log.d("SafeWalkNav", "Guidance: $message")
+
+                    if (BuildConfig.DEBUG) {
+                        tvDebugGuidance.text = "guidance=$message"
+                    }
 
                     if (message.contains("이탈")) {
                         vibrateWarning()
@@ -951,65 +1075,46 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         vibrateMedium()
                         playToneAlert()
                     }
-
-                    // 경로 재탐색 완료 시 (지도 갱신 제거됨, PR-UI)
-                    // 음성 안내(message)만으로 사용자에게 새 경로 알림이 충분히 전달됨
                 }
             }
         }
 
         lifecycleScope.launch {
             navigationManager.arrivalState.collectLatest { state ->
-                tvArrivalState.text = when (state) {
-                    ArrivalState.FAR -> "이동 중"
-                    ArrivalState.APPROACHING -> "목적지 근처 (15m 이내)"
-                    ArrivalState.NEAR -> "거의 도착 (5m 이내)"
-                    ArrivalState.ARRIVED -> "도착!"
-                }
-
-                // 상태별 색상 (시각장애인 풀스크린 UI: 검정 배경 위에서 잘 보이는 톤만 사용)
-                // 지도 줌 제거됨 — 거리 단계는 비콘 빠르기 + 진동으로 표현.
                 when (state) {
                     ArrivalState.FAR -> {
-                        tvArrivalState.setTextColor(Color.parseColor("#888888"))
                         stopDirectionalBeacon()
                     }
 
                     ArrivalState.APPROACHING -> {
-                        tvArrivalState.setTextColor(Color.parseColor("#FFAA33"))
                         vibrateMedium()
-                        // 오디오 비콘 시작 (거리 가까울수록 빠름)
                         startBeacon()
                     }
 
                     ArrivalState.NEAR -> {
-                        tvArrivalState.setTextColor(Color.parseColor("#FF4444"))
                         vibrateMedium()
-                        // 거리비콘 → 방향비콘 전환 (입구 찾기)
                         stopBeacon()
                         startDirectionalBeacon()
                     }
 
                     ArrivalState.ARRIVED -> {
-                        tvArrivalState.setTextColor(Color.parseColor("#00CC66"))
                         stopBeacon()
                         vibrateArrival()
                         playToneSuccess()
-                        stopAutoRepeat()
-                        // 지도 클리어 제거됨 (PR-UI)
-                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                        voiceMode = VoiceMode.IDLE
-                        // 방향비콘은 계속 유지 (입구 찾기 단계). 종료 버튼 누르면 중지.
+                        // 방향비콘은 계속 유지 — 입구 찾는 동안. finishNavigation 의 3초 후 종료.
                         if (directionalBeaconJob == null) {
                             startDirectionalBeacon()
                         }
+                        // ARRIVED 화면 + 3초 후 자동 IDLE 복귀
+                        val name = navigationManager.destinationName.ifEmpty { "목적지" }
+                        finishNavigation(name)
                     }
                 }
             }
         }
     }
 
-    // ========== 진동 패턴 ==========
+    // ==================== 진동 패턴 ====================
 
     private fun vibrateShort() {
         vibrator.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
@@ -1031,7 +1136,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         )
     }
 
-    // ========== 효과음 ==========
+    // ==================== 효과음 ====================
 
     private fun playToneSuccess() {
         try {
@@ -1061,7 +1166,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // ========== TTS ==========
+    // ==================== TTS ====================
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
@@ -1093,13 +1198,20 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun onGPSEnabled() {
         gpsReady = true
+        updateDebugInfo()
         tryPlayWelcome()
     }
 
     private fun tryPlayWelcome() {
         if (ttsReady && gpsReady && !welcomePlayed) {
             welcomePlayed = true
-            speakAndListen("SafeWalkNav입니다. 목적지를 말씀해주세요.", VoiceMode.IDLE)
+            // TalkBack ON 일 땐 우리 TTS 발화 안 함 — TalkBack 이 자동으로 root layout 의
+            // contentDescription ("화면을 2초간 길게 눌러 음성으로 목적지를 입력하세요") 을
+            // 화면 진입 시 읽어주고, 그 끝에 "두 번 탭하여 활성화" hint 가 자동 추가됨.
+            // 우리 TTS 가 동시에 나오면 두 음성이 겹쳐서 혼란.
+            if (!isTalkBackEnabled()) {
+                speakTTS("SafeWalkNav입니다. 내비게이션을 실행하시려면 화면을 2초간 길게 눌러주세요.")
+            }
         }
     }
 
@@ -1107,7 +1219,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tts.speak(message, TextToSpeech.QUEUE_ADD, null, message.hashCode().toString())
     }
 
-    // ========== GPS ==========
+    /**
+     * 안내 TTS 끝나면 자동으로 STT 시작 (IDLE 상태로 전환).
+     * 0건/실패 후 자동 재시도 흐름에 사용.
+     */
+    private fun speakAndListenIdle(message: String) {
+        showState(AppState.IDLE)
+        tts.speak(message, TextToSpeech.QUEUE_ADD, null, "auto_listen")
+    }
+
+    // ==================== GPS ====================
 
     private fun checkAndEnableGPS() {
         if (gpsReady) return
@@ -1141,21 +1262,31 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
     }
 
-    // ========== 권한 ==========
+    // ==================== 권한 ====================
 
     private fun requestLocationPermission() {
+        val perms = mutableListOf<String>()
         if (ActivityCompat.checkSelfPermission(
                 this, Manifest.permission.ACCESS_FINE_LOCATION
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(
-                    Manifest.permission.ACCESS_FINE_LOCATION,
-                    Manifest.permission.ACCESS_COARSE_LOCATION
-                ),
-                LOCATION_PERMISSION_CODE
-            )
+            perms.add(Manifest.permission.ACCESS_FINE_LOCATION)
+            perms.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+        }
+        if (ActivityCompat.checkSelfPermission(
+                this, Manifest.permission.RECORD_AUDIO
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            perms.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (ActivityCompat.checkSelfPermission(
+                this, Manifest.permission.CAMERA
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            perms.add(Manifest.permission.CAMERA)
+        }
+        if (perms.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, perms.toTypedArray(), LOCATION_PERMISSION_CODE)
         }
     }
 
@@ -1164,44 +1295,21 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == LOCATION_PERMISSION_CODE) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            // 이번 요청 batch 가 아니라 "현재 권한 상태"로 판단.
+            // 이전 실행에서 위치는 이미 허용됐고 이번엔 카메라/마이크만 새로 요청한 케이스
+            // → permissions 배열에 위치가 없어 zip.any 로 체크 시 항상 false 가 되는 버그 회피.
+            val locationGranted = ActivityCompat.checkSelfPermission(
+                this, Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED ||
+                ActivityCompat.checkSelfPermission(
+                    this, Manifest.permission.ACCESS_COARSE_LOCATION
+                ) == PackageManager.PERMISSION_GRANTED
+
+            if (locationGranted) {
                 checkAndEnableGPS()
             } else {
                 speakTTS("위치 권한이 필요합니다. 설정에서 허용해주세요.")
             }
         }
-    }
-
-    // ========== 라이프사이클 ==========
-
-    override fun onResume() {
-        super.onResume()
-        checkAndEnableGPS()
-        accelerometer?.let {
-            sensorManager.registerListener(shakeListener, it, SensorManager.SENSOR_DELAY_UI)
-            sensorManager.registerListener(orientationListener, it, SensorManager.SENSOR_DELAY_UI)
-        }
-        magnetometer?.let {
-            sensorManager.registerListener(orientationListener, it, SensorManager.SENSOR_DELAY_UI)
-        }
-    }
-
-    override fun onPause() {
-        super.onPause()
-        sensorManager.unregisterListener(shakeListener)
-        sensorManager.unregisterListener(orientationListener)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        trackingJob?.cancel()
-        autoRepeatJob?.cancel()
-        beaconJob?.cancel()
-        directionalBeaconJob?.cancel()
-        tts.shutdown()
-        toneGenerator?.release()
-        releaseStereoTrack()
-        // tMapView 제거됨 (PR-UI)
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 }
