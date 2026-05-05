@@ -219,7 +219,7 @@ class NavigationManager(
 
     suspend fun updateLocation(location: GpsLocation) {
         if (!_isNavigating.value) return
-        currentRoute ?: return
+        val route = currentRoute ?: return
 
         val currentLat = location.latitude
         val currentLon = location.longitude
@@ -267,6 +267,11 @@ class NavigationManager(
         // Forward-Only Waypoint 동기화 (지나간 waypoint를 다시 잡는 문제 방지)
         currentRoute?.let {
             syncWaypointIndexForwardOnly(it, currentLat, currentLon)
+        }
+
+        var isInCrossWalkZone = isOnCrosswalkSegment(currentLat, currentLon, route.waypoints, currentWaypointIndex)
+        if(isInCrossWalkZone){
+            fetchTrafficSignalData(currentLat, currentLon)
         }
 
         // waypoint 안내
@@ -391,6 +396,10 @@ class NavigationManager(
         }
     }
 
+
+    private suspend fun fetchTrafficSignalData(lat: Double, lon: Double){
+        //API호출 로직
+    }
     /**
      * 안전한 시계 방향 계산
      * 속도가 너무 낮으면(정지 상태) bearing이 부정확하므로 "전방" 으로 대체

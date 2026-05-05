@@ -32,32 +32,33 @@ fun isCrosswalkWaypoint(wp: Waypoint): Boolean {
  * @param currentWaypointIndex 현재 추적 중인 waypoint 인덱스 (다음 도달 예정)
  * @return 횡단보도 윈도우 안 여부
  */
-fun isOnCrosswalkSegment(
-    currentLat: Double,
-    currentLon: Double,
-    waypoints: List<Waypoint>,
-    currentWaypointIndex: Int
-): Boolean {
-    if (waypoints.isEmpty()) return false
 
-    // 1) 다음 waypoint = 진입 예정 횡단보도
-    if (currentWaypointIndex < waypoints.size) {
-        val next = waypoints[currentWaypointIndex]
-        if (isCrosswalkWaypoint(next)) {
-            val dist = distanceBetween(currentLat, currentLon, next.lat, next.lon)
-            if (dist <= 30f) return true
+    fun isOnCrosswalkSegment(
+        currentLat: Double,
+        currentLon: Double,
+        waypoints: List<Waypoint>,
+        currentWaypointIndex: Int
+    ): Boolean {
+        if (waypoints.isEmpty()) return false
+
+        // 1) 다음 waypoint = 진입 예정 횡단보도
+        if (currentWaypointIndex < waypoints.size) {
+            val next = waypoints[currentWaypointIndex]
+            if (isCrosswalkWaypoint(next)) {
+                val dist = distanceBetween(currentLat, currentLon, next.lat, next.lon)
+                if (dist <= 30f) return true
+            }
         }
-    }
 
-    // 2) 직전 waypoint = 방금 통과한 횡단보도
-    val prevIdx = currentWaypointIndex - 1
-    if (prevIdx in waypoints.indices) {
-        val prev = waypoints[prevIdx]
-        if (isCrosswalkWaypoint(prev)) {
-            val dist = distanceBetween(currentLat, currentLon, prev.lat, prev.lon)
-            if (dist <= 20f) return true
+        // 2) 직전 waypoint = 방금 통과한 횡단보도
+        val prevIdx = currentWaypointIndex - 1
+        if (prevIdx in waypoints.indices) {
+            val prev = waypoints[prevIdx]
+            if (isCrosswalkWaypoint(prev)) {
+                val dist = distanceBetween(currentLat, currentLon, prev.lat, prev.lon)
+                if (dist <= 20f) return true
+            }
         }
-    }
 
-    return false
-}
+        return false
+    }
