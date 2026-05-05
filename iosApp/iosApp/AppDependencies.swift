@@ -21,6 +21,7 @@ final class AppDependencies: ObservableObject {
     let headingProvider: HeadingProvider
     let stt: SttManager
     let trafficLightDetector: TrafficLightDetector
+    let orientationMonitor: DeviceOrientationMonitor
 
     // MARK: - KMM Managers
     let navigationManager: NavigationManager
@@ -34,24 +35,26 @@ final class AppDependencies: ObservableObject {
         let tts = TtsManager()
         let locationTracker = LocationTracker()
         let headingProvider = HeadingProvider()
+        let orientationMonitor = DeviceOrientationMonitor()
 
         // 2. KMM 매니저 (TMap API 키로 초기화)
         let apiKey = Secrets.tMapAppKey
-            print("[AppDependencies] API 키 길이: \(apiKey.count)")
-            print("[AppDependencies] API 키 앞 5자: \(apiKey.prefix(5))")
-            print("[AppDependencies] API 키 뒤 3자: \(apiKey.suffix(3))")
-            
+        print("[AppDependencies] API 키 길이: \(apiKey.count)")
+        print("[AppDependencies] API 키 앞 5자: \(apiKey.prefix(5))")
+        print("[AppDependencies] API 키 뒤 3자: \(apiKey.suffix(3))")
+
         let tMapClient = TMapApiClient(appKey: apiKey)
         let navigationManager = NavigationManager(
             tMapApiClient: tMapClient,
             headingLogger: NoopHeadingLogger.shared
         )
 
-        // 3. 통합 ViewModel
+        // 3. 통합 ViewModel — orientationMonitor도 주입
         let navigationViewModel = NavigationViewModel(
             tts: tts,
             locationTracker: locationTracker,
             headingProvider: headingProvider,
+            orientationMonitor: orientationMonitor,
             navigationManager: navigationManager
         )
 
@@ -59,9 +62,13 @@ final class AppDependencies: ObservableObject {
         self.tts = tts
         self.locationTracker = locationTracker
         self.headingProvider = headingProvider
+        self.orientationMonitor = orientationMonitor
         self.navigationManager = navigationManager
         self.stt = SttManager(tts: tts)
         self.navigationViewModel = navigationViewModel
         self.trafficLightDetector = TrafficLightDetector(tts: tts)
+
+        // 5. 자세 모니터링 자동 시작 (앱 켜는 순간부터 감시)
+        orientationMonitor.start()
     }
 }
