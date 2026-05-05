@@ -440,6 +440,22 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             stopCamera()
         }
 
+        // TalkBack accessibility — root 의 announce 대상 여부 토글.
+        //   IDLE/LISTENING: root 가 announce 대상 (사용자가 long press 가능 영역).
+        //   RESULTS/NAVIGATING/ARRIVED: root 를 accessibility tree 에서 제외.
+        //     자식 컨테이너 (버튼들 / 카메라 / 도착 화면) 가 자체 contentDescription 가지므로
+        //     root 까지 announce 되면 화면 변화 마다 "화면을 2초간 길게 눌러..." 가 반복 발화됨.
+        when (state) {
+            AppState.IDLE, AppState.LISTENING -> {
+                rootLayout.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
+                rootLayout.contentDescription = "화면을 2초간 길게 눌러 음성으로 목적지를 입력하세요"
+            }
+            else -> {
+                rootLayout.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                rootLayout.contentDescription = null
+            }
+        }
+
         updateDebugInfo()
     }
 
