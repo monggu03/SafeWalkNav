@@ -186,7 +186,7 @@ APK 출력: `androidApp/build/outputs/apk/debug/androidApp-debug.apk`
 ## 팀
 
 - **이도윤(@monggu03)** — Android, 알고리즘, KMM 마이그레이션
-- **김지민(@jiminlyy)** — AI(YOLOv8n 학습), iOS
+- **이지민(@jiminlyy)** — AI(YOLOv8n 학습), iOS
 
 ## 라이선스
 
