@@ -18,6 +18,7 @@ import kotlin.math.abs
 class NavigationManager(
     private val tMapApiClient: TMapApiClient,
     private val headingLogger: HeadingLogger = NoopHeadingLogger,
+    private val trafficSignals: List<TrafficSignalLocation> = emptyList(),
 ) {
     var currentRoute: TMapRoute? = null
         private set
@@ -38,6 +39,10 @@ class NavigationManager(
     // 안내 메시지
     private val _guidanceMessage = MutableStateFlow("")
     val guidanceMessage: StateFlow<String> = _guidanceMessage
+
+    // 디버그 메시지
+    private val _debugMessage = MutableStateFlow("")
+    val debugMessage: StateFlow<String> = _debugMessage
 
     // 내비게이션 활성 여부
     private val _isNavigating = MutableStateFlow(false)
@@ -270,15 +275,39 @@ class NavigationManager(
             syncWaypointIndexForwardOnly(it, currentLat, currentLon)
         }
 
-        var currentWp = route.waypoints.getOrNull(currentWaypointIndex)
-        var isInCrossWalkZone = isOnCrosswalkSegment(currentLat, currentLon, route.waypoints, currentWaypointIndex)
-        if(isInCrossWalkZone && currentWp != null){
-            val targetID = currentWp.description ?: ""
-            if(targetID.isNotEmpty()){
-                fetchTrafficSignalData(targetID)
-            }
-            else{
-                println("횡단보도 구간이나 id가 없습니다")
+        val currentWp = route.waypoints.getOrNull(currentWaypointIndex)
+
+        val isInCrossWalkZone = isOnCrosswalkSegment(
+            currentLat,
+            currentLon,
+            route.waypoints,
+            currentWaypointIndex
+        )
+
+        _debugMessage.value =
+            "횡단보도=$isInCrossWalkZone\n" +
+                    "idx=$currentWaypointIndex/${route.waypoints.size}\n" +
+                    "wp=${currentWp?.pointType}\n" +
+                    "roadType=${currentWp?.roadType}\n" +
+                    "turnType=${currentWp?.turnType}\n" +
+                    "desc=${currentWp?.description}"
+
+        if (isInCrossWalkZone) {
+            val nearestSignal = TrafficSignalMatcher.findNearestSignal(
+                currentLat = currentLat,
+                currentLon = currentLon,
+                signals = trafficSignals,
+                radiusMeters = 30f
+            )
+
+            if (nearestSignal != null) {
+                _debugMessage.value =
+                    "횡단보도 감지됨\n신호제어기 ID=${nearestSignal.itstId}\nAPI 호출 시도"
+
+                fetchTrafficSignalData(nearestSignal.itstId)
+            } else {
+                _debugMessage.value =
+                    "횡단보도 감지됨\n하지만 30m 이내 신호제어기 없음"
             }
         }
 
@@ -411,6 +440,9 @@ class NavigationManager(
         // 2. 결과 처리
         if (response.status != "ERROR" && response.items.isNotEmpty()) {
             val currentSignal = response.items.first()
+            //임시 확인 메시지
+            _debugMessage.value =
+                "신호 API 성공\nID=${currentSignal.itstId}\n상태=${currentSignal.signalState}\n남은 시간=${currentSignal.remainTime}초"
 
             // 3. 신호등 상태에 따른 로직 실행 (예: TTS 안내 등)
             handleSignalUpdate(currentSignal)

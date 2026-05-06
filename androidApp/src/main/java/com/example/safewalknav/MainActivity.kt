@@ -68,7 +68,7 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
-
+import com.example.safewalknav.navigation.TrafficSignalLocation
 /**
  * 시각장애인 사용자 흐름 — PR-UX1 (사용자 합의안)
  *
@@ -300,6 +300,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         locationTracker = LocationTracker(this)
         val headingLogger = AndroidHeadingLogger(
             getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)!!
+        )
+        //임시 리스트
+        val testSignals = listOf(
+            TrafficSignalLocation(
+                itstId = "1537",
+                lat = 37.49017,
+                lon = 126.98617
+            )
         )
         navigationManager = NavigationManager(
             TMapApiClient(BuildConfig.TMAP_APP_KEY),
@@ -882,9 +890,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         navigationManager.destinationLat, navigationManager.destinationLon
                     )
                     val accuracyText = if (location.hasAccuracy()) "±${location.accuracy.toInt()}m" else ""
-                    tvDebugGuidance.text = "GPS ${String.format("%.5f", location.latitude)}, ${
+                    /*tvDebugGuidance.text = "GPS ${String.format("%.5f", location.latitude)}, ${
                         String.format("%.5f", location.longitude)
-                    } $accuracyText | dest=${dist.toInt()}m"
+                    } $accuracyText | dest=${dist.toInt()}m"*/
+                    tvDebugGuidance.text =
+                        "${navigationManager.debugMessage.value}\n" +
+                                "GPS ${String.format("%.5f", location.latitude)}, ${
+                                    String.format("%.5f", location.longitude)
+                                } $accuracyText | dest=${dist.toInt()}m"
                 }
             }
         }
@@ -1145,6 +1158,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         val name = navigationManager.destinationName.ifEmpty { "목적지" }
                         finishNavigation(name)
                     }
+                }
+            }
+        }
+        //화면 표시
+        lifecycleScope.launch {
+            navigationManager.debugMessage.collectLatest { message ->
+                if (BuildConfig.DEBUG && message.isNotEmpty()) {
+                    tvDebugGuidance.text = message
                 }
             }
         }
