@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.abs
 
+
 /**
  * 내비게이션 매니저
  * 경로 탐색 → 경로 추종 → 도착 안내 전체 흐름 관리
@@ -269,9 +270,16 @@ class NavigationManager(
             syncWaypointIndexForwardOnly(it, currentLat, currentLon)
         }
 
+        var currentWp = route.waypoints.getOrNull(currentWaypointIndex)
         var isInCrossWalkZone = isOnCrosswalkSegment(currentLat, currentLon, route.waypoints, currentWaypointIndex)
-        if(isInCrossWalkZone){
-            fetchTrafficSignalData(currentLat, currentLon)
+        if(isInCrossWalkZone && currentWp != null){
+            val targetID = currentWp.description ?: ""
+            if(targetID.isNotEmpty()){
+                fetchTrafficSignalData(targetID)
+            }
+            else{
+                println("횡단보도 구간이나 id가 없습니다")
+            }
         }
 
         // waypoint 안내
@@ -397,8 +405,8 @@ class NavigationManager(
     }
 
 
-    private suspend fun fetchTrafficSignalData(lat: Double, lon: Double){// 1. SignalApiClient 호출 (이미 shared 모듈에 있으므로 바로 접근 가능)
-        val response = SignalApiClient.fetchTrafficSignalData(itstId = "1537")
+    private suspend fun fetchTrafficSignalData(itstId: String){
+        val response = SignalApiClient.fetchTrafficSignalData(itstId)
 
         // 2. 결과 처리
         if (response.status != "ERROR" && response.items.isNotEmpty()) {
@@ -414,6 +422,8 @@ class NavigationManager(
     private fun handleSignalUpdate(item: SignalItem) {
         // item.signalState 가 1이면 초록불, 2면 빨간불 등 (API 명세 기준)
         println("[NavManager] 현재 신호: ${item.signalState}, 남은 시간: ${item.remainTime}초")
+        println("🚦 [SIGNAL_RESULT] ID: ${item.itstId}")
+
     }
     /**
      * 안전한 시계 방향 계산
