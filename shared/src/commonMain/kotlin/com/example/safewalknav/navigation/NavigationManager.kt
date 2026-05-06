@@ -2,6 +2,7 @@ package com.example.safewalknav.navigation
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.abs
 
 /**
@@ -18,6 +19,12 @@ class NavigationManager(
     private val tMapApiClient: TMapApiClient,
     private val headingLogger: HeadingLogger = NoopHeadingLogger,
 ) {
+    private val walkingDiagnostic = WalkingDiagnostic()
+    // --- 여기 아래 코드를 추가해줘 ---
+    private val _compassHeading = MutableStateFlow(0f)
+    private var currentTargetBearing: Float = 0f // 현재 목표 방위각 저장용 변수
+
+    // 외부에서 관찰할 수 있는 StateFlow (필요시)
     var currentRoute: TMapRoute? = null
         private set
 
@@ -36,11 +43,11 @@ class NavigationManager(
 
     // 안내 메시지
     private val _guidanceMessage = MutableStateFlow("")
-    val guidanceMessage: StateFlow<String> = _guidanceMessage
+    val guidanceMessage: StateFlow<String> = _guidanceMessage.asStateFlow()
 
     // 내비게이션 활성 여부
     private val _isNavigating = MutableStateFlow(false)
-    val isNavigating: StateFlow<Boolean> = _isNavigating
+    val isNavigating: StateFlow<Boolean> = _isNavigating.asStateFlow()
 
     // 목적지까지 실시간 거리 (오디오 비콘용)
     private val _distanceToDestination = MutableStateFlow(Float.MAX_VALUE)
@@ -49,7 +56,8 @@ class NavigationManager(
     val lastError: String? get() = tMapApiClient.lastError
 
     private var lastSpokenMessage = ""
-    private var lastGuidanceTime = 0L
+    private var lastGuidanceTime: Long = 0L
+    private val guidanceCooldownMs: Long = 5000L
     private var lastRerouteTime = 0L
     private var lastPreAnnouncedIndex = -1
     private var consecutiveRerouteCount = 0  // 연속 재탐색 횟수 (쿨다운 점진 증가)
@@ -85,8 +93,28 @@ class NavigationManager(
      * MainActivity의 센서 퓨전(가속도+자력계) azimuth를 최신값으로 받는다.
      * CSV `rotation_vector_heading` 필드 기록용. heading 판정 로직 자체는 GPS bearing 기반 그대로 유지.
      */
-    fun updateCompassHeading(azimuth: Float) {
-        latestCompassHeading = azimuth
+    fun updateCompassHeading(azimuth: Float, currentTime: Long) {
+        _compassHeading.value = azimuth
+
+        if (_isNavigating.value) {
+            val targetBearing = currentTargetBearing
+            val status = walkingDiagnostic.analyzeLeanStatus(azimuth, targetBearing)
+
+            // 5초 쿨타임 계산
+            if (currentTime - lastGuidanceTime >= guidanceCooldownMs) {
+                when (status) {
+                    LeanStatus.LEFT_LEAN -> {
+                        emitGuidance("왼쪽으로 치우쳤습니다. 오른쪽으로 오세요.")
+                        lastGuidanceTime = currentTime
+                    }
+                    LeanStatus.RIGHT_LEAN -> {
+                        emitGuidance("오른쪽으로 치우쳤습니다. 왼쪽으로 오세요.")
+                        lastGuidanceTime = currentTime
+                    }
+                    LeanStatus.STRAIGHT -> { }
+                }
+            }
+        }
     }
 
     // ========== 경로 탐색 ==========
@@ -168,6 +196,10 @@ class NavigationManager(
             "${endName}까지 ${totalM}미터, 약 ${totalMin}분 소요됩니다. 안내를 시작합니다."
 
         return true
+    }
+
+    private fun emitGuidance(message: String) {
+        _guidanceMessage.value = message // 안내 메시지를 업데이트하는 역할
     }
 
     fun stopNavigation() {
