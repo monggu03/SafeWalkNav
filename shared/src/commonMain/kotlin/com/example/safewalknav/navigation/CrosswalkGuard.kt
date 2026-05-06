@@ -33,7 +33,7 @@ fun isCrosswalkWaypoint(wp: Waypoint): Boolean {
  * @return 횡단보도 윈도우 안 여부
  */
 
-    fun isOnCrosswalkSegment(
+fun isOnCrosswalkSegment(
         currentLat: Double,
         currentLon: Double,
         waypoints: List<Waypoint>,

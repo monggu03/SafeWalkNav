@@ -18,7 +18,7 @@ import kotlin.math.abs
 class NavigationManager(
     private val tMapApiClient: TMapApiClient,
     private val headingLogger: HeadingLogger = NoopHeadingLogger,
-    private val trafficSignals: List<TrafficSignalLocation> = emptyList(),
+    private val trafficSignals: List<TrafficSignalLocation> = emptyList(), //횡단보도 주변 신호등 데이터
 ) {
     var currentRoute: TMapRoute? = null
         private set
@@ -275,6 +275,7 @@ class NavigationManager(
             syncWaypointIndexForwardOnly(it, currentLat, currentLon)
         }
 
+        //현재 추척중인 waypoint 정보
         val currentWp = route.waypoints.getOrNull(currentWaypointIndex)
 
         val isInCrossWalkZone = isOnCrosswalkSegment(
@@ -284,6 +285,7 @@ class NavigationManager(
             currentWaypointIndex
         )
 
+        //횡단보도 상태 디버그 출력
         _debugMessage.value =
             "횡단보도=$isInCrossWalkZone\n" +
                     "idx=$currentWaypointIndex/${route.waypoints.size}\n" +
@@ -435,16 +437,17 @@ class NavigationManager(
 
 
     private suspend fun fetchTrafficSignalData(itstId: String){
+        //실시간 신호 정보 요청
         val response = SignalApiClient.fetchTrafficSignalData(itstId)
 
-        // 2. 결과 처리
         if (response.status != "ERROR" && response.items.isNotEmpty()) {
             val currentSignal = response.items.first()
-            //임시 확인 메시지
+
+            //신호 API 디버그
             _debugMessage.value =
                 "신호 API 성공\nID=${currentSignal.itstId}\n상태=${currentSignal.signalState}\n남은 시간=${currentSignal.remainTime}초"
 
-            // 3. 신호등 상태에 따른 로직 실행 (예: TTS 안내 등)
+            //신호등 상태 처리
             handleSignalUpdate(currentSignal)
         } else {
             println("NavManager 신호 데이터를 가져오지 못했습니다.")
@@ -452,11 +455,10 @@ class NavigationManager(
     }
 
     private fun handleSignalUpdate(item: SignalItem) {
-        // item.signalState 가 1이면 초록불, 2면 빨간불 등 (API 명세 기준)
-        println("[NavManager] 현재 신호: ${item.signalState}, 남은 시간: ${item.remainTime}초")
-        println("🚦 [SIGNAL_RESULT] ID: ${item.itstId}")
-
+        _debugMessage.value =
+            "현재 신호=${item.signalState}\n남은 시간=${item.remainTime}초"
     }
+
     /**
      * 안전한 시계 방향 계산
      * 속도가 너무 낮으면(정지 상태) bearing이 부정확하므로 "전방" 으로 대체

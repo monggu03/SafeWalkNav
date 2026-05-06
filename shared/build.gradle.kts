@@ -44,10 +44,10 @@ kotlin {
             //         (기존 Gson JsonParser 와 동등한 사용감)
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:$kotlinxSerializationVersion")
 
-            //HTTP - 통신 결과 객체로 자동 변환
+            //HTTP - 통신 결과 Kotlin 객체로 자동 변환
             implementation("io.ktor:ktor-client-content-negotiation:${ktorVersion}")
 
-            //JSON - 포맷 해석 및 처리
+            //JSON - Kotlin 객체 직렬화/역직렬화
             implementation("io.ktor:ktor-serialization-kotlinx-json:${ktorVersion}")
         }
         commonTest.dependencies {
