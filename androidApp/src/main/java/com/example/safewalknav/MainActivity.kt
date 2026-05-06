@@ -301,14 +301,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val headingLogger = AndroidHeadingLogger(
             getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)!!
         )
-        //임시 리스트
-        val testSignals = listOf(
-            TrafficSignalLocation(
-                itstId = "1537",
-                lat = 37.49017,
-                lon = 126.98617
-            )
-        )
+
         navigationManager = NavigationManager(
             TMapApiClient(BuildConfig.TMAP_APP_KEY),
             headingLogger,
@@ -890,9 +883,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         navigationManager.destinationLat, navigationManager.destinationLon
                     )
                     val accuracyText = if (location.hasAccuracy()) "±${location.accuracy.toInt()}m" else ""
-                    /*tvDebugGuidance.text = "GPS ${String.format("%.5f", location.latitude)}, ${
-                        String.format("%.5f", location.longitude)
-                    } $accuracyText | dest=${dist.toInt()}m"*/
+
                     tvDebugGuidance.text =
                         "${navigationManager.debugMessage.value}\n" +
                                 "GPS ${String.format("%.5f", location.latitude)}, ${
@@ -1161,7 +1152,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
             }
         }
-        //화면 표시
+        //신호등 디버그 화면 표시
         lifecycleScope.launch {
             navigationManager.debugMessage.collectLatest { message ->
                 if (BuildConfig.DEBUG && message.isNotEmpty()) {
