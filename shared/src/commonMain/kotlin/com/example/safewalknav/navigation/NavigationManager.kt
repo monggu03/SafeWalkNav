@@ -397,8 +397,23 @@ class NavigationManager(
     }
 
 
-    private suspend fun fetchTrafficSignalData(lat: Double, lon: Double){
-        //API호출 로직
+    private suspend fun fetchTrafficSignalData(lat: Double, lon: Double){// 1. SignalApiClient 호출 (이미 shared 모듈에 있으므로 바로 접근 가능)
+        val response = SignalApiClient.fetchTrafficSignalData(itstId = "1537")
+
+        // 2. 결과 처리
+        if (response.status != "ERROR" && response.items.isNotEmpty()) {
+            val currentSignal = response.items.first()
+
+            // 3. 신호등 상태에 따른 로직 실행 (예: TTS 안내 등)
+            handleSignalUpdate(currentSignal)
+        } else {
+            println("NavManager 신호 데이터를 가져오지 못했습니다.")
+        }
+    }
+
+    private fun handleSignalUpdate(item: SignalItem) {
+        // item.signalState 가 1이면 초록불, 2면 빨간불 등 (API 명세 기준)
+        println("[NavManager] 현재 신호: ${item.signalState}, 남은 시간: ${item.remainTime}초")
     }
     /**
      * 안전한 시계 방향 계산

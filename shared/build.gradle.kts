@@ -43,6 +43,12 @@ kotlin {
             // JSON — 응답 텍스트를 JsonElement 트리로 파싱
             //         (기존 Gson JsonParser 와 동등한 사용감)
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:$kotlinxSerializationVersion")
+
+            //HTTP - 통신 결과 객체로 자동 변환
+            implementation("io.ktor:ktor-client-content-negotiation:${ktorVersion}")
+
+            //JSON - 포맷 해석 및 처리
+            implementation("io.ktor:ktor-serialization-kotlinx-json:${ktorVersion}")
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
