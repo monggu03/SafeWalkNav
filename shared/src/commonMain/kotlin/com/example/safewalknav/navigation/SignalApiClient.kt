@@ -37,10 +37,10 @@ object SignalApiClient {
     }
 
     suspend fun fetchTrafficSignalData(itstId: String): TrafficSignalResponse {
-        // 실제 API 정보 (보내주신 내용 적용)
-        val myApiKey = "5973299f-004f-4d44-abf3-f2bcab256e43"
+        // 실제 API 정보
+        val myApiKey = ""
         // 주소에 apikey가 포함되어 있다면 뒤의 파라미터는 떼고 기본 주소만 써도 됩니다.
-        val url = "https://t-data.seoul.go.kr/apig/apiman-gateway/tapi/v2xSignalPhaseTimingFusionInformation/1.0"
+        val url = ""
 
         return try {
             client.get(url) {
