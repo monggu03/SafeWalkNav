@@ -4,6 +4,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.gms.google-services")
+    id("kotlin-kapt")//room사용으로 추가
 }
 
 val tmapAppKey: String = run {
@@ -13,6 +14,15 @@ val tmapAppKey: String = run {
         localFile.inputStream().use { props.load(it) }
     }
     props.getProperty("TMAP_APP_KEY", "")
+}
+
+val seoulApiKey: String = run {
+    val props = Properties()
+    val localFile = rootProject.file("local.properties")
+    if (localFile.exists()) {
+        localFile.inputStream().use { props.load(it) }
+    }
+    props.getProperty("SEOUL_API_KEY", "")
 }
 
 android {
@@ -28,6 +38,7 @@ android {
 
         // TMap API Key - local.properties에서 로드
         buildConfigField("String", "TMAP_APP_KEY", "\"$tmapAppKey\"")
+        buildConfigField("String", "SEOUL_API_KEY", "\"$seoulApiKey\"")
     }
 
     buildTypes {
@@ -102,4 +113,13 @@ dependencies {
     // OpenCV (Android) — 점자블록(노란색) / 횡단보도 줄무늬 검출
     // quickbirdstudios 패키지: 비공식이지만 안정성 검증된 OpenCV Android 빌드
     implementation("com.quickbirdstudios:opencv:4.5.3.0")
+
+    //Room - 신호등 위치 데이터 로컬 캐시
+    val roomVersion = "2.6.1"
+    implementation("androidx.room:room-runtime:$roomVersion")
+    implementation("androidx.room:room-ktx:$roomVersion")
+    kapt("androidx.room:room-compiler:$roomVersion")
+
+    //좌표 변환
+    implementation("org.locationtech.proj4j:proj4j:1.3.0")
 }
