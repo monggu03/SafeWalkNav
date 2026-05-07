@@ -4,7 +4,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.abs
 
-
 /**
  * 내비게이션 매니저
  * 경로 탐색 → 경로 추종 → 도착 안내 전체 흐름 관리
@@ -18,8 +17,12 @@ import kotlin.math.abs
 class NavigationManager(
     private val tMapApiClient: TMapApiClient,
     private val headingLogger: HeadingLogger = NoopHeadingLogger,
-    private val trafficSignals: List<TrafficSignalLocation> = emptyList(), //횡단보도 주변 신호등 데이터
+    private var trafficSignals: List<TrafficSignalLocation> = emptyList(), //횡단보도 주변 신호등 데이터
 ) {
+    fun updateTrafficSignals(signals: List<TrafficSignalLocation>) {
+        trafficSignals = signals
+        _debugMessage.value = "signals=${signals.size}"
+    }
     var currentRoute: TMapRoute? = null
         private set
 
@@ -278,6 +281,7 @@ class NavigationManager(
         //현재 추척중인 waypoint 정보
         val currentWp = route.waypoints.getOrNull(currentWaypointIndex)
 
+        // 현재 위치가 횡단보도인지 판정
         val isInCrossWalkZone = isOnCrosswalkSegment(
             currentLat,
             currentLon,
@@ -293,8 +297,15 @@ class NavigationManager(
                     "roadType=${currentWp?.roadType}\n" +
                     "turnType=${currentWp?.turnType}\n" +
                     "desc=${currentWp?.description}"
-
         if (isInCrossWalkZone) {
+            val nearest = trafficSignals.minByOrNull {
+                distanceBetween(currentLat, currentLon, it.lat, it.lon)
+            }
+
+            val nearestDist = nearest?.let {
+                distanceBetween(currentLat, currentLon, it.lat, it.lon)
+            }
+
             val nearestSignal = TrafficSignalMatcher.findNearestSignal(
                 currentLat = currentLat,
                 currentLon = currentLon,
@@ -304,12 +315,21 @@ class NavigationManager(
 
             if (nearestSignal != null) {
                 _debugMessage.value =
-                    "횡단보도 감지됨\n신호제어기 ID=${nearestSignal.itstId}\nAPI 호출 시도"
+                    "횡단보도 감지됨\n" +
+                            "signals=${trafficSignals.size}\n" +
+                            "nearestId=${nearest?.itstId ?: "없음"}\n" +
+                            "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
+                            "신호제어기 ID=${nearestSignal.itstId}\n" +
+                            "API 호출 시도"
 
                 fetchTrafficSignalData(nearestSignal.itstId)
             } else {
                 _debugMessage.value =
-                    "횡단보도 감지됨\n하지만 30m 이내 신호제어기 없음"
+                    "횡단보도 감지됨\n" +
+                            "signals=${trafficSignals.size}\n" +
+                            "nearestId=${nearest?.itstId ?: "없음"}\n" +
+                            "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
+                            "30m 이내 신호제어기 없음"
             }
         }
 
