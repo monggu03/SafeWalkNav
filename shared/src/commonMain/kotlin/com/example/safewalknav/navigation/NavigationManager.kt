@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.abs
 
+
 /**
  * 내비게이션 매니저
  * 경로 탐색 → 경로 추종 → 도착 안내 전체 흐름 관리
@@ -17,6 +18,7 @@ import kotlin.math.abs
 class NavigationManager(
     private val tMapApiClient: TMapApiClient,
     private val headingLogger: HeadingLogger = NoopHeadingLogger,
+    private val trafficSignals: List<TrafficSignalLocation> = emptyList(),
 ) {
     var currentRoute: TMapRoute? = null
         private set
@@ -37,6 +39,10 @@ class NavigationManager(
     // 안내 메시지
     private val _guidanceMessage = MutableStateFlow("")
     val guidanceMessage: StateFlow<String> = _guidanceMessage
+
+    // 디버그 메시지
+    private val _debugMessage = MutableStateFlow("")
+    val debugMessage: StateFlow<String> = _debugMessage
 
     // 내비게이션 활성 여부
     private val _isNavigating = MutableStateFlow(false)
@@ -219,7 +225,7 @@ class NavigationManager(
 
     suspend fun updateLocation(location: GpsLocation) {
         if (!_isNavigating.value) return
-        currentRoute ?: return
+        val route = currentRoute ?: return
 
         val currentLat = location.latitude
         val currentLon = location.longitude
@@ -267,6 +273,42 @@ class NavigationManager(
         // Forward-Only Waypoint 동기화 (지나간 waypoint를 다시 잡는 문제 방지)
         currentRoute?.let {
             syncWaypointIndexForwardOnly(it, currentLat, currentLon)
+        }
+
+        val currentWp = route.waypoints.getOrNull(currentWaypointIndex)
+
+        val isInCrossWalkZone = isOnCrosswalkSegment(
+            currentLat,
+            currentLon,
+            route.waypoints,
+            currentWaypointIndex,
+        )
+
+        _debugMessage.value =
+            "횡단보도=$isInCrossWalkZone\n" +
+                    "idx=$currentWaypointIndex/${route.waypoints.size}\n" +
+                    "wp=${currentWp?.pointType}\n" +
+                    "roadType=${currentWp?.roadType}\n" +
+                    "turnType=${currentWp?.turnType}\n" +
+                    "desc=${currentWp?.description}"
+
+        if (isInCrossWalkZone) {
+            val nearestSignal = TrafficSignalMatcher.findNearestSignal(
+                currentLat = currentLat,
+                currentLon = currentLon,
+                signals = trafficSignals,
+                radiusMeters = 30f
+            )
+
+            if (nearestSignal != null) {
+                _debugMessage.value =
+                    "횡단보도 감지됨\n신호제어기 ID=${nearestSignal.itstId}\nAPI 호출 시도"
+
+                fetchTrafficSignalData(nearestSignal.itstId)
+            } else {
+                _debugMessage.value =
+                    "횡단보도 감지됨\n하지만 30m 이내 신호제어기 없음"
+            }
         }
 
         // waypoint 안내
@@ -391,6 +433,30 @@ class NavigationManager(
         }
     }
 
+
+    private suspend fun fetchTrafficSignalData(itstId: String){
+        val response = SignalApiClient.fetchTrafficSignalData(itstId)
+
+        // 2. 결과 처리
+        if (response.status != "ERROR" && response.items.isNotEmpty()) {
+            val currentSignal = response.items.first()
+            //임시 확인 메시지
+            _debugMessage.value =
+                "신호 API 성공\nID=${currentSignal.itstId}\n상태=${currentSignal.signalState}\n남은 시간=${currentSignal.remainTime}초"
+
+            // 3. 신호등 상태에 따른 로직 실행 (예: TTS 안내 등)
+            handleSignalUpdate(currentSignal)
+        } else {
+            println("NavManager 신호 데이터를 가져오지 못했습니다.")
+        }
+    }
+
+    private fun handleSignalUpdate(item: SignalItem) {
+        // item.signalState 가 1이면 초록불, 2면 빨간불 등 (API 명세 기준)
+        println("[NavManager] 현재 신호: ${item.signalState}, 남은 시간: ${item.remainTime}초")
+        println("🚦 [SIGNAL_RESULT] ID: ${item.itstId}")
+
+    }
     /**
      * 안전한 시계 방향 계산
      * 속도가 너무 낮으면(정지 상태) bearing이 부정확하므로 "전방" 으로 대체
