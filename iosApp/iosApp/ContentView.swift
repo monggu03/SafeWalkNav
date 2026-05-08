@@ -262,7 +262,7 @@ struct TrafficLightTab: View {
         ZStack {
             CameraPreview(session: deps.trafficLightDetector.captureSession)
                 .ignoresSafeArea()
-
+            
             GeometryReader { geo in
                 ForEach(deps.trafficLightDetector.detections) { det in
                     let rect = VNImageRectForNormalizedRect(
@@ -295,9 +295,13 @@ struct TrafficLightTab: View {
                 }
             }
             .ignoresSafeArea()
+            
+            
 
             VStack {
                 Spacer()
+                // ⭐ 디버그 로그 추가 (신호 카드 위쪽)
+                DebugLogOverlay()
                 VStack(spacing: 12) {
                     Circle()
                         .fill(deps.trafficLightDetector.signalColor)
