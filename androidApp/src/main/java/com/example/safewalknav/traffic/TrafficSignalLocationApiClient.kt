@@ -13,29 +13,68 @@ class TrafficSignalLocationApiClient(
     private val apiKey: String
 ) {
     suspend fun fetchTrafficSignals(): List<TrafficSignalEntity> {
+
+        val allSignals = mutableListOf<TrafficSignalEntity>()
+
+        var start = 1
+        val pageSize = 1000
+
         return try {
-            val url =
-                "http://openapi.seoul.go.kr:8088/$apiKey/xml/trafficSafetyA057PInfo/1/1000/"
 
-            Log.d("TrafficSignalAPI", "Fetching test signals: 1 ~ 1000")
+            while (true) {
 
-            val xml = withContext(Dispatchers.IO) {
-                URL(url).readText()
+                val end = start + pageSize - 1
+
+                val url =
+                    "http://openapi.seoul.go.kr:8088/$apiKey/xml/trafficSafetyA057PInfo/$start/$end/"
+
+                Log.d(
+                    "TrafficSignalAPI",
+                    "Fetching signals: $start ~ $end"
+                )
+
+                val xml = withContext(Dispatchers.IO) {
+                    URL(url).readText()
+                }
+
+                val pageSignals = withContext(Dispatchers.Default) {
+                    parseXml(xml)
+                }
+
+                Log.d(
+                    "TrafficSignalAPI",
+                    "page signals: ${pageSignals.size}"
+                )
+
+                if (pageSignals.isEmpty()) {
+                    break
+                }
+
+                allSignals.addAll(pageSignals)
+
+                // 마지막 페이지 판정
+                if (pageSignals.size < pageSize) {
+                    break
+                }
+
+                start += pageSize
             }
 
             Log.d(
                 "TrafficSignalAPI",
-                "xml length: ${xml.length}"
+                "total signals: ${allSignals.size}"
             )
-            Log.d("TrafficSignalAPI", "xml preview: ${xml.take(300)}")
 
-            val signals = parseXml(xml)
+            allSignals
 
-            Log.d("TrafficSignalAPI", "Test signals loaded: ${signals.size}")
-
-            signals
         } catch (e: Exception) {
-            Log.e("TrafficSignalAPI", "Failed to fetch traffic signals", e)
+
+            Log.e(
+                "TrafficSignalAPI",
+                "Failed to fetch traffic signals",
+                e
+            )
+
             emptyList()
         }
     }
