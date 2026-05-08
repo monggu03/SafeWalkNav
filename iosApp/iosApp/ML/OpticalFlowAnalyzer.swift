@@ -77,7 +77,7 @@ final class OpticalFlowAnalyzer: ObservableObject, @unchecked Sendable {
     func analyze(pixelBuffer: CVPixelBuffer, roi: CGRect? = nil) {
         analyzeCallCounter += 1
         if analyzeCallCounter % logEveryNCalls == 0 {
-            print("🌊 [OpticalFlow] analyze 호출 (\(analyzeCallCounter)번째)")
+            DebugLogger.shared.log("OpticalFlow", "analyze 호출 (\(analyzeCallCounter)번째)")
         }
         processingQueue.async { [weak self] in
             self?.performAnalysis(pixelBuffer: pixelBuffer, roi: roi)
@@ -112,7 +112,7 @@ final class OpticalFlowAnalyzer: ObservableObject, @unchecked Sendable {
         // 첫 프레임은 한 번만 발생하니 그대로 둠 (스팸 X)
         guard let prev = previousBuffer else {
             previousBuffer = pixelBuffer
-            print("📥 [OpticalFlow] 첫 프레임 저장 — 분석 시작 준비 완료")
+            DebugLogger.shared.log("OpticalFlow", "첫 프레임 저장 — 분석 시작 준비 완료")
             return
         }
 
@@ -127,7 +127,12 @@ final class OpticalFlowAnalyzer: ObservableObject, @unchecked Sendable {
         if analysisDoneCounter % logEveryNCalls == 0 {
             let mag = result?.magnitude ?? -1
             let moving = result?.isMoving ?? false
-            print("🌊 [OpticalFlow] 분석 #\(analysisDoneCounter) — magnitude: \(String(format: "%.2f", mag)), moving: \(moving)")
+            let level: LogEntry.Level = moving ? .info : .warn   // 정지면 노랑
+            DebugLogger.shared.log(
+                "OpticalFlow",
+                "#\(analysisDoneCounter) mag=\(String(format: "%.2f", mag)) moving=\(moving)",
+                level: level
+            )
         }
 
         previousBuffer = pixelBuffer
@@ -154,7 +159,7 @@ final class OpticalFlowAnalyzer: ObservableObject, @unchecked Sendable {
         do {
             try handler.perform([request])
         } catch {
-            print("[OpticalFlow] Vision request 실패: \(error)")
+            DebugLogger.shared.log("OpticalFlow", "Vision request 실패: \(error)", level: .error)
             return nil
         }
 
