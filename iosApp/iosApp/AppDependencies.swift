@@ -38,15 +38,20 @@ final class AppDependencies: ObservableObject {
         let headingProvider = HeadingProvider()
         let orientationMonitor = DeviceOrientationMonitor()
 
-        // 2. KMM 매니저 (TMap API 키로 초기화)
+        // 2. KMM 매니저 (TMap + T-Data API 키로 초기화)
         let apiKey = Secrets.tMapAppKey
-        print("[AppDependencies] API 키 길이: \(apiKey.count)")
-        print("[AppDependencies] API 키 앞 5자: \(apiKey.prefix(5))")
-        print("[AppDependencies] API 키 뒤 3자: \(apiKey.suffix(3))")
+        print("[AppDependencies] TMap 키 길이: \(apiKey.count)")
+        print("[AppDependencies] TMap 키 앞 5자: \(apiKey.prefix(5))")
+        print("[AppDependencies] TMap 키 뒤 3자: \(apiKey.suffix(3))")
+
+        let tDataKey = Secrets.tDataApiKey
+        print("[AppDependencies] T-Data 키 길이: \(tDataKey.count)")
 
         let tMapClient = TMapApiClient(appKey: apiKey)
+        let signalApiClient = SignalApiClient(apiKey: tDataKey)
         let navigationManager = NavigationManager(
             tMapApiClient: tMapClient,
+            signalApiClient: signalApiClient,
             headingLogger: NoopHeadingLogger.shared,
             trafficSignals: []
         )
