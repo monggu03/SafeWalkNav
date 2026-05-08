@@ -19,13 +19,12 @@ class WalkingDiagnostic {
      * 현재 상태를 분석하여 쏠림 여부를 반환합니다.[cite: 1]
      */
     fun analyzeLeanStatus(currentAzimuth: Float, targetBearing: Float): LeanStatus {
-        // 1. 이력 업데이트 및 데이터 정제[cite: 1]
         updateHistory(currentAzimuth)
 
-        // 2. 목표 방향과의 차이 계산[cite: 1]
-        val angleDiff = calculateAngleDiff(currentAzimuth, targetBearing)
+        // 최근 10개 정도의 평균값을 사용하여 튀는 값을 방지
+        val averageAzimuth = azimuthHistory.takeLast(10).average().toFloat()
+        val angleDiff = calculateAngleDiff(averageAzimuth, targetBearing)
 
-        // 3. 임계값(15도) 기준으로 상태 판정[cite: 1]
         return when {
             angleDiff > leanThreshold -> LeanStatus.LEFT_LEAN
             angleDiff < -leanThreshold -> LeanStatus.RIGHT_LEAN
