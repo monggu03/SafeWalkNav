@@ -50,7 +50,9 @@ import androidx.lifecycle.lifecycleScope
 import com.example.safewalknav.location.LocationTracker
 import com.example.safewalknav.navigation.AndroidHeadingLogger
 import com.example.safewalknav.navigation.ArrivalState
+import com.example.safewalknav.navigation.NavigationManager
 import com.example.safewalknav.navigation.POIResult
+import com.example.safewalknav.navigation.SignalApiClient
 import com.example.safewalknav.navigation.TMapApiClient
 import com.example.safewalknav.navigation.toGpsLocation
 import com.google.android.gms.common.api.ResolvableApiException
@@ -301,8 +303,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)!!
         )
         navigationManager = NavigationManager(
-            TMapApiClient(BuildConfig.TMAP_APP_KEY),
-            headingLogger,
+            tMapApiClient = TMapApiClient(BuildConfig.TMAP_APP_KEY),
+            signalApiClient = SignalApiClient(BuildConfig.T_DATA_API_KEY),
+            headingLogger = headingLogger,
         )
 
         // View 참조
