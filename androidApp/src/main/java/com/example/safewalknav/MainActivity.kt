@@ -50,7 +50,6 @@ import androidx.lifecycle.lifecycleScope
 import com.example.safewalknav.location.LocationTracker
 import com.example.safewalknav.navigation.AndroidHeadingLogger
 import com.example.safewalknav.navigation.ArrivalState
-import com.example.safewalknav.navigation.NavigationManager
 import com.example.safewalknav.navigation.POIResult
 import com.example.safewalknav.navigation.TMapApiClient
 import com.example.safewalknav.navigation.toGpsLocation

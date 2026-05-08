@@ -19,6 +19,12 @@ struct ContentView: View {
     @EnvironmentObject var deps: AppDependencies
     @EnvironmentObject var navVM: NavigationViewModel
 
+    /// 현재 선택된 탭 (0=내비, 1=신호등, 2=상태)
+    @State private var selectedTab: Int = 0
+
+    /// 횡단보도 자동 전환 직전의 탭 (빠져나올 때 복귀용)
+    @State private var previousTab: Int = 0
+    
     var body: some View {
         TabView {
             NavigationTab()
@@ -28,6 +34,7 @@ struct ContentView: View {
                     Image(systemName: "map.fill")
                     Text("내비게이션")
                 }
+                .tag(0)
 
             TrafficLightTab()
                 .environmentObject(deps)
@@ -35,6 +42,7 @@ struct ContentView: View {
                     Image(systemName: "eye.fill")
                     Text("신호등")
                 }
+                .tag(1)
 
             StatusTab()
                 .environmentObject(deps)
@@ -43,13 +51,35 @@ struct ContentView: View {
                     Image(systemName: "gearshape.fill")
                     Text("상태")
                 }
+                .tag(2)
 
         }
         .onAppear {
             deps.locationTracker.start()
             deps.headingProvider.start()
         }
+        // 🆕 횡단보도 진입/이탈 자동 전환
+        .onChange(of: navVM.isAtCrosswalk) { _, isAtCrosswalk in
+            handleCrosswalkChange(isAtCrosswalk)
+        }
     }
+    /// 횡단보도 진입 시 자동으로 신호등 탭 전환, 빠져나오면 복귀
+       private func handleCrosswalkChange(_ isAtCrosswalk: Bool) {
+           if isAtCrosswalk {
+               // 진입: 현재 탭 기억하고 신호등 탭(1)으로 전환
+               // 이미 신호등 탭에 있으면 기억하지 않음 (복귀 시 무한 루프 방지)
+               if selectedTab != 1 {
+                   previousTab = selectedTab
+                   selectedTab = 1
+               }
+           } else {
+               // 이탈: 신호등 탭에 있을 때만 원래 탭으로 복귀
+               // (사용자가 수동으로 다른 탭 갔으면 건드리지 않음)
+               if selectedTab == 1 {
+                   selectedTab = previousTab
+               }
+           }
+       }
 }
 
 // MARK: - Tab 1: 내비게이션
@@ -350,34 +380,46 @@ struct StatusTab: View {
                         
                     }
 
-                    GroupBox("🎯 IMU 자세 (휴대폰 자세 감시)") {
+                    GroupBox("🎯 IMU 자세 (좌표계 진단 모드)") {
                         VStack(alignment: .leading, spacing: 6) {
-                            // 1. 모니터링 상태
                             Text("모니터링 중: \(deps.orientationMonitor.isMonitoring ? "✅" : "❌")")
-
-                            // 2. 종합 상태 (색상으로 강조)
-                            HStack {
-                                Text("상태:")
-                                Text(statusText(deps.orientationMonitor.status))
-                                    .fontWeight(.bold)
-                                    .foregroundColor(statusColor(deps.orientationMonitor.status))
-                            }
-
-                            // 3. 어떤 문제인지 (경고/위험일 때만 표시)
-                            if deps.orientationMonitor.issue != .none {
-                                Text("문제: \(issueText(deps.orientationMonitor.issue))")
-                                    .foregroundColor(.orange)
-                            }
-
+                     
                             Divider()
-
-                            // 4. 실시간 자세값
+                     
+                            // ⭐ raw 값 (CoreMotion 원본)
+                            Text("📊 Raw (CoreMotion 원본)")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                            Text("rawPitch: \(deps.orientationMonitor.rawPitch, specifier: "%.1f")°")
+                            Text("rawRoll:  \(deps.orientationMonitor.rawRoll, specifier: "%.1f")°")
+                            Text("rawYaw:   \(deps.orientationMonitor.rawYaw, specifier: "%.1f")°")
+                     
+                            Divider()
+                     
+                            // ⭐ 중력 벡터 (가장 신뢰할 수 있는 자세 정보)
+                            Text("🌐 Gravity (자세의 정답지)")
+                                .font(.caption)
+                                .foregroundColor(.gray)
+                            Text("gx: \(deps.orientationMonitor.gravityX, specifier: "%+.2f")")
+                            Text("gy: \(deps.orientationMonitor.gravityY, specifier: "%+.2f")")
+                            Text("gz: \(deps.orientationMonitor.gravityZ, specifier: "%+.2f")")
+                     
+                            Divider()
+                     
+                            // 보정된 값 (진단 모드에서는 raw와 동일)
+                            Text("🔧 보정된 값 (현재는 raw와 동일)")
+                                .font(.caption)
+                                .foregroundColor(.gray)
                             Text("Pitch: \(deps.orientationMonitor.pitch, specifier: "%.1f")°")
-                            Text("Roll: \(deps.orientationMonitor.roll, specifier: "%.1f")°")
-                            Text("Yaw: \(deps.orientationMonitor.yaw, specifier: "%.1f")°")
+                            Text("Roll:  \(deps.orientationMonitor.roll, specifier: "%.1f")°")
+                     
+                            Divider()
+                     
                             Text("가속도 분산: \(deps.orientationMonitor.accelerationVariance, specifier: "%.2f") m/s²")
+                                .font(.caption)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .font(.system(.body, design: .monospaced))   // 숫자 정렬용 monospace
                     }
 
                     GroupBox("🔊 TTS") {
@@ -430,6 +472,29 @@ struct StatusTab: View {
                             }
                             if deps.trafficLightDetector.confidence > 0 {
                                 Text("신뢰도: \(Int(deps.trafficLightDetector.confidence * 100))%")
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    GroupBox("🌊 옵티컬 플로우") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("분석 중: \(deps.opticalFlow.isAnalyzing ? "✅" : "❌")")
+                            if let result = deps.opticalFlow.lastResult {
+                                Text("dx: \(result.averageDx, specifier: "%.2f") px")
+                                Text("dy: \(result.averageDy, specifier: "%.2f") px")
+                                HStack {
+                                    Text("크기: \(result.magnitude, specifier: "%.2f") px")
+                                    if result.isMoving {
+                                        Text("🟢 움직임")
+                                            .foregroundColor(.green)
+                                            .fontWeight(.bold)
+                                    } else {
+                                        Text("⚪ 정지")
+                                            .foregroundColor(.gray)
+                                    }
+                                }
+                            } else {
+                                Text("결과 없음").foregroundColor(.gray)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
