@@ -93,6 +93,8 @@ class NavigationManager(
      * MainActivity의 센서 퓨전(가속도+자력계) azimuth를 최신값으로 받는다.
      * CSV `rotation_vector_heading` 필드 기록용. heading 판정 로직 자체는 GPS bearing 기반 그대로 유지.
      */
+    private var leanAccumulator = 0 // 쏠림 누적 카운트
+
     fun updateCompassHeading(azimuth: Float, currentTime: Long) {
         _compassHeading.value = azimuth
 
@@ -100,18 +102,30 @@ class NavigationManager(
             val targetBearing = currentTargetBearing
             val status = walkingDiagnostic.analyzeLeanStatus(azimuth, targetBearing)
 
-            // 5초 쿨타임 계산
+            // 5초 쿨타임 체크
             if (currentTime - lastGuidanceTime >= guidanceCooldownMs) {
                 when (status) {
-                    LeanStatus.LEFT_LEAN -> {
-                        emitGuidance("왼쪽으로 치우쳤습니다. 오른쪽으로 오세요.")
-                        lastGuidanceTime = currentTime
+                    LeanStatus.LEFT_LEAN -> leanAccumulator--
+                    LeanStatus.RIGHT_LEAN -> leanAccumulator++
+                    LeanStatus.STRAIGHT -> {
+                        // 잔상효과(정상 보행이어도 누적된 메시지 알림 방지)
+                        leanAccumulator = 0
                     }
-                    LeanStatus.RIGHT_LEAN -> {
-                        emitGuidance("오른쪽으로 치우쳤습니다. 왼쪽으로 오세요.")
-                        lastGuidanceTime = currentTime
+                }
+
+                // 누적 카운트가 임계값(3)에 도달하면 안내 메시지 발화
+                if (kotlin.math.abs(leanAccumulator) >= 3) {
+                    val message = if (leanAccumulator <= -3) {
+                        "왼쪽으로 치우쳤습니다. 오른쪽으로 오세요."
+                    } else {
+                        "오른쪽으로 치우쳤습니다. 왼쪽으로 오세요."
                     }
-                    LeanStatus.STRAIGHT -> { }
+
+                    emitGuidance(message)
+                    lastGuidanceTime = currentTime
+
+                    // 발화 후에는 다시 0부터 쌓이도록 초기화
+                    leanAccumulator = 0
                 }
             }
         }
@@ -825,6 +839,8 @@ class NavigationManager(
         currentLat: Double, currentLon: Double,
         userBearing: Float, speed: Float, distToDestination: Float
     ) {
+
+
         val route = currentRoute ?: return
         if (currentWaypointIndex >= route.waypoints.size) return
         if (route.routePoints.size < 2) return
@@ -851,6 +867,8 @@ class NavigationManager(
 
         // 경로 진행 방향 계산 (앞으로 ~25m lookahead — 완만한 곡률도 감지)
         val routeBearing = computeRouteBearingAhead(25f) ?: return
+
+        currentTargetBearing = routeBearing
 
         val now = currentTimeMillis()
 
