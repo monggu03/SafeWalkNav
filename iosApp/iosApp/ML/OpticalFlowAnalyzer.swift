@@ -5,13 +5,17 @@
 //  Vision 기반 dense optical flow 분석기
 //  - 두 프레임 간 픽셀 이동 벡터를 계산
 //  - 관심 영역(ROI) 내부의 평균 이동량으로 움직임/정지 판단
-//  - YOLO 차량 탐지의 bounding box를 ROI로 받아 사용
+//
+//  📷 자체 AVCaptureSession을 소유한다. 광각 카메라 1× 풀 프레임.
+//     OpticalFlowTab이 이 세션을 프리뷰로 띄우고, 탭 진입/이탈 시
+//     start()/stop()을 호출한다.
 //
 //  ⚠️ 카메라 자체 움직임(보행자의 걸음)에 의한 전역 흐름은
 //     이 단계에서는 보정하지 않음. YOLO 통합 후 실측 데이터로 튜닝 예정.
 //
 
 import Foundation
+import AVFoundation
 import Vision
 import CoreVideo
 import CoreImage
@@ -34,12 +38,22 @@ struct OpticalFlowResult: Sendable {
 /// - 무거운 Vision 처리는 직렬 큐에서 동기 수행
 /// - @Published 업데이트만 MainActor.run으로 메인에 보냄
 /// - 내부 가변 상태는 직렬 큐(processingQueue)로 보호 → @unchecked Sendable로 명시
-final class OpticalFlowAnalyzer: ObservableObject, @unchecked Sendable {
+/// - AVCapture 델리게이트를 받기 위해 NSObject 상속
+final class OpticalFlowAnalyzer: NSObject, ObservableObject, @unchecked Sendable {
+
+    // MARK: - Camera (자체 세션)
+
+    let captureSession = AVCaptureSession()
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let cameraQueue = DispatchQueue(label: "opticalflow.camera", qos: .userInitiated)
+    private var isCameraConfigured = false
 
     // MARK: - Constants
 
     /// 움직임 판정 임계값 (픽셀). 가슴 마운트 + 도보 환경에서 실측 후 조정 필요.
-    private let movementThreshold: Float = 1.5
+    /// 1× 프레임 기준 — 같은 실세계 움직임이 2× 줌 대비 픽셀 변위가 절반이라
+    /// 기존 2× 환경(1.5)에서 절반 수준으로 낮췄다.
+    private let movementThreshold: Float = 0.75
 
     /// 분석 주기 제한 (너무 자주 돌리면 발열/배터리 낭비)
     private let minIntervalSeconds: TimeInterval = 0.1  // 약 10 FPS
@@ -65,6 +79,65 @@ final class OpticalFlowAnalyzer: ObservableObject, @unchecked Sendable {
         label: "opticalflow.processing",
         qos: .userInitiated
     )
+
+    // MARK: - Init / Camera Setup
+
+    override init() {
+        super.init()
+        setupCamera()
+    }
+
+    private func setupCamera() {
+        captureSession.sessionPreset = .hd1280x720
+
+        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+              let input = try? AVCaptureDeviceInput(device: camera) else {
+            print("[OpticalFlow] 카메라 접근 불가")
+            return
+        }
+
+        try? camera.lockForConfiguration()
+        camera.videoZoomFactor = 1.0
+        camera.unlockForConfiguration()
+
+        // 진단용 — 어떤 렌즈 / 어떤 줌이 잡혔는지 콘솔에서 바로 확인
+        print("📷 [OpticalFlow] device=\(camera.localizedName) " +
+              "deviceType=\(camera.deviceType.rawValue) " +
+              "zoom=\(camera.videoZoomFactor) " +
+              "minZoom=\(camera.minAvailableVideoZoomFactor) " +
+              "maxZoom=\(camera.maxAvailableVideoZoomFactor)")
+
+        if captureSession.canAddInput(input) { captureSession.addInput(input) }
+
+        videoOutput.setSampleBufferDelegate(self, queue: cameraQueue)
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        videoOutput.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ]
+        if captureSession.canAddOutput(videoOutput) { captureSession.addOutput(videoOutput) }
+
+        if let connection = videoOutput.connection(with: .video) {
+            connection.videoRotationAngle = 90
+        }
+
+        isCameraConfigured = true
+    }
+
+    /// 탭 진입 시 카메라 시작. 메인 외 스레드에서 호출 권장 (startRunning은 블로킹).
+    func start() {
+        guard isCameraConfigured, !captureSession.isRunning else { return }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.captureSession.startRunning()
+        }
+    }
+
+    /// 탭 이탈 시 카메라 정지 + 분석 상태 리셋.
+    func stop() {
+        if captureSession.isRunning {
+            captureSession.stopRunning()
+        }
+        reset()
+    }
 
     // MARK: - Public API
 
@@ -243,5 +316,15 @@ final class OpticalFlowAnalyzer: ObservableObject, @unchecked Sendable {
         }
 
         return (xStart, yStart, xEnd, yEnd)
+    }
+}
+
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
+extension OpticalFlowAnalyzer: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput,
+                       didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        analyze(pixelBuffer: pixelBuffer, roi: nil)
     }
 }

@@ -14,6 +14,7 @@ import SwiftUI
 import AVFoundation
 import Vision
 import CoreML
+import CoreImage
 import Combine
 
 // MARK: - Detection 모델
@@ -50,10 +51,20 @@ final class TrafficLightDetector: NSObject, ObservableObject {
 
     // MARK: - ML
     private var visionModel: VNCoreMLModel?
-    
-    // MARK: - Optical Flow (선택적)
-    /// 주입되면 매 프레임을 옵티컬 플로우 분석에도 전달
-    private weak var opticalFlow: OpticalFlowAnalyzer?
+
+    // MARK: - Center Crop (망원 효과)
+    /// 신호등 탐지에 사용할 화면 중앙 ROI (정규화 좌표).
+    /// 0.5×0.5 = 면적 1/4 → 선형 2× 줌과 동등한 디지털 크롭.
+    /// 카메라는 1×로 두고 OpticalFlow는 풀 프레임을 그대로 사용,
+    /// YOLO에는 이 ROI만 잘라서 입력한다.
+    private let cropROI = CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
+
+    /// CIImage → CVPixelBuffer 렌더링용. 매번 새로 만들면 비싸서 1회만 생성.
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+
+    /// 잘라낸 BGRA 버퍼 풀 (프레임마다 재할당하지 않도록)
+    private var cropPixelBufferPool: CVPixelBufferPool?
+    private var cropPoolSize: (width: Int, height: Int) = (0, 0)
 
     // MARK: - TTS (통합 앱에서는 TtsManager 사용)
     /// nil이면 자체 synthesizer 사용 (단독 실행 시), 주입되면 TtsManager 사용
@@ -74,11 +85,10 @@ final class TrafficLightDetector: NSObject, ObservableObject {
 
     // MARK: - Init
 
-    /// 통합 앱에서 사용 시: TtsManager 주입
-    init(tts: TtsManager? = nil, opticalFlow: OpticalFlowAnalyzer? = nil) {
+    /// 통합 앱에서 사용 시: TtsManager 주입.
+    /// OpticalFlow는 자체 카메라 세션을 가지므로 더 이상 주입받지 않음.
+    init(tts: TtsManager? = nil) {
         self.tts = tts
-        self.opticalFlow = opticalFlow
-        print("🔧 [TrafficLightDetector] init — opticalFlow nil? \(opticalFlow == nil)")
         super.init()
         setupModel()
         setupCamera()
@@ -119,23 +129,27 @@ final class TrafficLightDetector: NSObject, ObservableObject {
     private func setupCamera() {
         captureSession.sessionPreset = .hd1280x720
 
-        // 2배 망원 렌즈 우선, 없으면 광각 + 디지털 줌
-        let camera: AVCaptureDevice?
-
-        if let telephoto = AVCaptureDevice.default(.builtInTelephotoCamera, for: .video, position: .back) {
-            camera = telephoto
-        } else if let wide = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
-            try? wide.lockForConfiguration()
-            wide.videoZoomFactor = 2.0
-            wide.unlockForConfiguration()
-            camera = wide
-        } else {
+        // 광각 카메라를 1× 그대로 사용한다.
+        // - OpticalFlow는 이 1× 풀 프레임을 그대로 받음
+        // - 신호등 YOLO만 매 프레임 중앙 ROI를 잘라서 입력 (cropROI 참고)
+        // 망원 렌즈를 신호등에만 쓰려면 AVCaptureMultiCamSession이 필요한데
+        // 단일 카메라 단순화 정책에 따라 디지털 크롭으로 통일.
+        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+              let input = try? AVCaptureDeviceInput(device: camera) else {
             print("[TrafficLightDetector] 카메라 접근 불가")
             return
         }
 
-        guard let camera,
-              let input = try? AVCaptureDeviceInput(device: camera) else { return }
+        try? camera.lockForConfiguration()
+        camera.videoZoomFactor = 1.0
+        camera.unlockForConfiguration()
+
+        // 진단용 — 어떤 렌즈 / 어떤 줌이 잡혔는지 콘솔에서 바로 확인
+        print("📷 [TrafficLightDetector] device=\(camera.localizedName) " +
+              "deviceType=\(camera.deviceType.rawValue) " +
+              "zoom=\(camera.videoZoomFactor) " +
+              "minZoom=\(camera.minAvailableVideoZoomFactor) " +
+              "maxZoom=\(camera.maxAvailableVideoZoomFactor)")
 
         if captureSession.canAddInput(input) { captureSession.addInput(input) }
 
@@ -169,13 +183,74 @@ final class TrafficLightDetector: NSObject, ObservableObject {
     private func processFrame(_ pixelBuffer: CVPixelBuffer) {
         guard let model = visionModel else { return }
 
+        // 중앙 ROI만 잘라서 YOLO에 입력 → 디지털 망원 효과
+        guard let cropped = cropCenter(pixelBuffer) else {
+            return
+        }
+
         let request = VNCoreMLRequest(model: model) { [weak self] request, _ in
             self?.handleResults(request.results)
         }
         request.imageCropAndScaleOption = .scaleFill
 
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+        let handler = VNImageRequestHandler(cvPixelBuffer: cropped, options: [:])
         try? handler.perform([request])
+    }
+
+    /// 입력 버퍼의 중앙 ROI 영역을 잘라 새 BGRA 버퍼로 반환.
+    /// 결과 버퍼 크기는 cropROI에 비례.
+    private func cropCenter(_ pixelBuffer: CVPixelBuffer) -> CVPixelBuffer? {
+        let srcW = CVPixelBufferGetWidth(pixelBuffer)
+        let srcH = CVPixelBufferGetHeight(pixelBuffer)
+
+        let cropW = Int(CGFloat(srcW) * cropROI.width)
+        let cropH = Int(CGFloat(srcH) * cropROI.height)
+        let cropX = Int(CGFloat(srcW) * cropROI.minX)
+        let cropY = Int(CGFloat(srcH) * cropROI.minY)
+        guard cropW > 0, cropH > 0 else { return nil }
+
+        // 풀이 없거나 크기가 바뀌었으면 재생성
+        if cropPixelBufferPool == nil || cropPoolSize != (cropW, cropH) {
+            let attrs: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: cropW,
+                kCVPixelBufferHeightKey as String: cropH,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+            ]
+            var pool: CVPixelBufferPool?
+            CVPixelBufferPoolCreate(
+                kCFAllocatorDefault,
+                nil,
+                attrs as CFDictionary,
+                &pool
+            )
+            cropPixelBufferPool = pool
+            cropPoolSize = (cropW, cropH)
+        }
+
+        guard let pool = cropPixelBufferPool else { return nil }
+        var outBuffer: CVPixelBuffer?
+        let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &outBuffer)
+        guard status == kCVReturnSuccess, let out = outBuffer else { return nil }
+
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let cropRect = CGRect(x: cropX, y: cropY, width: cropW, height: cropH)
+        let cropped = ciImage
+            .cropped(to: cropRect)
+            .transformed(by: CGAffineTransform(translationX: -CGFloat(cropX), y: -CGFloat(cropY)))
+
+        ciContext.render(cropped, to: out)
+        return out
+    }
+
+    /// 잘라낸 ROI 안의 정규화 박스를 풀 프레임 정규화 좌표로 환원.
+    private func remapToFullFrame(_ box: CGRect) -> CGRect {
+        return CGRect(
+            x: cropROI.minX + box.minX * cropROI.width,
+            y: cropROI.minY + box.minY * cropROI.height,
+            width: box.width * cropROI.width,
+            height: box.height * cropROI.height
+        )
     }
 
     private func handleResults(_ results: [VNObservation]?) {
@@ -183,10 +258,11 @@ final class TrafficLightDetector: NSObject, ObservableObject {
 
         let filtered = observations.compactMap { obs -> Detection? in
             guard let label = obs.labels.first, label.confidence >= 0.5 else { return nil }
+            // obs.boundingBox는 잘라낸 ROI 기준 정규화 좌표 → 풀 프레임 좌표로 환원
             return Detection(
                 label: label.identifier,
                 confidence: label.confidence,
-                boundingBox: obs.boundingBox
+                boundingBox: remapToFullFrame(obs.boundingBox)
             )
         }
 
@@ -259,22 +335,13 @@ extension TrafficLightDetector: AVCaptureVideoDataOutputSampleBufferDelegate {
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        
+
         // 30프레임마다 1번씩만 로그 출력 (약 1초 간격)
         frameLogCounter += 1
-        let shouldLog = (frameLogCounter % logEveryNFrames == 0)
-        
-        if shouldLog {
+        if frameLogCounter % logEveryNFrames == 0 {
             print("📸 [TrafficLightDetector] 프레임 수신 (\(frameLogCounter)번째)")
         }
-        
-        processFrame(pixelBuffer)
-        
-        // opticalFlow nil 체크는 처음 의심될 때만 알려주면 충분
-        if shouldLog && opticalFlow == nil {
-            print("⚠️ [TrafficLightDetector] opticalFlow가 nil — 호출 안 됨")
-        }
 
-        opticalFlow?.analyze(pixelBuffer: pixelBuffer, roi: nil)
+        processFrame(pixelBuffer)
     }
 }

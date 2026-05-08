@@ -67,12 +67,11 @@ final class AppDependencies: ObservableObject {
         self.orientationMonitor = orientationMonitor
         self.navigationManager = navigationManager
         self.stt = SttManager(tts: tts)
-        // ⭐ 옵티컬 플로우 분석기 먼저 생성
-        let opticalFlow = OpticalFlowAnalyzer()
-        self.opticalFlow = opticalFlow
 
-        // ⭐ TrafficLightDetector에 주입 (카메라 프레임 공유용)
-        self.trafficLightDetector = TrafficLightDetector(tts: tts, opticalFlow: opticalFlow)
+        // ⭐ OpticalFlow와 TrafficLight는 각자 자체 AVCaptureSession을 소유한다.
+        //    탭 진입/이탈에 따라 onAppear/onDisappear에서 start/stop 호출.
+        self.opticalFlow = OpticalFlowAnalyzer()
+        self.trafficLightDetector = TrafficLightDetector(tts: tts)
         self.navigationViewModel = navigationViewModel
 
         // 5. 자세 모니터링 자동 시작 (앱 켜는 순간부터 감시)

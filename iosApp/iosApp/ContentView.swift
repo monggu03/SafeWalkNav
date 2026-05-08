@@ -3,9 +3,16 @@
 //  iosApp
 //
 //  메인 화면 — 탭 기반 통합 뷰
-//  Tab 1: 내비게이션 (검색 + 경로 안내 + 지도)
-//  Tab 2: 신호등 감지 (카메라 + YOLO)
-//  Tab 3: 설정/상태 (GPS, 나침반, 디버그 정보)
+//  Tab navigation: 검색 + 경로 안내 + 지도
+//  Tab opticalFlow: 카메라 + 옵티컬 플로우 (이동 감지)
+//  Tab trafficLight: 카메라 + YOLO 신호등 감지
+//  Tab status: GPS, 나침반, 디버그 정보
+//
+//  자동 전환:
+//   - 안내 시작 (isNavigating true)  → opticalFlow
+//   - 횡단보도 진입 (isAtCrosswalk true) → trafficLight
+//   - 횡단보도 이탈 → opticalFlow (안내 중일 때만)
+//   - 안내 종료 → navigation
 //
 
 import SwiftUI
@@ -14,19 +21,23 @@ import CoreLocation
 import Speech
 import Vision
 
+/// 탭 식별자.
+enum AppTab: Hashable {
+    case navigation
+    case opticalFlow
+    case trafficLight
+    case status
+}
+
 // MARK: - 메인 탭 뷰
 struct ContentView: View {
     @EnvironmentObject var deps: AppDependencies
     @EnvironmentObject var navVM: NavigationViewModel
 
-    /// 현재 선택된 탭 (0=내비, 1=신호등, 2=상태)
-    @State private var selectedTab: Int = 0
+    @State private var selectedTab: AppTab = .navigation
 
-    /// 횡단보도 자동 전환 직전의 탭 (빠져나올 때 복귀용)
-    @State private var previousTab: Int = 0
-    
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             NavigationTab()
                 .environmentObject(deps)
                 .environmentObject(navVM)
@@ -34,7 +45,15 @@ struct ContentView: View {
                     Image(systemName: "map.fill")
                     Text("내비게이션")
                 }
-                .tag(0)
+                .tag(AppTab.navigation)
+
+            OpticalFlowTab()
+                .environmentObject(deps)
+                .tabItem {
+                    Image(systemName: "figure.walk.motion")
+                    Text("이동감지")
+                }
+                .tag(AppTab.opticalFlow)
 
             TrafficLightTab()
                 .environmentObject(deps)
@@ -42,7 +61,7 @@ struct ContentView: View {
                     Image(systemName: "eye.fill")
                     Text("신호등")
                 }
-                .tag(1)
+                .tag(AppTab.trafficLight)
 
             StatusTab()
                 .environmentObject(deps)
@@ -51,35 +70,45 @@ struct ContentView: View {
                     Image(systemName: "gearshape.fill")
                     Text("상태")
                 }
-                .tag(2)
-
+                .tag(AppTab.status)
         }
         .onAppear {
             deps.locationTracker.start()
             deps.headingProvider.start()
         }
-        // 🆕 횡단보도 진입/이탈 자동 전환
+        // 안내 시작 → 이동감지 탭, 안내 종료 → 내비 탭
+        .onChange(of: navVM.isNavigating) { _, isNavigating in
+            handleNavigatingChange(isNavigating)
+        }
+        // 횡단보도 진입 → 신호등 탭, 이탈 → 이동감지 탭
         .onChange(of: navVM.isAtCrosswalk) { _, isAtCrosswalk in
             handleCrosswalkChange(isAtCrosswalk)
         }
     }
-    /// 횡단보도 진입 시 자동으로 신호등 탭 전환, 빠져나오면 복귀
-       private func handleCrosswalkChange(_ isAtCrosswalk: Bool) {
-           if isAtCrosswalk {
-               // 진입: 현재 탭 기억하고 신호등 탭(1)으로 전환
-               // 이미 신호등 탭에 있으면 기억하지 않음 (복귀 시 무한 루프 방지)
-               if selectedTab != 1 {
-                   previousTab = selectedTab
-                   selectedTab = 1
-               }
-           } else {
-               // 이탈: 신호등 탭에 있을 때만 원래 탭으로 복귀
-               // (사용자가 수동으로 다른 탭 갔으면 건드리지 않음)
-               if selectedTab == 1 {
-                   selectedTab = previousTab
-               }
-           }
-       }
+
+    /// 안내 시작/종료에 따른 탭 전환
+    private func handleNavigatingChange(_ isNavigating: Bool) {
+        if isNavigating {
+            // 안내 시작 — 횡단보도 진입 중이면 그쪽 우선
+            if !navVM.isAtCrosswalk {
+                selectedTab = .opticalFlow
+            }
+        } else {
+            // 안내 종료 — 메인 화면(내비 탭)으로
+            selectedTab = .navigation
+        }
+    }
+
+    /// 횡단보도 진입/이탈 자동 전환
+    private func handleCrosswalkChange(_ isAtCrosswalk: Bool) {
+        if isAtCrosswalk {
+            selectedTab = .trafficLight
+        } else if navVM.isNavigating {
+            // 횡단보도 빠져나옴 + 여전히 안내 중 → 이동감지 탭
+            selectedTab = .opticalFlow
+        }
+        // 안내 중 아니면 사용자가 보던 탭 유지
+    }
 }
 
 // MARK: - Tab 1: 내비게이션
@@ -327,6 +356,59 @@ struct TrafficLightTab: View {
         }
         .onAppear { deps.trafficLightDetector.startDetection() }
         .onDisappear { deps.trafficLightDetector.stopDetection() }
+    }
+}
+
+// MARK: - Tab: 옵티컬 플로우 (이동감지)
+struct OpticalFlowTab: View {
+    @EnvironmentObject var deps: AppDependencies
+
+    var body: some View {
+        ZStack {
+            CameraPreview(session: deps.opticalFlow.captureSession)
+                .ignoresSafeArea()
+
+            VStack {
+                Spacer()
+                DebugLogOverlay()
+                opticalFlowCard
+                    .padding(20)
+                    .background(RoundedRectangle(cornerRadius: 20).fill(Color.black.opacity(0.6)))
+                    .padding(.bottom, 50)
+            }
+        }
+        .onAppear { deps.opticalFlow.start() }
+        .onDisappear { deps.opticalFlow.stop() }
+    }
+
+    @ViewBuilder
+    private var opticalFlowCard: some View {
+        let result = deps.opticalFlow.lastResult
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                Circle()
+                    .fill(result?.isMoving == true ? Color.green : Color.gray)
+                    .frame(width: 24, height: 24)
+                    .overlay(Circle().stroke(Color.white, lineWidth: 2))
+                Text(result?.isMoving == true ? "이동 중" : "정지")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .foregroundColor(.white)
+            }
+
+            if let r = result {
+                Text(String(
+                    format: "mag=%.2f  dx=%.2f  dy=%.2f",
+                    r.magnitude, r.averageDx, r.averageDy
+                ))
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(.white.opacity(0.85))
+            } else {
+                Text("분석 대기 중…")
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.7))
+            }
+        }
     }
 }
 
