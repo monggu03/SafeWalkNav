@@ -17,6 +17,7 @@ import kotlin.math.abs
  */
 class NavigationManager(
     private val tMapApiClient: TMapApiClient,
+    private val signalApiClient: SignalApiClient,
     private val headingLogger: HeadingLogger = NoopHeadingLogger,
     private val trafficSignals: List<TrafficSignalLocation> = emptyList(),
 ) {
@@ -435,7 +436,7 @@ class NavigationManager(
 
 
     private suspend fun fetchTrafficSignalData(itstId: String){
-        val response = SignalApiClient.fetchTrafficSignalData(itstId)
+        val response = signalApiClient.fetchTrafficSignalData(itstId)
 
         // 2. 결과 처리
         if (response.status != "ERROR" && response.items.isNotEmpty()) {
