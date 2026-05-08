@@ -15,6 +15,11 @@ enum Secrets {
         return value(forKey: "TMapAppKey")
     }
 
+    /// 서울 T-Data 신호제어기 잔여시간 API 키
+    static var tDataApiKey: String {
+        return value(forKey: "TDataApiKey")
+    }
+
     // MARK: - Private Helper
 
     private static func value(forKey key: String) -> String {
