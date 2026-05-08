@@ -50,12 +50,20 @@ final class TrafficLightDetector: NSObject, ObservableObject {
 
     // MARK: - ML
     private var visionModel: VNCoreMLModel?
+    
+    // MARK: - Optical Flow (선택적)
+    /// 주입되면 매 프레임을 옵티컬 플로우 분석에도 전달
+    private weak var opticalFlow: OpticalFlowAnalyzer?
 
     // MARK: - TTS (통합 앱에서는 TtsManager 사용)
     /// nil이면 자체 synthesizer 사용 (단독 실행 시), 주입되면 TtsManager 사용
     private weak var tts: TtsManager?
     private let fallbackSynthesizer = AVSpeechSynthesizer()
-
+    
+    // MARK: - Debug Logging
+    private var frameLogCounter: Int = 0
+    private let logEveryNFrames: Int = 30   // 30프레임당 1번 (약 1초)
+    
     // MARK: - Debounce / Timeout
     private var lastSpokenSignal: String = ""
     private var lastSpeakTime: Date = .distantPast
@@ -67,8 +75,10 @@ final class TrafficLightDetector: NSObject, ObservableObject {
     // MARK: - Init
 
     /// 통합 앱에서 사용 시: TtsManager 주입
-    init(tts: TtsManager? = nil) {
+    init(tts: TtsManager? = nil, opticalFlow: OpticalFlowAnalyzer? = nil) {
         self.tts = tts
+        self.opticalFlow = opticalFlow
+        print("🔧 [TrafficLightDetector] init — opticalFlow nil? \(opticalFlow == nil)")
         super.init()
         setupModel()
         setupCamera()
@@ -249,6 +259,22 @@ extension TrafficLightDetector: AVCaptureVideoDataOutputSampleBufferDelegate {
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        
+        // 30프레임마다 1번씩만 로그 출력 (약 1초 간격)
+        frameLogCounter += 1
+        let shouldLog = (frameLogCounter % logEveryNFrames == 0)
+        
+        if shouldLog {
+            print("📸 [TrafficLightDetector] 프레임 수신 (\(frameLogCounter)번째)")
+        }
+        
         processFrame(pixelBuffer)
+        
+        // opticalFlow nil 체크는 처음 의심될 때만 알려주면 충분
+        if shouldLog && opticalFlow == nil {
+            print("⚠️ [TrafficLightDetector] opticalFlow가 nil — 호출 안 됨")
+        }
+
+        opticalFlow?.analyze(pixelBuffer: pixelBuffer, roi: nil)
     }
 }

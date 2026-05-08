@@ -25,6 +25,15 @@ val seoulApiKey: String = run {
     props.getProperty("SEOUL_API_KEY", "")
 }
 
+val tDataApiKey: String = run {
+    val props = Properties()
+    val localFile = rootProject.file("local.properties")
+    if (localFile.exists()) {
+        localFile.inputStream().use { props.load(it) }
+    }
+    props.getProperty("T_DATA_API_KEY", "")
+}
+
 android {
     namespace = "com.example.safewalknav"
     compileSdk = 34
@@ -39,6 +48,11 @@ android {
         // TMap API Key - local.properties에서 로드
         buildConfigField("String", "TMAP_APP_KEY", "\"$tmapAppKey\"")
         buildConfigField("String", "SEOUL_API_KEY", "\"$seoulApiKey\"")
+
+        // 서울 T-Data 신호제어기 잔여시간 API Key - local.properties에서 로드
+        // local.properties 에 T_DATA_API_KEY=... 추가 필요. 미설정 시 빈 문자열 → SignalApiClient 가
+        // ERROR_NO_API_KEY 반환하고 호출 자체 안 함 (런타임 안전).
+        buildConfigField("String", "T_DATA_API_KEY", "\"$tDataApiKey\"")
     }
 
     buildTypes {

@@ -52,6 +52,7 @@ import com.example.safewalknav.navigation.AndroidHeadingLogger
 import com.example.safewalknav.navigation.ArrivalState
 import com.example.safewalknav.navigation.NavigationManager
 import com.example.safewalknav.navigation.POIResult
+import com.example.safewalknav.navigation.SignalApiClient
 import com.example.safewalknav.navigation.TMapApiClient
 import com.example.safewalknav.navigation.toGpsLocation
 import com.google.android.gms.common.api.ResolvableApiException
@@ -280,6 +281,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
             }
             if (hasAccel && hasMag) {
+                val now = System.currentTimeMillis()
                 val r = FloatArray(9)
                 val i = FloatArray(9)
                 if (SensorManager.getRotationMatrix(r, i, accelValues, magValues)) {
@@ -289,8 +291,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     if (az < 0) az += 360f
                     val delta = ((az - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.15f * delta + 360f) % 360f
-                    navigationManager.updateCompassHeading(currentAzimuth)
+                    navigationManager.updateCompassHeading(currentAzimuth, now)
                 }
+                // 현재 시스템 시간을 찍어서 NavigationManager에 전달
+                navigationManager.updateCompassHeading(currentAzimuth, now)
             }
         }
 
@@ -311,10 +315,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         )
 
         navigationManager = NavigationManager(
-            TMapApiClient(BuildConfig.TMAP_APP_KEY),
-            headingLogger,
-            trafficSignals = emptyList()
-        )
+                tMapApiClient = TMapApiClient(BuildConfig.TMAP_APP_KEY),
+                signalApiClient = SignalApiClient(BuildConfig.T_DATA_API_KEY),
+                headingLogger = headingLogger,
+                trafficSignals = emptyList()
+            )
 
         observeGuidance()
 
@@ -904,6 +909,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // ==================== GPS 위치 추적 ====================
 
     private fun startLocationTracking() {
+        val now = System.currentTimeMillis()
         trackingJob?.cancel()
         trackingJob = lifecycleScope.launch {
             locationTracker.getLocationUpdates(2000L).collectLatest { location ->
@@ -917,8 +923,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     val delta = ((gpsBearing - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.3f * delta + 360f) % 360f
                     if (::navigationManager.isInitialized) {
-                        navigationManager.updateCompassHeading(currentAzimuth)
-                    }//켜지자마자 꺼져서 보호
+                        navigationManager.updateCompassHeading(currentAzimuth, System.currentTimeMillis())
+                    }
                 }
 
                 navigationManager.updateLocation(location.toGpsLocation())
