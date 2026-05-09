@@ -69,6 +69,11 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
+import com.example.safewalknav.navigation.TrafficSignalLocation
+import com.example.safewalknav.traffic.TrafficSignalDatabase
+import com.example.safewalknav.traffic.TrafficSignalRepository
+import com.example.safewalknav.traffic.TrafficSignalLocationApiClient
+
 
 /**
  * 시각장애인 사용자 흐름 — PR-UX1 (사용자 합의안)
@@ -256,6 +261,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         override fun onSensorChanged(event: SensorEvent?) {
             // intentionally unused — see onResume (registration disabled)
         }
+
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
 
@@ -268,6 +274,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     event.values.copyInto(accelValues, 0, 0, 3)
                     hasAccel = true
                 }
+
                 Sensor.TYPE_MAGNETIC_FIELD -> {
                     event.values.copyInto(magValues, 0, 0, 3)
                     hasMag = true
@@ -290,6 +297,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 navigationManager.updateCompassHeading(currentAzimuth, now)
             }
         }
+
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
 
@@ -305,11 +313,24 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val headingLogger = AndroidHeadingLogger(
             getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)!!
         )
+
         navigationManager = NavigationManager(
-            tMapApiClient = TMapApiClient(BuildConfig.TMAP_APP_KEY),
-            signalApiClient = SignalApiClient(BuildConfig.T_DATA_API_KEY),
-            headingLogger = headingLogger,
-        )
+                tMapApiClient = TMapApiClient(BuildConfig.TMAP_APP_KEY),
+                signalApiClient = SignalApiClient(BuildConfig.T_DATA_API_KEY),
+                headingLogger = headingLogger,
+                trafficSignals = emptyList()
+            )
+
+        observeGuidance()
+
+        lifecycleScope.launch {
+            val trafficSignals = loadTrafficSignalLocations()
+            Log.d(
+                "TrafficSignalAPI",
+                "loaded to MainActivity: ${trafficSignals.size}"
+            )
+            navigationManager.updateTrafficSignals(trafficSignals)
+        }
 
         // View 참조
         rootLayout = findViewById(R.id.rootLayout)
@@ -352,7 +373,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         requestLocationPermission()
         checkAndEnableGPS()
         setupTouchArea()
-        observeGuidance()
+        //observeGuidance()
         showState(AppState.IDLE)
     }
 
@@ -413,18 +434,21 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 arrivedContainer.visibility = View.GONE
                 cameraPreviewContainer.visibility = View.GONE
             }
+
             AppState.RESULTS -> {
                 beforeContainer.visibility = View.GONE
                 resultsContainer.visibility = View.VISIBLE
                 arrivedContainer.visibility = View.GONE
                 cameraPreviewContainer.visibility = View.GONE
             }
+
             AppState.NAVIGATING -> {
                 beforeContainer.visibility = View.GONE
                 resultsContainer.visibility = View.GONE
                 arrivedContainer.visibility = View.GONE
                 cameraPreviewContainer.visibility = View.VISIBLE
             }
+
             AppState.ARRIVED -> {
                 beforeContainer.visibility = View.GONE
                 resultsContainer.visibility = View.GONE
@@ -455,6 +479,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 rootLayout.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
                 rootLayout.contentDescription = "화면을 2초간 길게 눌러 음성으로 목적지를 입력하세요"
             }
+
             else -> {
                 rootLayout.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                 rootLayout.contentDescription = null
@@ -504,7 +529,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             //   SEARCHING → API 호출 진행 중
             if (appState == AppState.RESULTS ||
                 appState == AppState.ARRIVED ||
-                appState == AppState.SEARCHING) {
+                appState == AppState.SEARCHING
+            ) {
                 return@setOnTouchListener false
             }
             when (event.action) {
@@ -517,11 +543,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     }
                     true
                 }
+
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     longPressJob?.cancel()
                     longPressJob = null
                     true
                 }
+
                 else -> false
             }
         }
@@ -534,10 +562,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 // 이동 중 안내 종료 — 카메라 화면에서 화면 길게 눌러서 빠져나옴
                 stopNavigationFull()
             }
+
             AppState.IDLE, AppState.LISTENING -> {
                 startSTT()
             }
-            else -> { /* RESULTS/ARRIVED/SEARCHING 은 setupTouchArea 에서 이미 차단 */ }
+
+            else -> { /* RESULTS/ARRIVED/SEARCHING 은 setupTouchArea 에서 이미 차단 */
+            }
         }
     }
 
@@ -604,34 +635,49 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             text.contains("종료") || text.contains("그만") || text.contains("멈춰") -> {
                 stopNavigationFull()
             }
+
             text.contains("어디") || text.contains("현재") || text.contains("위치") ||
-            text.contains("다시") || text.contains("반복") -> {
+                    text.contains("다시") || text.contains("반복") -> {
                 val msg = navigationManager.guidanceMessage.value
                 if (msg.isNotEmpty()) speakTTS(msg)
             }
+
             text.contains("빠르게") || text.contains("빨리") -> {
                 ttsSpeed = (ttsSpeed + 0.25f).coerceAtMost(2.0f)
                 tts.setSpeechRate(ttsSpeed)
                 speakTTS("음성 속도를 높였습니다.")
             }
+
             text.contains("느리게") || text.contains("천천히") -> {
                 ttsSpeed = (ttsSpeed - 0.25f).coerceAtLeast(0.5f)
                 tts.setSpeechRate(ttsSpeed)
                 speakTTS("음성 속도를 낮췄습니다.")
             }
+
             text.contains("크게") || text.contains("볼륨 올려") -> {
                 val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
+                am.adjustStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.ADJUST_RAISE,
+                    AudioManager.FLAG_SHOW_UI
+                )
                 speakTTS("소리를 키웠습니다.")
             }
+
             text.contains("작게") || text.contains("볼륨 내려") -> {
                 val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+                am.adjustStreamVolume(
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.ADJUST_LOWER,
+                    AudioManager.FLAG_SHOW_UI
+                )
                 speakTTS("소리를 줄였습니다.")
             }
+
             text.contains("도움") || text.contains("도움말") -> {
                 speakTTS("종료, 현재위치, 반복, 빠르게, 느리게, 크게, 작게를 사용할 수 있습니다.")
             }
+
             else -> {
                 speakTTS("다시 말씀해주세요.")
             }
@@ -876,7 +922,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     val gpsBearing = location.bearing
                     val delta = ((gpsBearing - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.3f * delta + 360f) % 360f
-                    navigationManager.updateCompassHeading(currentAzimuth, now)
+                    if (::navigationManager.isInitialized) {
+                        navigationManager.updateCompassHeading(currentAzimuth, System.currentTimeMillis())
+                    }
                 }
 
                 navigationManager.updateLocation(location.toGpsLocation())
@@ -887,10 +935,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         location.latitude, location.longitude,
                         navigationManager.destinationLat, navigationManager.destinationLon
                     )
-                    val accuracyText = if (location.hasAccuracy()) "±${location.accuracy.toInt()}m" else ""
-                    tvDebugGuidance.text = "GPS ${String.format("%.5f", location.latitude)}, ${
-                        String.format("%.5f", location.longitude)
-                    } $accuracyText | dest=${dist.toInt()}m"
+                    val accuracyText =
+                        if (location.hasAccuracy()) "±${location.accuracy.toInt()}m" else ""
+
+                    tvDebugGuidance.text =
+                        "${navigationManager.debugMessage.value}\n" +
+                                "GPS ${String.format("%.5f", location.latitude)}, ${
+                                    String.format("%.5f", location.longitude)
+                                } $accuracyText | dest=${dist.toInt()}m"
                 }
             }
         }
@@ -1084,7 +1136,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             try {
                 if (track.playState == AudioTrack.PLAYSTATE_PLAYING) track.pause()
                 track.flush()
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            }
             track.write(stereoBuffer, 0, stereoBuffer.size)
             track.play()
         } catch (_: Exception) {
@@ -1092,8 +1145,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun releaseStereoTrack() {
-        try { stereoTrack?.stop() } catch (_: Exception) {}
-        try { stereoTrack?.release() } catch (_: Exception) {}
+        try {
+            stereoTrack?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            stereoTrack?.release()
+        } catch (_: Exception) {
+        }
         stereoTrack = null
     }
 
@@ -1151,6 +1210,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         val name = navigationManager.destinationName.ifEmpty { "목적지" }
                         finishNavigation(name)
                     }
+                }
+            }
+        }
+        //신호등 디버그 화면 표시
+        lifecycleScope.launch {
+            navigationManager.debugMessage.collectLatest { message ->
+                if (BuildConfig.DEBUG && message.isNotEmpty()) {
+                    tvDebugGuidance.text = message
                 }
             }
         }
@@ -1406,9 +1473,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val locationGranted = ActivityCompat.checkSelfPermission(
                 this, Manifest.permission.ACCESS_FINE_LOCATION
             ) == PackageManager.PERMISSION_GRANTED ||
-                ActivityCompat.checkSelfPermission(
-                    this, Manifest.permission.ACCESS_COARSE_LOCATION
-                ) == PackageManager.PERMISSION_GRANTED
+                    ActivityCompat.checkSelfPermission(
+                        this, Manifest.permission.ACCESS_COARSE_LOCATION
+                    ) == PackageManager.PERMISSION_GRANTED
 
             if (locationGranted) {
                 checkAndEnableGPS()
@@ -1416,5 +1483,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 speakTTS("위치 권한이 필요합니다. 설정에서 허용해주세요.")
             }
         }
+    }
+
+    private suspend fun loadTrafficSignalLocations(): List<TrafficSignalLocation> {
+        val db = TrafficSignalDatabase.getInstance(this)
+
+        val repository = TrafficSignalRepository(
+            dao = db.trafficSignalDao(),
+            apiClient = TrafficSignalLocationApiClient(
+                apiKey = BuildConfig.SEOUL_API_KEY
+            )
+        )
+
+        return repository.getTrafficSignals()
     }
 }

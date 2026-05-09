@@ -37,6 +37,7 @@ kotlin {
             // 🆕 SignalApiClient 자동 JSON 파싱용
             implementation("io.ktor:ktor-client-content-negotiation:$ktorVersion")
             implementation("io.ktor:ktor-serialization-kotlinx-json:$ktorVersion")
+
         }
         commonTest.dependencies {
             implementation(kotlin("test"))

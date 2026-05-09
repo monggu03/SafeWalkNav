@@ -49,13 +49,11 @@ class SignalApiClient(private val apiKey: String) {
 
     suspend fun fetchTrafficSignalData(itstId: String): TrafficSignalResponse {
         if (apiKey.isBlank()) {
-            // 키 미주입 — 빌드 셋업 누락 또는 local.properties 미설정.
-            // 호출자가 처리할 수 있게 ERROR 응답 반환.
             return TrafficSignalResponse(status = "ERROR_NO_API_KEY")
         }
 
         val url = "https://t-data.seoul.go.kr/apig/apiman-gateway/tapi/" +
-                  "v2xSignalPhaseTimingFusionInformation/1.0"
+                "v2xSignalPhaseTimingFusionInformation/1.0"
 
         return try {
             client.get(url) {
