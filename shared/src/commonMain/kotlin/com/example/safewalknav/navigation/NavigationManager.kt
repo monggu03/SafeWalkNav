@@ -20,7 +20,7 @@ class NavigationManager(
     private val tMapApiClient: TMapApiClient,
     private val signalApiClient: SignalApiClient,
     private val headingLogger: HeadingLogger = NoopHeadingLogger,
-    private val trafficSignals: List<TrafficSignalLocation> = emptyList(),
+    private var trafficSignals: List<TrafficSignalLocation> = emptyList(), //횡단보도 주변 신호등 데이터
 ) {
     private val walkingDiagnostic = WalkingDiagnostic()
     // --- 여기 아래 코드를 추가해줘 ---
@@ -28,6 +28,12 @@ class NavigationManager(
     private var currentTargetBearing: Float = 0f // 현재 목표 방위각 저장용 변수
 
     // 외부에서 관찰할 수 있는 StateFlow (필요시)
+
+    fun updateTrafficSignals(signals: List<TrafficSignalLocation>) {
+        trafficSignals = signals
+        _debugMessage.value = "signals=${signals.size}"
+    }
+
     var currentRoute: TMapRoute? = null
         private set
 
@@ -322,15 +328,18 @@ class NavigationManager(
             syncWaypointIndexForwardOnly(it, currentLat, currentLon)
         }
 
+        //현재 추척중인 waypoint 정보
         val currentWp = route.waypoints.getOrNull(currentWaypointIndex)
 
+        // 현재 위치가 횡단보도인지 판정
         val isInCrossWalkZone = isOnCrosswalkSegment(
             currentLat,
             currentLon,
             route.waypoints,
-            currentWaypointIndex,
+            currentWaypointIndex
         )
 
+        //횡단보도 상태 디버그 출력
         _debugMessage.value =
             "횡단보도=$isInCrossWalkZone\n" +
                     "idx=$currentWaypointIndex/${route.waypoints.size}\n" +
@@ -338,8 +347,15 @@ class NavigationManager(
                     "roadType=${currentWp?.roadType}\n" +
                     "turnType=${currentWp?.turnType}\n" +
                     "desc=${currentWp?.description}"
-
         if (isInCrossWalkZone) {
+            val nearest = trafficSignals.minByOrNull {
+                distanceBetween(currentLat, currentLon, it.lat, it.lon)
+            }
+
+            val nearestDist = nearest?.let {
+                distanceBetween(currentLat, currentLon, it.lat, it.lon)
+            }
+
             val nearestSignal = TrafficSignalMatcher.findNearestSignal(
                 currentLat = currentLat,
                 currentLon = currentLon,
@@ -349,12 +365,21 @@ class NavigationManager(
 
             if (nearestSignal != null) {
                 _debugMessage.value =
-                    "횡단보도 감지됨\n신호제어기 ID=${nearestSignal.itstId}\nAPI 호출 시도"
+                    "횡단보도 감지됨\n" +
+                            "signals=${trafficSignals.size}\n" +
+                            "nearestId=${nearest?.itstId ?: "없음"}\n" +
+                            "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
+                            "신호제어기 ID=${nearestSignal.itstId}\n" +
+                            "API 호출 시도"
 
                 fetchTrafficSignalData(nearestSignal.itstId)
             } else {
                 _debugMessage.value =
-                    "횡단보도 감지됨\n하지만 30m 이내 신호제어기 없음"
+                    "횡단보도 감지됨\n" +
+                            "signals=${trafficSignals.size}\n" +
+                            "nearestId=${nearest?.itstId ?: "없음"}\n" +
+                            "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
+                            "30m 이내 신호제어기 없음"
             }
         }
 
@@ -481,17 +506,17 @@ class NavigationManager(
     }
 
 
-    private suspend fun fetchTrafficSignalData(itstId: String){
+    private suspend fun fetchTrafficSignalData(itstId: String) {
         val response = signalApiClient.fetchTrafficSignalData(itstId)
 
-        // 2. 결과 처리
         if (response.status != "ERROR" && response.items.isNotEmpty()) {
             val currentSignal = response.items.first()
-            //임시 확인 메시지
+
+            //신호 API 디버그
             _debugMessage.value =
                 "신호 API 성공\nID=${currentSignal.itstId}\n상태=${currentSignal.signalState}\n남은 시간=${currentSignal.remainTime}초"
 
-            // 3. 신호등 상태에 따른 로직 실행 (예: TTS 안내 등)
+            //신호등 상태 처리
             handleSignalUpdate(currentSignal)
         } else {
             println("NavManager 신호 데이터를 가져오지 못했습니다.")
@@ -499,10 +524,8 @@ class NavigationManager(
     }
 
     private fun handleSignalUpdate(item: SignalItem) {
-        // item.signalState 가 1이면 초록불, 2면 빨간불 등 (API 명세 기준)
-        println("[NavManager] 현재 신호: ${item.signalState}, 남은 시간: ${item.remainTime}초")
-        println("🚦 [SIGNAL_RESULT] ID: ${item.itstId}")
-
+        _debugMessage.value =
+            "현재 신호=${item.signalState}\n남은 시간=${item.remainTime}초"
     }
     /**
      * 안전한 시계 방향 계산
