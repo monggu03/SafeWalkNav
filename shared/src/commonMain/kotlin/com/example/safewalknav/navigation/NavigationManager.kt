@@ -50,6 +50,12 @@ class NavigationManager(
     private val _arrivalState = MutableStateFlow(ArrivalState.FAR)
     val arrivalState: StateFlow<ArrivalState> = _arrivalState
 
+    // 횡단보도 zone 진입 여부 — TMap waypoint 기반 판정 (isOnCrosswalkSegment).
+    // 안드: TrafficLightDetector 의 ML 안내 게이팅에 사용 (PR-AI).
+    // iOS: 동일 로직 적용 가능 (이지민 협업).
+    private val _isInCrosswalkZone = MutableStateFlow(false)
+    val isInCrosswalkZone: StateFlow<Boolean> = _isInCrosswalkZone
+
     // 안내 메시지
     private val _guidanceMessage = MutableStateFlow("")
     val guidanceMessage: StateFlow<String> = _guidanceMessage.asStateFlow()
@@ -204,6 +210,15 @@ class NavigationManager(
         _isNavigating.value = true
         _arrivalState.value = ArrivalState.FAR
         _distanceToDestination.value = Float.MAX_VALUE
+
+        // === 진단: TMap 응답이 횡단보도를 별도 waypoint 로 만들었는지 검증 ===
+        // 시각장애인 안내의 핵심 — 만약 CROSSWALK 0 개면 TMap API 가 sparse 응답한 것.
+        val crosswalkCount = route.waypoints.count { isCrosswalkWaypoint(it) }
+        println("[NavManager] 경로 로드 완료 — ${route.waypoints.size}개 waypoint (CROSSWALK ${crosswalkCount}개, total ${route.totalDistance}m)")
+        route.waypoints.forEachIndexed { i, wp ->
+            val mark = if (isCrosswalkWaypoint(wp)) "🚦" else "  "
+            println("$mark [$i] type=${wp.pointType} turn=${wp.turnType} road=${wp.roadType} dist=${wp.distance}m desc=${wp.description.take(60)}")
+        }
         cachedNearbyPOIs = emptyList()
         cachedAddress = null
         arrivalInfoLoaded = false
@@ -338,6 +353,8 @@ class NavigationManager(
             route.waypoints,
             currentWaypointIndex
         )
+        // 외부 (안드 ML 검출 게이팅 등) 가 collect 할 수 있게 state flow 갱신
+        _isInCrosswalkZone.value = isInCrossWalkZone
 
         //횡단보도 상태 디버그 출력
         _debugMessage.value =

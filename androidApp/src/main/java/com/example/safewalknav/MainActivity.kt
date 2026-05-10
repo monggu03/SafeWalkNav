@@ -41,6 +41,7 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -48,6 +49,14 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.safewalknav.location.LocationTracker
+import com.example.safewalknav.ml.TrafficLightAnalyzer
+import com.example.safewalknav.ml.TrafficLightDetection
+import com.example.safewalknav.ml.TrafficLightDetector
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import com.example.safewalknav.navigation.AndroidHeadingLogger
 import com.example.safewalknav.navigation.ArrivalState
 import com.example.safewalknav.navigation.NavigationManager
@@ -166,12 +175,61 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // 마지막 검색어 (디버그 표시 + 0건 시 재시도 안내)
     private var lastSearchKeyword: String = ""
 
+    // ==================== 외출 디버깅 파일 로깅 ====================
+    // logcat ring buffer 가 외출 동안 시스템 로그로 덮어써져서 우리 진단 로그가 사라지는 문제 회피.
+    // NAVIGATING 시작 시 파일 열고, isInCrosswalkZone / guidance / TL 검출 / 경로 dump 모두 기록.
+    // 외장 저장소: /sdcard/Android/data/com.example.safewalknav/files/walk_logs/walk_<ts>.log
+    private var navLogFile: File? = null
+    private val tsFormat = SimpleDateFormat("HH:mm:ss.SSS")
+
+    private fun startNavLog() {
+        try {
+            val dir = getExternalFilesDir("walk_logs")
+            dir?.mkdirs()
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss").format(Date())
+            navLogFile = File(dir, "walk_$ts.log").apply {
+                writeText("=== SafeWalkNav 외출 로그 시작 ${Date()} ===\n")
+            }
+            Log.d("SafeWalkNav", "Nav log file: ${navLogFile?.absolutePath}")
+        } catch (e: Exception) {
+            Log.e("SafeWalkNav", "Nav log file create failed", e)
+        }
+    }
+
+    private fun appendNavLog(msg: String) {
+        try {
+            navLogFile?.appendText("[${tsFormat.format(Date())}] $msg\n")
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun closeNavLog() {
+        appendNavLog("=== 종료 ===")
+        navLogFile = null
+    }
+
     // ==================== 카메라 (CameraX) ====================
 
     // NAVIGATING 진입 시 후방 카메라 PreviewView 를 cameraPreviewContainer 에 attach.
-    // 1차 (PR-UX2): 미리보기만 → 시연/사용자에게 "동작 중" 시각 피드백.
-    // 2차 (PR-3, 김수영): ImageAnalysis use case 추가 → 신호등 detection + 횡단보도 줄무늬.
+    // PR-UX2: 미리보기 use case
+    // PR-AI: ImageAnalysis use case 추가 — TrafficLightDetector 로 보행자 신호등 색 검출
     private var cameraProvider: ProcessCameraProvider? = null
+
+    // ==================== 신호등 검출 (PR-AI) ====================
+
+    private var trafficLightDetector: TrafficLightDetector? = null
+    private var analysisExecutor: ExecutorService? = null
+
+    // 안내 디바운스 — 같은 색이 연속 검출돼도 SIGNAL_SPEAK_INTERVAL_MS 마다 1번만 안내.
+    // 색이 변하면 (예: 빨강 → 초록) 즉시 안내.
+    private var lastSpokenSignalColor: Int = -1   // -1 = 없음, 0 = red, 1 = green
+    private var lastSpokenSignalAt: Long = 0L
+    private val SIGNAL_SPEAK_INTERVAL_MS = 5000L
+
+    // 횡단보도 zone 게이팅 — NavigationManager.isInCrosswalkZone (TMap waypoint 기반) 정확히 추적.
+    // GPS update 마다 NavigationManager 가 isOnCrosswalkSegment() 로 판정 → state flow emit.
+    // observeGuidance 의 collectLatest 로 갱신.
+    private var inCrosswalkZone: Boolean = false
 
     // ==================== 진동 / 효과음 ====================
 
@@ -409,6 +467,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         longPressJob?.cancel()
         arrivedReturnJob?.cancel()
         stopCamera()
+        trafficLightDetector?.close()
+        trafficLightDetector = null
+        analysisExecutor?.shutdown()
+        analysisExecutor = null
         tts.shutdown()
         toneGenerator?.release()
         releaseStereoTrack()
@@ -830,6 +892,20 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 playToneSuccess()
                 window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+                // 파일 로깅 시작 + 경로 정보 dump
+                startNavLog()
+                val route = navigationManager.currentRoute
+                if (route != null) {
+                    val crosswalks = route.waypoints.count {
+                        it.pointType == "CROSSWALK" || it.turnType in 211..217
+                    }
+                    appendNavLog("경로 로드: ${route.waypoints.size}개 waypoint (CROSSWALK ${crosswalks}개, 총 ${route.totalDistance}m)")
+                    route.waypoints.forEachIndexed { i, wp ->
+                        val mark = if (wp.pointType == "CROSSWALK" || wp.turnType in 211..217) "🚦" else "  "
+                        appendNavLog("$mark [$i] type=${wp.pointType} turn=${wp.turnType} road=${wp.roadType} dist=${wp.distance} desc=${wp.description.take(80)}")
+                    }
+                }
+
                 val summary = getRouteSummary()
                 if (summary.isNotEmpty()) {
                     speakTTS(summary)
@@ -872,6 +948,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      * NAVIGATING 종료 — ARRIVED 상태로 전환 후 3초 뒤 자동으로 IDLE 로.
      */
     private fun finishNavigation(arrivedName: String) {
+        appendNavLog("finishNavigation: 도착 — $arrivedName")
+        closeNavLog()
         trackingJob?.cancel()
         stopAutoRepeat()
         stopBeacon()
@@ -893,6 +971,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     /** 음성 명령 "종료" 또는 사용자가 도중 중단 — ARRIVED 화면 거치지 않고 곧장 IDLE. */
     private fun stopNavigationFull() {
+        appendNavLog("stopNavigationFull (사용자 중단 또는 음성 명령)")
+        closeNavLog()
         trackingJob?.cancel()
         stopAutoRepeat()
         stopBeacon()
@@ -1164,6 +1244,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 if (message.isNotEmpty()) {
                     speakTTS(message)
                     Log.d("SafeWalkNav", "Guidance: $message")
+                    appendNavLog("Guidance: $message")
 
                     if (BuildConfig.DEBUG) {
                         tvDebugGuidance.text = "guidance=$message"
@@ -1175,6 +1256,47 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     } else if (message.contains("횡단보도") || message.contains("계단")) {
                         vibrateMedium()
                         playToneAlert()
+                    }
+                }
+            }
+        }
+
+        // 횡단보도 zone 상태 추적 — TMap waypoint 의 pointType=CROSSWALK + GPS 위치 기반.
+        // NavigationManager 가 매 GPS update 마다 갱신. ML 안내 게이팅에 사용.
+        lifecycleScope.launch {
+            navigationManager.isInCrosswalkZone.collectLatest { inZone ->
+                val wasIn = inCrosswalkZone
+                inCrosswalkZone = inZone
+                if (inZone && !wasIn) {
+                    // 진입 시점 — 디바운스 리셋해서 첫 검출 즉시 안내
+                    lastSpokenSignalColor = -1
+                    lastSpokenSignalAt = 0L
+                    Log.d("SafeWalkNav", "Crosswalk zone ENTER — TL 안내 활성화")
+                    appendNavLog("Crosswalk zone ENTER — TL 안내 활성화")
+                } else if (!inZone && wasIn) {
+                    Log.d("SafeWalkNav", "Crosswalk zone EXIT — TL 안내 비활성화")
+                    appendNavLog("Crosswalk zone EXIT — TL 안내 비활성화")
+                }
+            }
+        }
+
+        // NavigationManager 의 debugMessage 도 파일에 기록 (sparse 하게 — 매 GPS update 마다라 양 많을 수 있음)
+        lifecycleScope.launch {
+            navigationManager.debugMessage.collectLatest { msg ->
+                if (msg.isNotEmpty()) {
+                    appendNavLog("DBG: ${msg.replace("\n", " | ")}")
+                }
+            }
+        }
+
+        // DEBUG 빌드: NavigationManager.debugMessage 를 화면 하단에 실시간 표시.
+        // 외출 중 횡단보도 zone 판정 디버깅 용도 — `횡단보도=`, `wp=`, `roadType=`, `idx=` 값 추적.
+        if (BuildConfig.DEBUG) {
+            lifecycleScope.launch {
+                navigationManager.debugMessage.collectLatest { msg ->
+                    if (msg.isNotEmpty()) {
+                        // 여러 줄을 한 줄로 압축해서 좁은 디버그 박스에 표시
+                        tvDebugGuidance.text = msg.replace("\n", " | ")
                     }
                 }
             }
@@ -1252,6 +1374,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         cameraPreviewContainer.removeAllViews()
         cameraPreviewContainer.addView(pv)
 
+        // 검출기/executor 초기화 (재사용)
+        if (trafficLightDetector == null) {
+            try {
+                trafficLightDetector = TrafficLightDetector(this)
+                Log.d("SafeWalkNav", "TrafficLightDetector loaded")
+            } catch (e: Exception) {
+                Log.e("SafeWalkNav", "Failed to load TrafficLightDetector", e)
+            }
+        }
+        if (analysisExecutor == null) {
+            analysisExecutor = Executors.newSingleThreadExecutor()
+        }
+
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             try {
@@ -1262,18 +1397,103 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     it.setSurfaceProvider(pv.surfaceProvider)
                 }
 
+                // ImageAnalysis use case — 검출기 로드 됐을 때만 추가
+                val useCases = mutableListOf<androidx.camera.core.UseCase>(preview)
+                val detector = trafficLightDetector
+                val executor = analysisExecutor
+                if (detector != null && executor != null) {
+                    val analysis = ImageAnalysis.Builder()
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
+                    analysis.setAnalyzer(
+                        executor,
+                        TrafficLightAnalyzer(
+                            detector = detector,
+                            isActive = { inCrosswalkZone },   // 횡단보도 zone 밖 → ML 추론 스킵
+                        ) { detections ->
+                            runOnUiThread { onTrafficLightDetected(detections) }
+                        }
+                    )
+                    useCases += analysis
+                    Log.d("SafeWalkNav", "ImageAnalysis bound — TrafficLight detection ON")
+                }
+
                 provider.unbindAll()
                 provider.bindToLifecycle(
                     this,
                     CameraSelector.DEFAULT_BACK_CAMERA,
-                    preview
+                    *useCases.toTypedArray()
                 )
-                Log.d("SafeWalkNav", "Camera bound (preview only)")
+                Log.d("SafeWalkNav", "Camera bound (use cases: ${useCases.size})")
             } catch (e: Exception) {
                 Log.e("SafeWalkNav", "Camera bind failed", e)
                 cameraProvider = null
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    /**
+     * 신호등 검출 결과 처리.
+     * - 검출 0건: 무시 (신호등 못 봄. 안내 안 함)
+     * - 검출 ≥1건: 가장 큰 박스 (가장 가까운 신호등) 채택 → 디바운스 후 TTS
+     *   · 같은 색 연속: SIGNAL_SPEAK_INTERVAL_MS 마다 한 번만 안내
+     *   · 색 변경 (빨강 ↔ 초록): 즉시 안내
+     */
+    private fun onTrafficLightDetected(detections: List<TrafficLightDetection>) {
+        if (detections.isEmpty()) return
+
+        // 0차 필터: 횡단보도 zone 진입했을 때만 안내.
+        // NavigationManager.isInCrosswalkZone (TMap waypoint pointType=CROSSWALK + GPS 위치 판정) 기반.
+        // ML 추론은 백그라운드에서 계속 돌지만 zone 밖에선 결과 무시.
+        if (!inCrosswalkZone) return
+
+        // 1차 필터: 너무 작은 박스 제외 (멀리 있는 noise / 빨간 점 noise 차단)
+        // 신호등은 보통 화면 너비/높이의 6% 이상 차지. 그보다 작으면 noise 가능성 높음.
+        val MIN_BOX_DIMENSION = 0.06f
+        val validated = detections.filter { d ->
+            d.bbox.width >= MIN_BOX_DIMENSION && d.bbox.height >= MIN_BOX_DIMENSION
+        }
+        if (validated.isEmpty()) {
+            // DEBUG: noise 무시했음을 표시
+            if (BuildConfig.DEBUG && detections.isNotEmpty()) {
+                val small = detections.first()
+                tvDebugGuidance.text = "TL noise 무시: ${small.label} ${(small.confidence * 100).toInt()}% box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}%"
+            }
+            return
+        }
+
+        val nearest = validated.maxByOrNull { it.bbox.area } ?: return
+
+        val now = System.currentTimeMillis()
+        val sameColor = nearest.classId == lastSpokenSignalColor
+        val withinCooldown = now - lastSpokenSignalAt < SIGNAL_SPEAK_INTERVAL_MS
+        if (sameColor && withinCooldown) {
+            // 디바운스 중 — 안내 안 함, 디버그만 갱신
+            if (BuildConfig.DEBUG) {
+                tvDebugGuidance.text = "TL (cooldown): ${nearest.label} ${(nearest.confidence * 100).toInt()}%"
+            }
+            return
+        }
+
+        lastSpokenSignalColor = nearest.classId
+        lastSpokenSignalAt = now
+
+        val message = when (nearest.classId) {
+            0 -> "빨간불입니다. 정지하세요."
+            1 -> "초록불입니다."
+            else -> return
+        }
+        speakTTS(message)
+        Log.d("SafeWalkNav", "TL announced: $message (conf=${nearest.confidence}, box=${nearest.bbox.width}x${nearest.bbox.height})")
+        appendNavLog("TL announced: $message (conf=${nearest.confidence}, box=${nearest.bbox.width}x${nearest.bbox.height}, total ${detections.size} det)")
+
+        // 색 변경 시 진동 한 번
+        if (!sameColor) vibrateShort()
+
+        if (BuildConfig.DEBUG) {
+            tvDebugGuidance.text =
+                "TL: ${nearest.label} ${(nearest.confidence * 100).toInt()}% (${validated.size}/${detections.size} det)"
+        }
     }
 
     private fun stopCamera() {
@@ -1283,6 +1503,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
         cameraProvider = null
         cameraPreviewContainer.removeAllViews()
+
+        // 검출 디바운스 리셋 — 다음 NAVIGATING 진입 시 첫 신호등 검출 즉시 안내
+        lastSpokenSignalColor = -1
+        lastSpokenSignalAt = 0L
+
+        // 횡단보도 zone 은 NavigationManager.isInCrosswalkZone state flow 가 자동 관리 —
+        // 여기서 명시적 reset 불필요. NAVIGATING 종료 시 navigationManager.stopNavigation() 호출되며
+        // route 가 cleared → state flow 도 자연스럽게 false 로 emit.
+
         Log.d("SafeWalkNav", "Camera unbound")
     }
 
