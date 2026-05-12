@@ -386,17 +386,21 @@ class NavigationManager(
                             "signals=${trafficSignals.size}\n" +
                             "nearestId=${nearest?.itstId ?: "없음"}\n" +
                             "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
-                            "신호제어기 ID=${nearestSignal.itstId}\n" +
-                            "API 호출 시도"
+                            "nearestSignalLat=${nearestSignal.lat}\n" +
+                            "nearestSignalLon=${nearestSignal.lon}\n" +
+                            "교차로 매칭 시도"
 
-                fetchTrafficSignalData(nearestSignal.itstId)
+                fetchTrafficSignalData(
+                    signalLat = nearestSignal.lat,
+                    signalLon = nearestSignal.lon
+                )
             } else {
                 _debugMessage.value =
                     "횡단보도 감지됨\n" +
                             "signals=${trafficSignals.size}\n" +
                             "nearestId=${nearest?.itstId ?: "없음"}\n" +
                             "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
-                            "30m 이내 신호제어기 없음"
+                            "30m 이내 신호등 없음"
             }
         }
 
@@ -523,17 +527,49 @@ class NavigationManager(
     }
 
 
-    private suspend fun fetchTrafficSignalData(itstId: String) {
-        val rawJson = signalApiClient.fetchSignalRemainingData(itstId)
+    suspend fun fetchTrafficSignalData(
+        signalLat: Double,
+        signalLon: Double
+    ) {
+        val crossroadJson = signalApiClient.fetchIntersectionData()
 
-        if (rawJson != null) {
-            _debugMessage.value =
-                "신호 API 응답 성공\nID=$itstId\nraw=${rawJson.take(300)}"
-        } else {
-            _debugMessage.value =
-                "신호 API 응답 실패\nID=$itstId"
+        if (crossroadJson == null) {
+            _debugMessage.value = "교차로 API 실패"
+            return
         }
+
+        if (crossroadJson.startsWith("ERROR")) {
+            _debugMessage.value = crossroadJson
+            return
+        }
+
+        val intersections = TrafficIntersectionParser.parse(crossroadJson)
+
+        val nearestIntersection = TrafficIntersectionParser.findNearest(
+            intersections = intersections,
+            lat = signalLat,
+            lon = signalLon,
+            radiusMeters = 100f
+        )
+
+        if (nearestIntersection == null) {
+            _debugMessage.value =
+                "근처 교차로 없음\nintersections=${intersections.size}"
+            return
+        }
+
+        val remainJson = signalApiClient.fetchSignalRemainingData(
+            itstId = nearestIntersection.itstId
+        )
+
+        _debugMessage.value =
+            "교차로 매칭 성공\n" +
+                    "itstId=${nearestIntersection.itstId}\n" +
+                    "name=${nearestIntersection.itstNm}\n" +
+                    "잔여시간 API 응답=${if (remainJson != null && !remainJson.startsWith("ERROR")) "성공" else "실패"}\n" +
+                    "rawLength=${remainJson?.length ?: 0}"
     }
+
     /**
      * 안전한 시계 방향 계산
      * 속도가 너무 낮으면(정지 상태) bearing이 부정확하므로 "전방" 으로 대체

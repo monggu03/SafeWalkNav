@@ -32,32 +32,28 @@ class SignalApiClient(
      *
      * 반환값: raw JSON 문자열
      */
-    suspend fun fetchIntersectionData(
-        pageNo: Int = 1,
-        numOfRows: Int = 1000
-    ): String? {
+    suspend fun fetchIntersectionData(): String? {
         if (apiKey.isBlank()) {
-            return null
+            return "ERROR_NO_API_KEY"
         }
 
-        val url = "https://t-data.seoul.go.kr/apig/apiman-gateway/tapi/" +
-                "v2xMapInformation/1.0"
+        val url = "http://t-data.seoul.go.kr/apig/apiman-gateway/tapi/" +
+                "v2xCrossroadMapInformation/1.0"
 
         return try {
             val response = client.get(url) {
-                parameter("apiKey", apiKey)
-                parameter("type", "json")
-                parameter("pageNo", pageNo)
-                parameter("numOfRows", numOfRows)
+                parameter("apikey", apiKey)
             }
+
+            val body = response.bodyAsText()
 
             if (!response.status.isSuccess()) {
-                return null
+                return "ERROR_HTTP_${response.status.value}: ${body.take(300)}"
             }
 
-            response.bodyAsText()
+            body
         } catch (e: Exception) {
-            null
+            "ERROR_EXCEPTION: ${e::class.simpleName}: ${e.message}"
         }
     }
 
@@ -73,7 +69,7 @@ class SignalApiClient(
         numOfRows: Int = 10
     ): String? {
         if (apiKey.isBlank()) {
-            return null
+            return "ERROR_NO_API_KEY"
         }
 
         val url = "https://t-data.seoul.go.kr/apig/apiman-gateway/tapi/" +
@@ -81,20 +77,22 @@ class SignalApiClient(
 
         return try {
             val response = client.get(url) {
-                parameter("apiKey", apiKey)
+                parameter("apikey", apiKey)
                 parameter("type", "json")
                 parameter("pageNo", pageNo)
                 parameter("numOfRows", numOfRows)
                 parameter("itstId", itstId)
             }
 
-            if (!response.status.isSuccess()) {
-                return null
-            }
+            val body = response.bodyAsText()
 
-            response.bodyAsText()
+            if (!response.status.isSuccess()) {
+                return "ERROR_HTTP_${response.status.value}: ${body.take(300)}"
+            }
+            body
+
         } catch (e: Exception) {
-            null
+            "ERROR_EXCEPTION: ${e::class.simpleName}: ${e.message}"
         }
     }
 }
