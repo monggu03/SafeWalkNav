@@ -661,7 +661,12 @@ class NavigationManager(
         const val BASE_DEVIATION_THRESHOLD = 25f    // 기본 이탈 임계값 (m)
         const val MIN_DEVIATION_THRESHOLD = 20f     // 최소 임계값
         const val MAX_DEVIATION_THRESHOLD = 50f     // 최대 임계값
-        const val STATIONARY_SPEED = 0.5f           // 정지 판정 속도 (m/s)
+        const val STATIONARY_SPEED = 0.5f           // 정지 판정 속도 (m/s) — 자세/직진 안내용
+        // 시각장애인은 1.8km/h 미만으로 천천히 걷는 경우가 많아 STATIONARY_SPEED(0.5)로
+        // 이탈을 막으면 잘못된 경로로 가도 재탐색이 안 됨. 이탈 판정 전용으로 더 낮은
+        // 임계값을 둔다(0.1m/s = 거의 정지). iOS CLLocation.speed가 -1(무효)인 경우는
+        // 0으로 coerce되므로 이 값도 같이 걸러진다.
+        const val DEVIATION_STATIONARY_SPEED = 0.1f
         const val BASE_REROUTE_COOLDOWN = 15_000L   // 기본 재탐색 쿨다운 (ms)
         const val MAX_REROUTE_COOLDOWN = 60_000L    // 최대 재탐색 쿨다운 (ms)
         // Kalman 파라미터는 KalmanHeading.kt 내부 companion object 로 이동.
@@ -681,8 +686,11 @@ class NavigationManager(
     ): Boolean {
         val route = currentRoute ?: return false
 
-        // 정지 상태: GPS 드리프트로 인한 오판 방지
-        if (speed < STATIONARY_SPEED) {
+        // 거의 정지 상태에서만 이탈 판정 억제 (GPS 드리프트 오판 방지).
+        // STATIONARY_SPEED(0.5)보다 낮은 DEVIATION_STATIONARY_SPEED(0.1)을 쓰는 이유:
+        // 시각장애인은 천천히 걸어 0.5m/s 미만으로 이동하는 경우가 많은데, 그 상태에서
+        // 잘못된 길로 가도 재탐색이 안 되는 문제가 있었다.
+        if (speed < DEVIATION_STATIONARY_SPEED) {
             consecutiveDeviationCount = 0
             return false
         }
@@ -701,6 +709,7 @@ class NavigationManager(
 
         if (minDist > dynamicThreshold) {
             consecutiveDeviationCount++
+            println("[NavManager] 이탈 감지 ${consecutiveDeviationCount}/$DEVIATION_CONFIRM_COUNT — minDist=${minDist.toInt()}m, threshold=${dynamicThreshold.toInt()}m, speed=${speed}m/s")
         } else {
             consecutiveDeviationCount = 0
         }
@@ -873,19 +882,34 @@ class NavigationManager(
             BASE_REROUTE_COOLDOWN * (1 + consecutiveRerouteCount),
             MAX_REROUTE_COOLDOWN
         )
-        if (now - lastRerouteTime < cooldown) return
+        if (now - lastRerouteTime < cooldown) {
+            println("[NavManager] 재탐색 쿨다운 중 — ${(cooldown - (now - lastRerouteTime)) / 1000}초 남음")
+            return
+        }
         lastRerouteTime = now
         consecutiveRerouteCount++
 
+        println("[NavManager] 🔄 재탐색 시작 — pos=(${currentLat},${currentLon}) → dest=(${destinationLat},${destinationLon})")
+
+        // 같은 메시지 중복 발화 필터에 막히지 않도록 리셋
+        lastSpokenMessage = ""
         speak("경로를 이탈했습니다. 다시 탐색합니다.")
 
+        // 이탈 카운트 리셋 — 재탐색 직후 즉시 다시 이탈 판정되지 않도록
+        consecutiveDeviationCount = 0
+
+        // 입구 좌표(frontLat/Lon)가 있으면 그쪽으로 라우팅 (도착 판정은 실제 POI 기준)
         val success = startNavigation(
             currentLat, currentLon,
             destinationLat, destinationLon,
-            destinationName
+            destinationName,
+            frontLat = destinationFrontLat,
+            frontLon = destinationFrontLon
         )
 
         if (!success) {
+            println("[NavManager] 🔴 재탐색 실패")
+            lastSpokenMessage = ""
             speak("경로를 찾을 수 없습니다. 주변 도움을 요청하세요.")
         }
     }

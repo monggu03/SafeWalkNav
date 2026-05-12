@@ -34,13 +34,12 @@ final class AppDependencies: ObservableObject {
         let tts = TtsManager()
         let locationTracker = LocationTracker()
         let headingProvider = HeadingProvider()
-        
+        let stt = SttManager(tts: tts)
+
         // 2. KMM 매니저 (TMap API 키로 초기화)
         let apiKey = Secrets.tMapAppKey
-            print("[AppDependencies] API 키 길이: \(apiKey.count)")
-            print("[AppDependencies] API 키 앞 5자: \(apiKey.prefix(5))")
-            print("[AppDependencies] API 키 뒤 3자: \(apiKey.suffix(3))")
-            
+        print("[AppDependencies] API 키 길이: \(apiKey.count)")
+
         let signalClient = SignalApiClient(apiKey: apiKey)
         let tMapClient = TMapApiClient(appKey: apiKey)
         let navigationManager = NavigationManager(
@@ -50,11 +49,12 @@ final class AppDependencies: ObservableObject {
             trafficSignals: []
         )
 
-        // 3. 통합 ViewModel
+        // 3. 통합 ViewModel — STT까지 주입해서 음성 목적지 입력 지원
         let navigationViewModel = NavigationViewModel(
             tts: tts,
             locationTracker: locationTracker,
             headingProvider: headingProvider,
+            stt: stt,
             navigationManager: navigationManager
         )
 
@@ -63,7 +63,7 @@ final class AppDependencies: ObservableObject {
         self.locationTracker = locationTracker
         self.headingProvider = headingProvider
         self.navigationManager = navigationManager
-        self.stt = SttManager(tts: tts)
+        self.stt = stt
         self.navigationViewModel = navigationViewModel
         self.trafficLightDetector = TrafficLightDetector(tts: tts)
     }
