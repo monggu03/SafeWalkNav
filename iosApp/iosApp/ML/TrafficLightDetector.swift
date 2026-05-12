@@ -53,7 +53,7 @@ final class TrafficLightDetector: NSObject, ObservableObject {
     
     // MARK: - Optical Flow (선택적)
     /// 주입되면 매 프레임을 옵티컬 플로우 분석에도 전달
-    private weak var opticalFlow: OpticalFlowAnalyzer?
+    //private weak var opticalFlow: OpticalFlowAnalyzer?
 
     // MARK: - TTS (통합 앱에서는 TtsManager 사용)
     /// nil이면 자체 synthesizer 사용 (단독 실행 시), 주입되면 TtsManager 사용
@@ -75,15 +75,22 @@ final class TrafficLightDetector: NSObject, ObservableObject {
     // MARK: - Init
 
     /// 통합 앱에서 사용 시: TtsManager 주입
-    init(tts: TtsManager? = nil, opticalFlow: OpticalFlowAnalyzer? = nil) {
-        self.tts = tts
-        self.opticalFlow = opticalFlow
-        print("🔧 [TrafficLightDetector] init — opticalFlow nil? \(opticalFlow == nil)")
-        super.init()
-        setupModel()
-        setupCamera()
-        setupAudio()
-    }
+//    init(tts: TtsManager? = nil, opticalFlow: OpticalFlowAnalyzer? = nil) {
+//        self.tts = tts
+//        self.opticalFlow = opticalFlow
+//        print("🔧 [TrafficLightDetector] init — opticalFlow nil? \(opticalFlow == nil)")
+//        super.init()
+//        setupModel()
+//        setupCamera()
+//        setupAudio()
+//    }
+        init(tts: TtsManager? = nil) {
+            self.tts = tts
+            super.init()
+            setupModel()
+            setupCamera()
+            setupAudio()
+        }
 
     /// AppDependencies에서 나중에 TtsManager를 주입할 때
     func attach(tts: TtsManager) {
@@ -271,10 +278,11 @@ extension TrafficLightDetector: AVCaptureVideoDataOutputSampleBufferDelegate {
         processFrame(pixelBuffer)
         
         // opticalFlow nil 체크는 처음 의심될 때만 알려주면 충분
-        if shouldLog && opticalFlow == nil {
-            print("⚠️ [TrafficLightDetector] opticalFlow가 nil — 호출 안 됨")
-        }
-
-        opticalFlow?.analyze(pixelBuffer: pixelBuffer, roi: nil)
+        //        if shouldLog && opticalFlow == nil {
+        //            print("⚠️ [TrafficLightDetector] opticalFlow가 nil — 호출 안 됨")
+        //        }
+        //
+        //        opticalFlow?.analyze(pixelBuffer: pixelBuffer, roi: nil)
+        //    }
     }
 }
