@@ -382,6 +382,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 trafficSignals = emptyList()
             )
 
+        lifecycleScope.launch {
+
+            navigationManager.updateTrafficSignals(
+                loadTrafficSignalLocations()
+            )
+        }
+
         observeGuidance()
 
         lifecycleScope.launch {
@@ -392,6 +399,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             )
             navigationManager.updateTrafficSignals(trafficSignals)
         }
+
+
 
         // View 참조
         rootLayout = findViewById(R.id.rootLayout)
