@@ -163,7 +163,10 @@ final class NavigationViewModel: ObservableObject {
     private func bindHeadingToNavigation() {
         headingProvider.$currentHeading
             .sink { [weak self] heading in
-                self?.navigationManager.updateCompassHeading(azimuth: Float(heading))
+                self?.navigationManager.updateCompassHeading(
+                    azimuth: Float(heading),
+                    currentTime: Int64(Date().timeIntervalSince1970 * 1000)
+                )
             }
             .store(in: &cancellables)
     }

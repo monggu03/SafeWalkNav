@@ -52,6 +52,12 @@ struct ContentView: View {
                     Text("상태")
                 }
                 .tag(2)
+            TBFWDemoView(deps: deps)
+                .tabItem {
+                    Image(systemName: "ladybug.fill")
+                    Text("TBFW")
+                }
+                .tag(3)
 
         }
         .onAppear {
