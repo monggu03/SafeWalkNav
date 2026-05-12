@@ -31,7 +31,7 @@ val tDataApiKey: String = run {
     if (localFile.exists()) {
         localFile.inputStream().use { props.load(it) }
     }
-    props.getProperty("T_DATA_API_KEY", "")
+    props.getProperty("TDATA_API_KEY", "")
 }
 
 android {

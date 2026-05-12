@@ -1,11 +1,13 @@
 package com.example.safewalknav.traffic
 
+import com.example.safewalknav.navigation.SeoulTrafficSignalLocationApiClient
 import com.example.safewalknav.navigation.TrafficSignalLocation
-import android.util.Log
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class TrafficSignalRepository(
     private val dao: TrafficSignalDao,
-    private val apiClient: TrafficSignalLocationApiClient
+    private val apiClient: SeoulTrafficSignalLocationApiClient
 ) {
     suspend fun getTrafficSignals(): List<TrafficSignalLocation> {
         val local = dao.getAll()
@@ -14,17 +16,33 @@ class TrafficSignalRepository(
             return local.map { it.toDomain() }
         }
 
-        val remote = apiClient.fetchTrafficSignals()
+        val remote = fetchRemoteEntities()
 
         if (remote.isNotEmpty()) {
             dao.clearAll()
             dao.insertAll(remote)
         }
-        Log.d(
-            "TrafficSignalAPI",
-            "remote size: ${remote.size}"
-        )
+
         return dao.getAll().map { it.toDomain() }
+    }
+
+    private suspend fun fetchRemoteEntities(): List<TrafficSignalEntity> {
+        val xmlPages = apiClient.fetchTrafficSignalXmlPages()
+        val entities = mutableListOf<TrafficSignalEntity>()
+
+        for (xml in xmlPages) {
+            val pageEntities = withContext(Dispatchers.Default) {
+                TrafficSignalXmlParser.parse(xml)
+            }
+
+            if (pageEntities.isEmpty()) {
+                break
+            }
+
+            entities.addAll(pageEntities)
+        }
+
+        return entities
     }
 
     private fun TrafficSignalEntity.toDomain(): TrafficSignalLocation {

@@ -81,7 +81,10 @@ import kotlin.math.sin
 import com.example.safewalknav.navigation.TrafficSignalLocation
 import com.example.safewalknav.traffic.TrafficSignalDatabase
 import com.example.safewalknav.traffic.TrafficSignalRepository
-import com.example.safewalknav.traffic.TrafficSignalLocationApiClient
+import com.example.safewalknav.navigation.SeoulTrafficSignalLocationApiClient
+import com.example.safewalknav.traffic.TrafficSignalRemainingTimeParser
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 
 /**
@@ -1719,7 +1722,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         val repository = TrafficSignalRepository(
             dao = db.trafficSignalDao(),
-            apiClient = TrafficSignalLocationApiClient(
+            apiClient = SeoulTrafficSignalLocationApiClient(
                 apiKey = BuildConfig.SEOUL_API_KEY
             )
         )

@@ -524,25 +524,15 @@ class NavigationManager(
 
 
     private suspend fun fetchTrafficSignalData(itstId: String) {
-        val response = signalApiClient.fetchTrafficSignalData(itstId)
+        val rawJson = signalApiClient.fetchSignalRemainingData(itstId)
 
-        if (response.status != "ERROR" && response.items.isNotEmpty()) {
-            val currentSignal = response.items.first()
-
-            //신호 API 디버그
+        if (rawJson != null) {
             _debugMessage.value =
-                "신호 API 성공\nID=${currentSignal.itstId}\n상태=${currentSignal.signalState}\n남은 시간=${currentSignal.remainTime}초"
-
-            //신호등 상태 처리
-            handleSignalUpdate(currentSignal)
+                "신호 API 응답 성공\nID=$itstId\nraw=${rawJson.take(300)}"
         } else {
-            println("NavManager 신호 데이터를 가져오지 못했습니다.")
+            _debugMessage.value =
+                "신호 API 응답 실패\nID=$itstId"
         }
-    }
-
-    private fun handleSignalUpdate(item: SignalItem) {
-        _debugMessage.value =
-            "현재 신호=${item.signalState}\n남은 시간=${item.remainTime}초"
     }
     /**
      * 안전한 시계 방향 계산
