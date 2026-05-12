@@ -25,7 +25,7 @@ final class NavigationViewModel: ObservableObject {
     private let tts: TtsManager
     private let locationTracker: LocationTracker
     private let headingProvider: HeadingProvider
-    private let orientationMonitor: DeviceOrientationMonitor
+    //private let orientationMonitor: DeviceOrientationMonitor
     private let navigationManager: NavigationManager
 
     // MARK: - Subscriptions
@@ -35,9 +35,9 @@ final class NavigationViewModel: ObservableObject {
     private var lastSpokenGuidance: String = ""
 
     // MARK: - Orientation Alert State
-    private var lastSpokenIssue: OrientationIssue = .none
-    private var lastOrientationSpeakTime: Date = .distantPast
-    private let orientationRepeatInterval: TimeInterval = 5.0
+    //private var lastSpokenIssue: OrientationIssue = .none
+    //private var lastOrientationSpeakTime: Date = .distantPast
+    //private let orientationRepeatInterval: TimeInterval = 5.0
 
     // 🆕 디버깅: polling 카운터 (로그 무한 출력 방지)
     private var pollCount: Int = 0
@@ -47,13 +47,13 @@ final class NavigationViewModel: ObservableObject {
         tts: TtsManager,
         locationTracker: LocationTracker,
         headingProvider: HeadingProvider,
-        orientationMonitor: DeviceOrientationMonitor,
+        //orientationMonitor: DeviceOrientationMonitor,
         navigationManager: NavigationManager
     ) {
         self.tts = tts
         self.locationTracker = locationTracker
         self.headingProvider = headingProvider
-        self.orientationMonitor = orientationMonitor
+        //self.orientationMonitor = orientationMonitor
         self.navigationManager = navigationManager
 
         print("🟢 [INIT] NavigationViewModel 생성됨")
@@ -161,14 +161,15 @@ final class NavigationViewModel: ObservableObject {
     }
 
     private func bindHeadingToNavigation() {
-        headingProvider.$currentHeading
-            .sink { [weak self] heading in
-                self?.navigationManager.updateCompassHeading(
-                    azimuth: Float(heading),
-                    currentTime: Int64(Date().timeIntervalSince1970 * 1000)
-                )
-            }
-            .store(in: &cancellables)
+        // ⚠️ Compass 기반 쏠림 비활성화 — shared 쪽 주석 처리와 연동
+            // headingProvider.$currentHeading
+            //     .sink { [weak self] heading in
+            //         self?.navigationManager.updateCompassHeading(
+            //             azimuth: Float(heading),
+            //             currentTime: Int64(Date().timeIntervalSince1970 * 1000)
+            //         )
+            //     }
+            //     .store(in: &cancellables)
     }
 
     private func startPollingNavigationState() {
@@ -232,7 +233,7 @@ final class NavigationViewModel: ObservableObject {
 
                 // 7. drift / orientation
                 self.handleDriftAlertIfNeeded()
-                self.handleOrientationAlertIfNeeded()
+                //self.handleOrientationAlertIfNeeded()
 
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
@@ -270,29 +271,29 @@ final class NavigationViewModel: ObservableObject {
 
     // MARK: - Orientation
 
-    private func handleOrientationAlertIfNeeded() {
-        let currentStatus = orientationMonitor.status
-        let currentIssue = orientationMonitor.issue
-
-        if currentStatus == .normal {
-            lastSpokenIssue = .none
-            return
-        }
-
-        guard currentStatus == .dangerous else { return }
-        guard currentIssue != .none else { return }
-        guard let message = currentIssue.ttsMessage else { return }
-
-        let now = Date()
-        let isSameIssue = (currentIssue == lastSpokenIssue)
-        let timeSinceLast = now.timeIntervalSince(lastOrientationSpeakTime)
-
-        if isSameIssue && timeSinceLast < orientationRepeatInterval {
-            return
-        }
-
-        tts.speak(message, priority: .high)
-        lastSpokenIssue = currentIssue
-        lastOrientationSpeakTime = now
-    }
+//    private func handleOrientationAlertIfNeeded() {
+//        let currentStatus = orientationMonitor.status
+//        let currentIssue = orientationMonitor.issue
+//
+//        if currentStatus == .normal {
+//            lastSpokenIssue = .none
+//            return
+//        }
+//
+//        guard currentStatus == .dangerous else { return }
+//        guard currentIssue != .none else { return }
+//        guard let message = currentIssue.ttsMessage else { return }
+//
+//        let now = Date()
+//        let isSameIssue = (currentIssue == lastSpokenIssue)
+//        let timeSinceLast = now.timeIntervalSince(lastOrientationSpeakTime)
+//
+//        if isSameIssue && timeSinceLast < orientationRepeatInterval {
+//            return
+//        }
+//
+//        tts.speak(message, priority: .high)
+//        lastSpokenIssue = currentIssue
+//        lastOrientationSpeakTime = now
+//    }
 }

@@ -390,47 +390,47 @@ struct StatusTab: View {
                         
                     }
 
-                    GroupBox("🎯 IMU 자세 (좌표계 진단 모드)") {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("모니터링 중: \(deps.orientationMonitor.isMonitoring ? "✅" : "❌")")
-                     
-                            Divider()
-                     
-                            // ⭐ raw 값 (CoreMotion 원본)
-                            Text("📊 Raw (CoreMotion 원본)")
-                                .font(.caption)
-                                .foregroundColor(.gray)
-                            Text("rawPitch: \(deps.orientationMonitor.rawPitch, specifier: "%.1f")°")
-                            Text("rawRoll:  \(deps.orientationMonitor.rawRoll, specifier: "%.1f")°")
-                            Text("rawYaw:   \(deps.orientationMonitor.rawYaw, specifier: "%.1f")°")
-                     
-                            Divider()
-                     
-                            // ⭐ 중력 벡터 (가장 신뢰할 수 있는 자세 정보)
-                            Text("🌐 Gravity (자세의 정답지)")
-                                .font(.caption)
-                                .foregroundColor(.gray)
-                            Text("gx: \(deps.orientationMonitor.gravityX, specifier: "%+.2f")")
-                            Text("gy: \(deps.orientationMonitor.gravityY, specifier: "%+.2f")")
-                            Text("gz: \(deps.orientationMonitor.gravityZ, specifier: "%+.2f")")
-                     
-                            Divider()
-                     
-                            // 보정된 값 (진단 모드에서는 raw와 동일)
-                            Text("🔧 보정된 값 (현재는 raw와 동일)")
-                                .font(.caption)
-                                .foregroundColor(.gray)
-                            Text("Pitch: \(deps.orientationMonitor.pitch, specifier: "%.1f")°")
-                            Text("Roll:  \(deps.orientationMonitor.roll, specifier: "%.1f")°")
-                     
-                            Divider()
-                     
-                            Text("가속도 분산: \(deps.orientationMonitor.accelerationVariance, specifier: "%.2f") m/s²")
-                                .font(.caption)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .font(.system(.body, design: .monospaced))   // 숫자 정렬용 monospace
-                    }
+//                    GroupBox("🎯 IMU 자세 (좌표계 진단 모드)") {
+//                        VStack(alignment: .leading, spacing: 6) {
+//                            Text("모니터링 중: \(deps.orientationMonitor.isMonitoring ? "✅" : "❌")")
+//                     
+//                            Divider()
+//                     
+//                            // ⭐ raw 값 (CoreMotion 원본)
+//                            Text("📊 Raw (CoreMotion 원본)")
+//                                .font(.caption)
+//                                .foregroundColor(.gray)
+//                            Text("rawPitch: \(deps.orientationMonitor.rawPitch, specifier: "%.1f")°")
+//                            Text("rawRoll:  \(deps.orientationMonitor.rawRoll, specifier: "%.1f")°")
+//                            Text("rawYaw:   \(deps.orientationMonitor.rawYaw, specifier: "%.1f")°")
+//                     
+//                            Divider()
+//                     
+//                            // ⭐ 중력 벡터 (가장 신뢰할 수 있는 자세 정보)
+//                            Text("🌐 Gravity (자세의 정답지)")
+//                                .font(.caption)
+//                                .foregroundColor(.gray)
+//                            Text("gx: \(deps.orientationMonitor.gravityX, specifier: "%+.2f")")
+//                            Text("gy: \(deps.orientationMonitor.gravityY, specifier: "%+.2f")")
+//                            Text("gz: \(deps.orientationMonitor.gravityZ, specifier: "%+.2f")")
+//                     
+//                            Divider()
+//                     
+//                            // 보정된 값 (진단 모드에서는 raw와 동일)
+//                            Text("🔧 보정된 값 (현재는 raw와 동일)")
+//                                .font(.caption)
+//                                .foregroundColor(.gray)
+//                            Text("Pitch: \(deps.orientationMonitor.pitch, specifier: "%.1f")°")
+//                            Text("Roll:  \(deps.orientationMonitor.roll, specifier: "%.1f")°")
+//                     
+//                            Divider()
+//                     
+//                            Text("가속도 분산: \(deps.orientationMonitor.accelerationVariance, specifier: "%.2f") m/s²")
+//                                .font(.caption)
+//                        }
+//                        .frame(maxWidth: .infinity, alignment: .leading)
+//                        .font(.system(.body, design: .monospaced))   // 숫자 정렬용 monospace
+//                    }
 
                     GroupBox("🔊 TTS") {
                         VStack(alignment: .leading, spacing: 6) {
@@ -538,31 +538,31 @@ struct StatusTab: View {
         }
     }
     
-    private func statusText(_ status: OrientationStatus) -> String {
-        switch status {
-        case .normal:    return "정상 ✅"
-        case .warning:   return "경고 ⚠️"
-        case .dangerous: return "위험 🚨"
-        }
-    }
-     
-    private func statusColor(_ status: OrientationStatus) -> Color {
-        switch status {
-        case .normal:    return .green
-        case .warning:   return .orange
-        case .dangerous: return .red
-        }
-    }
-     
-    private func issueText(_ issue: OrientationIssue) -> String {
-        switch issue {
-        case .none:         return "-"
-        case .pitchTooLow:  return "휴대폰을 너무 아래로 숙임"
-        case .pitchTooHigh: return "휴대폰을 너무 위로 들음"
-        case .rollTilted:   return "휴대폰이 좌우로 기울어짐"
-        case .shaking:      return "휴대폰이 심하게 흔들림"
-        }
-    }
+//    private func statusText(_ status: OrientationStatus) -> String {
+//        switch status {
+//        case .normal:    return "정상 ✅"
+//        case .warning:   return "경고 ⚠️"
+//        case .dangerous: return "위험 🚨"
+//        }
+//    }
+//     
+//    private func statusColor(_ status: OrientationStatus) -> Color {
+//        switch status {
+//        case .normal:    return .green
+//        case .warning:   return .orange
+//        case .dangerous: return .red
+//        }
+//    }
+//     
+//    private func issueText(_ issue: OrientationIssue) -> String {
+//        switch issue {
+//        case .none:         return "-"
+//        case .pitchTooLow:  return "휴대폰을 너무 아래로 숙임"
+//        case .pitchTooHigh: return "휴대폰을 너무 위로 들음"
+//        case .rollTilted:   return "휴대폰이 좌우로 기울어짐"
+//        case .shaking:      return "휴대폰이 심하게 흔들림"
+//        }
+//    }
 }
 
 #Preview {

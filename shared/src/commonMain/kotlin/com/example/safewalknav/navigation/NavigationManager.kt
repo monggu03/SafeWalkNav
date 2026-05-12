@@ -114,7 +114,7 @@ class NavigationManager(
      */
     private var leanAccumulator = 0 // 쏠림 누적 카운트
 
-    fun updateCompassHeading(azimuth: Float, currentTime: Long) {
+    /*fun updateCompassHeading(azimuth: Float, currentTime: Long) {
         _compassHeading.value = azimuth
 
         if (_isNavigating.value) {
@@ -149,6 +149,8 @@ class NavigationManager(
             }
         }
     }
+    */
+
 
     // ========== 경로 탐색 ==========
 

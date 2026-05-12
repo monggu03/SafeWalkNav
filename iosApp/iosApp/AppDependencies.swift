@@ -22,7 +22,7 @@ final class AppDependencies: ObservableObject {
     let stt: SttManager
     let trafficLightDetector: TrafficLightDetector
     let opticalFlow: OpticalFlowAnalyzer
-    let orientationMonitor: DeviceOrientationMonitor
+    //let orientationMonitor: DeviceOrientationMonitor
 
     // MARK: - KMM Managers
     let navigationManager: NavigationManager
@@ -36,7 +36,7 @@ final class AppDependencies: ObservableObject {
         let tts = TtsManager()
         let locationTracker = LocationTracker()
         let headingProvider = HeadingProvider()
-        let orientationMonitor = DeviceOrientationMonitor()
+        //let orientationMonitor = DeviceOrientationMonitor()
 
         // 2. KMM 매니저 (TMap + T-Data API 키로 초기화)
         let apiKey = Secrets.tMapAppKey
@@ -61,7 +61,7 @@ final class AppDependencies: ObservableObject {
             tts: tts,
             locationTracker: locationTracker,
             headingProvider: headingProvider,
-            orientationMonitor: orientationMonitor,
+            //orientationMonitor: orientationMonitor,
             navigationManager: navigationManager
         )
 
@@ -69,7 +69,7 @@ final class AppDependencies: ObservableObject {
         self.tts = tts
         self.locationTracker = locationTracker
         self.headingProvider = headingProvider
-        self.orientationMonitor = orientationMonitor
+        //self.orientationMonitor = orientationMonitor
         self.navigationManager = navigationManager
         self.stt = SttManager(tts: tts)
         // ⭐ 옵티컬 플로우 분석기 먼저 생성
@@ -81,6 +81,6 @@ final class AppDependencies: ObservableObject {
         self.navigationViewModel = navigationViewModel
 
         // 5. 자세 모니터링 자동 시작 (앱 켜는 순간부터 감시)
-        orientationMonitor.start()
+        //orientationMonitor.start()
     }
 }

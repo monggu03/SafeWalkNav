@@ -10,7 +10,7 @@
 //     → pitchDeg = rawPitch - 86 으로 변환하여
 //     정상 자세 = 0°, 위로 기울이면 음수, 아래로 숙이면 양수
 //
-
+/*
 import Foundation
 import CoreMotion
 import Combine
@@ -236,3 +236,4 @@ final class DeviceOrientationMonitor: ObservableObject {
         return squaredDiffs.reduce(0, +) / Double(samples.count)
     }
 }
+*/
