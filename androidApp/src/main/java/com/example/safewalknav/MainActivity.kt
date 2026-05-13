@@ -389,6 +389,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             )
         }
 
+        /*lifecycleScope.launch {
+            navigationManager.fetchTrafficSignalData(
+                signalLat = 37.5547454,
+                signalLon = 127.1364893
+            )
+        }*/
+
         observeGuidance()
 
         lifecycleScope.launch {

@@ -84,6 +84,11 @@ class NavigationManager(
     private var lastCornerAnnouncedIdx = -1   // 폴리라인 코너 중복 안내 방지
     private var lastRoadType = -1 // 이전 구간 도로 유형 (전환 안내용)
 
+    //클래스 변수 추가
+    private var lastSignalApiCallTime = 0L
+    private var lastSignalItstId: String? = null
+    private val signalApiCooldownMs = 60_000L
+
     // ========== Heading Smoothing (Circular Kalman Filter) ==========
     // 알고리즘 본체는 shared/commonMain/.../navigation/KalmanHeading.kt 에 분리됨.
     // 자세한 설명/파라미터는 그쪽 docstring 참조.
@@ -531,6 +536,7 @@ class NavigationManager(
         signalLat: Double,
         signalLon: Double
     ) {
+        _debugMessage.value = "fetchTrafficSignalData 진입"//위치 확인용 임시
         val crossroadJson = signalApiClient.fetchIntersectionData()
 
         if (crossroadJson == null) {
@@ -558,14 +564,35 @@ class NavigationManager(
             return
         }
 
+        val now = currentTimeMillis()
+
+        val isSameIntersection =
+            nearestIntersection.itstId == lastSignalItstId
+
+        val isCooldownActive =
+            now - lastSignalApiCallTime < signalApiCooldownMs
+
+        if (isSameIntersection && isCooldownActive) {
+            _debugMessage.value = "잔여시간 API 쿨다운 중"
+            return
+        }
+
+        lastSignalItstId = nearestIntersection.itstId
+        lastSignalApiCallTime = now
+
         val remainJson = signalApiClient.fetchSignalRemainingData(
             itstId = nearestIntersection.itstId
         )
+
+        val parsedSignals = remainJson?.let {
+            TrafficSignalRemainingTimeParser.parse(it)
+        } ?: emptyList()
 
         _debugMessage.value =
             "교차로 매칭 성공\n" +
                     "itstId=${nearestIntersection.itstId}\n" +
                     "name=${nearestIntersection.itstNm}\n" +
+                    "parsedSignals=${parsedSignals.size}\n" +
                     "잔여시간 API 응답=${if (remainJson != null && !remainJson.startsWith("ERROR")) "성공" else "실패"}\n" +
                     "rawLength=${remainJson?.length ?: 0}"
     }
