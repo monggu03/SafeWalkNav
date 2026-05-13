@@ -84,6 +84,11 @@ class NavigationManager(
     private var lastCornerAnnouncedIdx = -1   // 폴리라인 코너 중복 안내 방지
     private var lastRoadType = -1 // 이전 구간 도로 유형 (전환 안내용)
 
+    //클래스 변수 추가
+    private var lastSignalApiCallTime = 0L
+    private var lastSignalItstId: String? = null
+    private val signalApiCooldownMs = 60_000L
+
     // ========== Heading Smoothing (Circular Kalman Filter) ==========
     // 알고리즘 본체는 shared/commonMain/.../navigation/KalmanHeading.kt 에 분리됨.
     // 자세한 설명/파라미터는 그쪽 docstring 참조.
@@ -386,17 +391,21 @@ class NavigationManager(
                             "signals=${trafficSignals.size}\n" +
                             "nearestId=${nearest?.itstId ?: "없음"}\n" +
                             "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
-                            "신호제어기 ID=${nearestSignal.itstId}\n" +
-                            "API 호출 시도"
+                            "nearestSignalLat=${nearestSignal.lat}\n" +
+                            "nearestSignalLon=${nearestSignal.lon}\n" +
+                            "교차로 매칭 시도"
 
-                fetchTrafficSignalData(nearestSignal.itstId)
+                fetchTrafficSignalData(
+                    signalLat = nearestSignal.lat,
+                    signalLon = nearestSignal.lon
+                )
             } else {
                 _debugMessage.value =
                     "횡단보도 감지됨\n" +
                             "signals=${trafficSignals.size}\n" +
                             "nearestId=${nearest?.itstId ?: "없음"}\n" +
                             "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
-                            "30m 이내 신호제어기 없음"
+                            "30m 이내 신호등 없음"
             }
         }
 
@@ -523,27 +532,71 @@ class NavigationManager(
     }
 
 
-    private suspend fun fetchTrafficSignalData(itstId: String) {
-        val response = signalApiClient.fetchTrafficSignalData(itstId)
+    suspend fun fetchTrafficSignalData(
+        signalLat: Double,
+        signalLon: Double
+    ) {
+        _debugMessage.value = "fetchTrafficSignalData 진입"//위치 확인용 임시
+        val crossroadJson = signalApiClient.fetchIntersectionData()
 
-        if (response.status != "ERROR" && response.items.isNotEmpty()) {
-            val currentSignal = response.items.first()
-
-            //신호 API 디버그
-            _debugMessage.value =
-                "신호 API 성공\nID=${currentSignal.itstId}\n상태=${currentSignal.signalState}\n남은 시간=${currentSignal.remainTime}초"
-
-            //신호등 상태 처리
-            handleSignalUpdate(currentSignal)
-        } else {
-            println("NavManager 신호 데이터를 가져오지 못했습니다.")
+        if (crossroadJson == null) {
+            _debugMessage.value = "교차로 API 실패"
+            return
         }
+
+        if (crossroadJson.startsWith("ERROR")) {
+            _debugMessage.value = crossroadJson
+            return
+        }
+
+        val intersections = TrafficIntersectionParser.parse(crossroadJson)
+
+        val nearestIntersection = TrafficIntersectionParser.findNearest(
+            intersections = intersections,
+            lat = signalLat,
+            lon = signalLon,
+            radiusMeters = 100f
+        )
+
+        if (nearestIntersection == null) {
+            _debugMessage.value =
+                "근처 교차로 없음\nintersections=${intersections.size}"
+            return
+        }
+
+        val now = currentTimeMillis()
+
+        val isSameIntersection =
+            nearestIntersection.itstId == lastSignalItstId
+
+        val isCooldownActive =
+            now - lastSignalApiCallTime < signalApiCooldownMs
+
+        if (isSameIntersection && isCooldownActive) {
+            _debugMessage.value = "잔여시간 API 쿨다운 중"
+            return
+        }
+
+        lastSignalItstId = nearestIntersection.itstId
+        lastSignalApiCallTime = now
+
+        val remainJson = signalApiClient.fetchSignalRemainingData(
+            itstId = nearestIntersection.itstId
+        )
+
+        val parsedSignals = remainJson?.let {
+            TrafficSignalRemainingTimeParser.parse(it)
+        } ?: emptyList()
+
+        _debugMessage.value =
+            "교차로 매칭 성공\n" +
+                    "itstId=${nearestIntersection.itstId}\n" +
+                    "name=${nearestIntersection.itstNm}\n" +
+                    "parsedSignals=${parsedSignals.size}\n" +
+                    "잔여시간 API 응답=${if (remainJson != null && !remainJson.startsWith("ERROR")) "성공" else "실패"}\n" +
+                    "rawLength=${remainJson?.length ?: 0}"
     }
 
-    private fun handleSignalUpdate(item: SignalItem) {
-        _debugMessage.value =
-            "현재 신호=${item.signalState}\n남은 시간=${item.remainTime}초"
-    }
     /**
      * 안전한 시계 방향 계산
      * 속도가 너무 낮으면(정지 상태) bearing이 부정확하므로 "전방" 으로 대체
