@@ -18,8 +18,22 @@ final class NavigationViewModel: ObservableObject {
     @Published private(set) var arrivalState: ArrivalState = .far
     @Published private(set) var isNavigating: Bool = false
     @Published private(set) var distanceToDestination: Float = .greatestFiniteMagnitude
-    @Published private(set) var searchResults: [POIResult] = []
-    @Published private(set) var errorMessage: String?
+    // didSet 으로 @Published 발화 시점/개수 확인 (SwiftUI 가 실제로 업데이트 받는지 검증)
+    @Published private(set) var searchResults: [POIResult] = [] {
+        didSet {
+            print("📣 [NavigationViewModel] searchResults didSet — count=\(searchResults.count)")
+            searchResults.enumerated().forEach { i, poi in
+                print("    [\(i)] \(poi.name) (\(poi.lat), \(poi.lon))")
+            }
+        }
+    }
+    @Published private(set) var errorMessage: String? {
+        didSet {
+            if let msg = errorMessage {
+                print("📣 [NavigationViewModel] errorMessage didSet — '\(msg)'")
+            }
+        }
+    }
     @Published private(set) var isAtCrosswalk: Bool = false
 
     /// 음성 인식 진행 단계 — UI에서 상태 안내용
@@ -75,20 +89,46 @@ final class NavigationViewModel: ObservableObject {
     // MARK: - Public API
 
     func searchDestination(keyword: String) async {
+        print("🔎 [searchDestination] 시작 — keyword='\(keyword)'")
+
+        // 1) 위치 확인 (없으면 검색 자체가 실행 안 됨)
+        guard let loc = locationTracker.currentLocation else {
+            print("🔴 [searchDestination] currentLocation == nil — 검색 중단")
+            self.errorMessage = "현재 위치를 알 수 없습니다"
+            return
+        }
+        print("🔎 [searchDestination] currentLocation = (\(loc.latitude), \(loc.longitude))")
+
+        // 2) try? 가 아니라 do-catch 로 실제 에러를 그대로 출력
         do {
-            guard let loc = locationTracker.currentLocation else {
-                self.errorMessage = "현재 위치를 알 수 없습니다"
-                return
-            }
+            // 반경 50km — 도보 거리는 아니지만 특정 장소명 검색(예: "동국대학교")이
+            // 현재 위치에서 멀리 있어도 잡히도록 충분히 넓게 둔다.
+            // TMap API 가 centerLat/centerLon 기준 거리순 정렬해서 돌려주므로
+            // 가까운 결과가 항상 먼저 노출됨.
             let results = try await navigationManager.searchDestination(
                 keyword: keyword,
                 currentLat: KotlinDouble(value: loc.latitude),
                 currentLon: KotlinDouble(value: loc.longitude),
-                radiusKm: 5.0
+                radiusKm: 50.0
             )
+            print("🟢 [searchDestination] navigationManager 반환 — results.count=\(results.count)")
+            results.enumerated().forEach { i, poi in
+                print("    [\(i)] \(poi.name) (\(poi.lat), \(poi.lon)) addr='\(poi.address)'")
+            }
+
+            // shared 모듈에서 본문 파싱은 성공해도 결과 0개일 수 있음 — lastError 도 함께 확인
+            if let lastErr = navigationManager.lastError as String?, !lastErr.isEmpty {
+                print("⚠️ [searchDestination] navigationManager.lastError='\(lastErr)'")
+            }
+
             self.searchResults = results
-            self.errorMessage = nil
+            self.errorMessage = results.isEmpty
+                ? "검색 결과가 없습니다 (\(navigationManager.lastError as String? ?? "조용한 실패"))"
+                : nil
+            print("🟢 [searchDestination] @Published 할당 직후 self.searchResults.count=\(self.searchResults.count)")
         } catch {
+            print("🔴 [searchDestination] 예외 — \(type(of: error)): \(error)")
+            print("🔴 [searchDestination] localizedDescription=\(error.localizedDescription)")
             self.errorMessage = "검색 실패: \(error.localizedDescription)"
         }
     }

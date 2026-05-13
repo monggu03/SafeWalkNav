@@ -238,7 +238,11 @@ struct SearchSection: View {
     }
 
     var body: some View {
-        GroupBox("목적지 검색") {
+        // SwiftUI 가 실제로 searchResults 변경을 관찰해 body 를 다시 그리는지 확인하는 로그.
+        // (@Published 가 발화해도 View 가 구독 안 하면 안 찍힘 → 바인딩 끊김 진단용)
+        let _ = print("🖼️ [SearchSection.body] redraw — searchResults.count=\(navVM.searchResults.count) errorMessage=\(navVM.errorMessage ?? "nil")")
+
+        return GroupBox("목적지 검색") {
             VStack(spacing: 12) {
                 // 시각장애인용 음성 입력 버튼 (큰 면적, 한 번 누르면 자동 안내 시작)
                 Button(action: handleVoiceTap) {
@@ -274,6 +278,14 @@ struct SearchSection: View {
                         Task { await navVM.searchDestination(keyword: searchKeyword) }
                     }
                     .buttonStyle(.borderedProminent)
+                }
+
+                // 검색 결과가 0개면 사용자에게도 보이게 (errorMessage 가 비어있어도 빈 상태 표시)
+                if navVM.searchResults.isEmpty {
+                    Text(navVM.errorMessage ?? "검색 결과가 여기에 표시됩니다")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 ForEach(Array(navVM.searchResults.prefix(5).enumerated()), id: \.offset) { _, poi in

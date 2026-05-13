@@ -128,6 +128,9 @@ class TMapApiClient(
         maxResults: Int = 5,
     ): List<POIResult> {
         lastError = null
+        println("🔍 [TMapApiClient.searchPOI] 시작 — keyword='$keyword' " +
+                "currentLat=$currentLat currentLon=$currentLon " +
+                "radiusKm=$radiusKm maxResults=$maxResults")
         return runCatching {
             val response: HttpResponse = httpClient.get("$baseUrl/pois") {
                 parameter("version", 1)
@@ -142,28 +145,56 @@ class TMapApiClient(
                 headers { append("appKey", appKey) }
             }
 
+            println("🔍 [TMapApiClient.searchPOI] HTTP status=${response.status.value}")
+
             if (!response.status.isSuccess()) {
+                val errBody = runCatching { response.bodyAsText() }.getOrNull() ?: "<no body>"
+                println("🔴 [TMapApiClient.searchPOI] 서버 오류 — body=${errBody.take(500)}")
                 lastError = "서버 오류(${response.status.value}). 다시 시도해주세요"
                 return@runCatching emptyList()
             }
 
-            val raw = parsePOIResults(response.bodyAsText())
+            val body = response.bodyAsText()
+            println("🔍 [TMapApiClient.searchPOI] 응답 수신 — length=${body.length}")
+            println("🔍 [TMapApiClient.searchPOI] 응답 preview=${body.take(400)}")
+
+            val raw = parsePOIResults(body)
+            println("🔍 [TMapApiClient.searchPOI] 파싱 완료 — raw.size=${raw.size}")
+            raw.forEachIndexed { i, p ->
+                println("    [$i] name='${p.name}' lat=${p.lat} lon=${p.lon} addr='${p.address}'")
+            }
 
             // 위치 미제공 시 서버 응답 그대로 반환 (옛 동작 호환)
             if (currentLat == null || currentLon == null) {
-                return@runCatching raw.take(maxResults)
+                val result = raw.take(maxResults)
+                println("🔍 [TMapApiClient.searchPOI] 위치 없음 — 그대로 반환 ${result.size}개")
+                return@runCatching result
             }
 
             // 클라이언트 측 거리 필터 + 재정렬
             val radiusMeters = radiusKm * 1000f
-            raw.asSequence()
-                .map { poi -> poi to distanceBetween(currentLat, currentLon, poi.lat, poi.lon) }
+            val withDist = raw.map { poi ->
+                poi to distanceBetween(currentLat, currentLon, poi.lat, poi.lon)
+            }
+            println("🔍 [TMapApiClient.searchPOI] 거리 계산 결과 (radius=${radiusMeters}m):")
+            withDist.forEach { (poi, dist) ->
+                val inRange = if (dist <= radiusMeters) "✅" else "❌"
+                println("    $inRange ${poi.name} = ${dist.toInt()}m")
+            }
+
+            val filtered = withDist
                 .filter { (_, dist) -> dist <= radiusMeters }
                 .sortedBy { (_, dist) -> dist }
                 .take(maxResults)
                 .map { (poi, _) -> poi }
                 .toList()
+
+            println("🔍 [TMapApiClient.searchPOI] 최종 반환 ${filtered.size}개 " +
+                    "(raw ${raw.size}개 중 radius ${radiusKm}km 통과)")
+            filtered
         }.getOrElse { e ->
+            println("🔴 [TMapApiClient.searchPOI] 예외 발생 — ${e::class.simpleName}: ${e.message}")
+            e.printStackTrace()
             lastError = mapException(e)
             emptyList()
         }
@@ -271,35 +302,72 @@ class TMapApiClient(
         )
     }.getOrNull()
 
-    private fun parsePOIResults(text: String): List<POIResult> = runCatching {
-        val root = json.parseToJsonElement(text).jsonObject
-        val pois = root["searchPoiInfo"]?.jsonObject
-            ?.get("pois")?.jsonObject
-            ?.get("poi")?.jsonArray
-            ?: return@runCatching emptyList()
+    private fun parsePOIResults(text: String): List<POIResult> {
+        // try/catch 로 명시적 처리 — runCatching.getOrElse 로 에러를 삼키지 않고
+        // 어느 단계에서 실패했는지 콘솔에 그대로 노출한다.
+        return try {
+            val root = json.parseToJsonElement(text).jsonObject
+            println("🟢 [parsePOIResults] 1) root 파싱 OK — keys=${root.keys}")
 
-        val results = mutableListOf<POIResult>()
-        for (poiElement in pois) {
-            val obj = poiElement.jsonObject
-            val name = obj.string("name") ?: continue
+            val searchPoiInfo = root["searchPoiInfo"]?.jsonObject
+            if (searchPoiInfo == null) {
+                println("🔴 [parsePOIResults] 2) 'searchPoiInfo' 키 없음 — root.keys=${root.keys}")
+                return emptyList()
+            }
+            println("🟢 [parsePOIResults] 2) searchPoiInfo OK — keys=${searchPoiInfo.keys}")
 
-            // POI 실좌표(lat/lon) 우선, 없으면 자동차용 매핑좌표(noorLat/noorLon) fallback
-            val rawLat = obj.string("lat")?.toDoubleOrNull()
-            val rawLon = obj.string("lon")?.toDoubleOrNull()
-            val noorLat = obj.string("noorLat")?.toDoubleOrNull()
-            val noorLon = obj.string("noorLon")?.toDoubleOrNull()
+            val poisObj = searchPoiInfo["pois"]?.jsonObject
+            if (poisObj == null) {
+                println("🔴 [parsePOIResults] 3) 'pois' 키 없음 — searchPoiInfo.keys=${searchPoiInfo.keys}")
+                return emptyList()
+            }
+            println("🟢 [parsePOIResults] 3) pois OK — keys=${poisObj.keys}")
 
-            val lat = rawLat ?: noorLat ?: continue
-            val lon = rawLon ?: noorLon ?: continue
+            val poiArray = poisObj["poi"]?.jsonArray
+            if (poiArray == null) {
+                println("🔴 [parsePOIResults] 4) 'poi' 배열 없음 — pois.keys=${poisObj.keys}")
+                return emptyList()
+            }
+            println("🟢 [parsePOIResults] 4) poi 배열 OK — size=${poiArray.size}")
 
-            val address = obj.string("upperAddrName") ?: ""
-            val frontLat = obj.string("frontLat")?.toDoubleOrNull()
-            val frontLon = obj.string("frontLon")?.toDoubleOrNull()
+            val results = mutableListOf<POIResult>()
+            for ((idx, poiElement) in poiArray.withIndex()) {
+                val obj = poiElement.jsonObject
+                val name = obj.string("name")
+                if (name == null) {
+                    println("⚠️ [parsePOIResults] poi[$idx] name 누락 — keys=${obj.keys}")
+                    continue
+                }
 
-            results.add(POIResult(name, lat, lon, address, frontLat, frontLon))
+                // POI 실좌표(lat/lon) 우선, 없으면 자동차용 매핑좌표(noorLat/noorLon) fallback
+                val rawLat = obj.string("lat")?.toDoubleOrNull()
+                val rawLon = obj.string("lon")?.toDoubleOrNull()
+                val noorLat = obj.string("noorLat")?.toDoubleOrNull()
+                val noorLon = obj.string("noorLon")?.toDoubleOrNull()
+
+                val lat = rawLat ?: noorLat
+                val lon = rawLon ?: noorLon
+                if (lat == null || lon == null) {
+                    println("⚠️ [parsePOIResults] poi[$idx] '$name' 좌표 누락 — " +
+                            "lat=$rawLat lon=$rawLon noorLat=$noorLat noorLon=$noorLon")
+                    continue
+                }
+
+                val address = obj.string("upperAddrName") ?: ""
+                val frontLat = obj.string("frontLat")?.toDoubleOrNull()
+                val frontLon = obj.string("frontLon")?.toDoubleOrNull()
+
+                results.add(POIResult(name, lat, lon, address, frontLat, frontLon))
+            }
+            println("🟢 [parsePOIResults] 5) 변환 완료 — ${results.size}/${poiArray.size}개")
+            results
+        } catch (e: Throwable) {
+            println("🔴 [parsePOIResults] 디코딩 예외 — ${e::class.simpleName}: ${e.message}")
+            println("🔴 [parsePOIResults] 응답 본문 preview=${text.take(500)}")
+            e.printStackTrace()
+            emptyList()
         }
-        results
-    }.getOrElse { emptyList() }
+    }
 
     private fun parseReverseGeocode(text: String): String? = runCatching {
         json.parseToJsonElement(text).jsonObject
