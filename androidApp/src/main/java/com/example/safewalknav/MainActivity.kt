@@ -81,7 +81,10 @@ import kotlin.math.sin
 import com.example.safewalknav.navigation.TrafficSignalLocation
 import com.example.safewalknav.traffic.TrafficSignalDatabase
 import com.example.safewalknav.traffic.TrafficSignalRepository
-import com.example.safewalknav.traffic.TrafficSignalLocationApiClient
+import com.example.safewalknav.navigation.SeoulTrafficSignalLocationApiClient
+import com.example.safewalknav.traffic.TrafficSignalRemainingTimeParser
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 
 /**
@@ -379,6 +382,20 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 trafficSignals = emptyList()
             )
 
+        lifecycleScope.launch {
+
+            navigationManager.updateTrafficSignals(
+                loadTrafficSignalLocations()
+            )
+        }
+
+        /*lifecycleScope.launch {
+            navigationManager.fetchTrafficSignalData(
+                signalLat = 37.5547454,
+                signalLon = 127.1364893
+            )
+        }*/
+
         observeGuidance()
 
         lifecycleScope.launch {
@@ -389,6 +406,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             )
             navigationManager.updateTrafficSignals(trafficSignals)
         }
+
+
 
         // View 참조
         rootLayout = findViewById(R.id.rootLayout)
@@ -1719,7 +1738,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         val repository = TrafficSignalRepository(
             dao = db.trafficSignalDao(),
-            apiClient = TrafficSignalLocationApiClient(
+            apiClient = SeoulTrafficSignalLocationApiClient(
                 apiKey = BuildConfig.SEOUL_API_KEY
             )
         )
