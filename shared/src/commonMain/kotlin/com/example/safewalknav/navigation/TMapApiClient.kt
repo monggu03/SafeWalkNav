@@ -236,6 +236,14 @@ class TMapApiClient(
     // ========== JSON 파싱 ==========
 
     private fun parsePedestrianRoute(text: String): TMapRoute? = runCatching {
+        // 🔧 [DEBUG-TMAP-RAW] LineString properties 검증용 임시 로그.
+        // 확인 끝나면 이 블록 통째로 삭제할 것.
+        println("🔧 [TMap raw len=${text.length}] BEGIN")
+        text.chunked(800).forEachIndexed { i, chunk ->
+            println("🔧 [TMap raw #$i] $chunk")
+        }
+        println("🔧 [TMap raw] END")
+
         val root = json.parseToJsonElement(text).jsonObject
         val features = root["features"]?.jsonArray ?: return@runCatching null
 

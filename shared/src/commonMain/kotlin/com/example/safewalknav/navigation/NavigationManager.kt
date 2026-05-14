@@ -219,11 +219,20 @@ class NavigationManager(
         // === 진단: TMap 응답이 횡단보도를 별도 waypoint 로 만들었는지 검증 ===
         // 시각장애인 안내의 핵심 — 만약 CROSSWALK 0 개면 TMap API 가 sparse 응답한 것.
         val crosswalkCount = route.waypoints.count { isCrosswalkWaypoint(it) }
-        println("[NavManager] 경로 로드 완료 — ${route.waypoints.size}개 waypoint (CROSSWALK ${crosswalkCount}개, total ${route.totalDistance}m)")
+        val typeBreakdown = route.waypoints.groupingBy { it.pointType }.eachCount()
+        println("══════════ [NavManager] 경로 로드 완료 ══════════")
+        println("총 거리: ${route.totalDistance}m, 예상 시간: ${route.totalTime}초 (~${route.totalTime / 60}분)")
+        println("Waypoint: ${route.waypoints.size}개 (CROSSWALK ${crosswalkCount}개)")
+        println("Point type 분포: $typeBreakdown")
+        println("RoutePoint(폴리라인 좌표): ${route.routePoints.size}개")
+        println("──────────── waypoint 전체 (untruncated) ────────────")
         route.waypoints.forEachIndexed { i, wp ->
             val mark = if (isCrosswalkWaypoint(wp)) "🚦" else "  "
-            println("$mark [$i] type=${wp.pointType} turn=${wp.turnType} road=${wp.roadType} dist=${wp.distance}m desc=${wp.description.take(60)}")
+            println("$mark [$i] type=${wp.pointType} turn=${wp.turnType} road=${wp.roadType} dist=${wp.distance}m " +
+                    "lat=${wp.lat} lon=${wp.lon}")
+            println("       desc=${wp.description}")
         }
+        println("════════════════════════════════════════════════")
         cachedNearbyPOIs = emptyList()
         cachedAddress = null
         arrivalInfoLoaded = false
