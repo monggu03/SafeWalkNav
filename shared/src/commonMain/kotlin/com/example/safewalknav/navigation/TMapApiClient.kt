@@ -251,6 +251,10 @@ class TMapApiClient(
         var totalTime = 0
         val waypoints = mutableListOf<Waypoint>()
         val routePoints = mutableListOf<LatLng>()
+        val segments = mutableListOf<RouteSegment>()
+
+        // 직전 Point feature 의 waypoint 인덱스. LineString segment 의 fromWaypointIndex 로 사용.
+        var lastWaypointIndex = -1
 
         for (feature in features) {
             val obj = feature.jsonObject
@@ -275,7 +279,6 @@ class TMapApiClient(
                 val turnType = properties.int("turnType") ?: 0
                 val description = properties.string("description") ?: ""
                 val distance = properties.int("totalDistance") ?: 0
-                val roadType = properties.int("roadType") ?: 0
 
                 waypoints.add(
                     Waypoint(
@@ -284,22 +287,72 @@ class TMapApiClient(
                         turnType = turnType,
                         description = description,
                         distance = distance,
-                        roadType = roadType,
+                        roadType = 0,  // Point 엔 roadType 없음. RouteSegment 에서 조회할 것.
                         pointType = classifyPointType(turnType, description)
                     )
                 )
+                lastWaypointIndex = waypoints.size - 1
             }
 
-            // LineString = 경로 선분 (지도 폴리라인용)
+            // LineString = 경로 선분 (지도 폴리라인 + 도로 속성)
             if (geometryType == "LineString") {
                 val coords = geometry["coordinates"]?.jsonArray ?: continue
+                val segPoints = mutableListOf<LatLng>()
                 for (coord in coords) {
                     val pair = coord.jsonArray
                     val lon = (pair[0] as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull() ?: continue
                     val lat = (pair[1] as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull() ?: continue
-                    routePoints.add(LatLng(lat, lon))
+                    val pt = LatLng(lat, lon)
+                    segPoints.add(pt)
+                    routePoints.add(pt)
                 }
+
+                // LineString properties 추출
+                //   facilityType 은 응답에서 문자열로 옴 (예: "11", "15", "17") → 정수 변환
+                val roadType = properties.int("roadType") ?: 0
+                val facilityType = properties.string("facilityType")?.toIntOrNull()
+                    ?: properties.int("facilityType") ?: -1
+                val segDistance = properties.int("distance") ?: 0
+                val segTime = properties.int("time") ?: 0
+                val name = properties.string("name") ?: ""
+                val description = properties.string("description") ?: ""
+
+                val baseRisk = RiskScoreCalculator.calculate(roadType, facilityType, name)
+
+                // fromWaypointIndex 는 직전 Point. toWaypointIndex 는 다음 Point — 아직 미생성.
+                // (Point/LineString 이 교대로 오는 응답 구조에서는 fromIdx + 1 이 다음 Point 의 인덱스가 됨.)
+                segments.add(
+                    RouteSegment(
+                        fromWaypointIndex = lastWaypointIndex,
+                        toWaypointIndex = lastWaypointIndex + 1,
+                        distance = segDistance,
+                        time = segTime,
+                        roadType = roadType,
+                        facilityType = facilityType,
+                        name = name.ifBlank { description },
+                        points = segPoints,
+                        riskLevel = baseRisk
+                    )
+                )
             }
+        }
+
+        // === 후처리: 횡단보도 직후 segment 위험도 승급 ===
+        // segment 의 fromWaypointIndex 가 가리키는 Waypoint 가 CROSSWALK 인 경우,
+        // 그 segment 는 차도를 건너는 직후 구간이므로 한 단계 위로 올림.
+        val upgradedSegments = segments.map { seg ->
+            val fromWp = waypoints.getOrNull(seg.fromWaypointIndex)
+            if (fromWp != null && fromWp.pointType == "CROSSWALK") {
+                seg.copy(riskLevel = RiskScoreCalculator.upgradeForCrosswalk(seg.riskLevel))
+            } else seg
+        }
+
+        // toWaypointIndex 가 waypoints 범위를 벗어나는 마지막 segment 보정
+        // (마지막 LineString 뒤에 Point 가 더 안 올 경우)
+        val finalSegments = upgradedSegments.map { seg ->
+            if (seg.toWaypointIndex >= waypoints.size) {
+                seg.copy(toWaypointIndex = waypoints.size - 1)
+            } else seg
         }
 
         TMapRoute(
@@ -307,6 +360,7 @@ class TMapApiClient(
             totalTime = totalTime,
             waypoints = waypoints,
             routePoints = routePoints,
+            segments = finalSegments,
         )
     }.getOrNull()
 
