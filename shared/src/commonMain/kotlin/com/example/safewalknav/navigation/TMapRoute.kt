@@ -59,15 +59,21 @@ data class RouteSegment(
 )
 
 /**
- * 구간 위험도 등급.
- * 비용 함수 결과를 사용자 안내 정책에 매핑하기 위한 enum.
+ * 구간 위험도 등급 (3단계).
  *
- *   SAFE    — 보행자도로 단독 구간. 사전 안내 생략.
- *   NORMAL  — 일반 인도, 차도 옆 인도. 표준 안내.
- *   CAUTION — 횡단보도 직후/주변, 자전거도로. 안내 강화.
- *   DANGER  — 계단, 육교, 지하도. 50m 전 사전 안내.
+ * 도시 보행 환경에 맞춘 segment 분류:
+ *   SAFE    — 순수 보행자도로 segment. TTS 빈도 낮춰도 됨.
+ *   NORMAL  — 차도 인접 인도 (도로명이 있는 segment). 표준 안내.
+ *   CAUTION — 예약 (현재 미사용). 향후 자전거도로/공사구간 등 확장용.
+ *
+ * NOTE: 횡단보도는 segment 의 RiskLevel 이 아니라 waypoint(pointType == "CROSSWALK") 로 판정한다.
+ *       "횡단보도 직후 보행자도로 segment" 까지 CAUTION 으로 올리면 SAFE 가 거의 사라지기 때문.
+ *       위험한 건 "횡단보도를 건너는 그 순간" 이지 "건넌 후 인도를 걷는 19m" 가 아니다.
+ *
+ *       계단/육교/지하도 (DANGER 등급) 는 강남역 raw response 에서 미관찰 → 일단 제외.
+ *       해당 경로가 관찰되면 다시 추가할 것.
  */
-enum class RiskLevel { SAFE, NORMAL, CAUTION, DANGER }
+enum class RiskLevel { SAFE, NORMAL, CAUTION }
 
 /**
  * 목적지 도착 상태
