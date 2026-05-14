@@ -1020,7 +1020,9 @@ class NavigationManager(
             val roadTransition = getRoadTransitionMessage(nextWaypoint.roadType)
             lastRoadType = nextWaypoint.roadType
 
-            val waypointMsg = buildWaypointMessage(nextWaypoint)
+            // 이 waypoint 통과 후 진입할 segment — 도로명/거리를 안내에 포함.
+            val nextSegment = route.segmentEnteringFromWaypoint(currentWaypointIndex)
+            val waypointMsg = buildWaypointMessage(nextWaypoint, nextSegment)
 
             // 도로 전환 + 기존 안내를 자연스럽게 결합
             val message = when {
@@ -1305,16 +1307,71 @@ class NavigationManager(
         }
     }
 
-    private fun buildWaypointMessage(waypoint: Waypoint): String {
-        return when (waypoint.pointType) {
+    /**
+     * waypoint 도착 시 음성 안내 메시지를 만든다.
+     *
+     * @param waypoint 도착한 waypoint
+     * @param nextSegment 이 waypoint 통과 후 진입할 segment. null 이면 도로명 정보 생략.
+     *
+     *   기본 형식: "{turn 안내}. {다음 도로명 + 거리}"
+     *   예) CROSSWALK + 다음 테헤란로 233m
+     *       → "횡단보도입니다. 직진하세요. 테헤란로 방향 약 230미터 직진"
+     */
+    private fun buildWaypointMessage(
+        waypoint: Waypoint,
+        nextSegment: RouteSegment? = null
+    ): String {
+        val turnMsg = when (waypoint.pointType) {
             "CROSSWALK" -> "횡단보도입니다. ${getTurnDescription(waypoint.turnType)}"
             "TURN" -> getTurnDescription(waypoint.turnType)
             "STAIRS" -> "계단이 있습니다"
             "DESTINATION" -> ""
-            else -> {
-                if (isKeyPoint(waypoint)) waypoint.description else ""
-            }
+            else -> if (isKeyPoint(waypoint)) waypoint.description else ""
         }
+
+        val segMsg = nextSegment?.let { buildSegmentDirectionMessage(it) } ?: ""
+
+        return when {
+            turnMsg.isNotEmpty() && segMsg.isNotEmpty() -> "$turnMsg $segMsg"
+            turnMsg.isNotEmpty() -> turnMsg
+            else -> segMsg
+        }
+    }
+
+    /**
+     * segment 의 도로명 + 남은 거리를 TTS 친화적인 한국어로.
+     *
+     *   "출발지"        → 빈 문자열 (출발 직후엔 도로명 의미 없음)
+     *   "도착지"        → "도착지까지 약 N미터"
+     *   "보행자도로"    → "약 N미터 직진"        (도로명 생략 — 어색)
+     *   빈 문자열       → "약 N미터 직진"
+     *   그 외 도로명    → "{이름} 방향 약 N미터 직진"
+     *
+     *   distance < 20m 이면 안내 생략 (너무 짧으면 노이즈).
+     */
+    private fun buildSegmentDirectionMessage(segment: RouteSegment): String {
+        if (segment.distance < 20) return ""
+        val rounded = roundDistanceForTts(segment.distance)
+        val distText = "약 ${rounded}미터"
+        return when {
+            segment.name == "출발지" -> ""
+            segment.name == "도착지" -> "도착지까지 ${distText}"
+            segment.name == "보행자도로" -> "${distText} 직진"
+            segment.name.isBlank() -> "${distText} 직진"
+            else -> "${segment.name} 방향 ${distText} 직진"
+        }
+    }
+
+    /**
+     * TTS 안내용 거리 라운딩.
+     *   <50m  : m 단위 그대로
+     *   <200m : 10m 단위
+     *   그 외 : 50m 단위
+     */
+    private fun roundDistanceForTts(m: Int): Int = when {
+        m < 50  -> m
+        m < 200 -> ((m + 5) / 10) * 10
+        else    -> ((m + 25) / 50) * 50
     }
 
     private fun isKeyPoint(waypoint: Waypoint): Boolean {

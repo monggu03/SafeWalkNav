@@ -348,13 +348,15 @@ class TMapApiClient(
                 val name = properties.string("name") ?: ""
                 val description = properties.string("description") ?: ""
 
+                // 도로명만 사용. description 으로 fallback 하면 ", 84m" / ", 3m" 같은
+                // TMap 더미 텍스트가 name 으로 들어와 TTS 가 어색해지므로 폐기.
                 pendingLines.add(
                     RawLine(
                         distance = segDistance,
                         time = segTime,
                         roadType = roadType,
                         facilityType = facilityType,
-                        name = name.ifBlank { description },
+                        name = name,
                         coords = segPoints.toList()
                     )
                 )
@@ -367,12 +369,22 @@ class TMapApiClient(
             pendingLines.clear()
         }
 
+        // 첫/끝 segment 라벨 통일.
+        //   - 첫 segment: TMap 이 "보행자도로" 등으로 줘도 사용자 입장에선 "출발지에서 시작" 이 자연스러움.
+        //   - 마지막 segment: 도착 직전 구간은 "도착지 방향" 으로 안내.
+        val labeledSegments = segments.toMutableList()
+        if (labeledSegments.isNotEmpty()) {
+            labeledSegments[0] = labeledSegments[0].copy(name = "출발지")
+            val lastIdx = labeledSegments.lastIndex
+            labeledSegments[lastIdx] = labeledSegments[lastIdx].copy(name = "도착지")
+        }
+
         TMapRoute(
             totalDistance = totalDistance,
             totalTime = totalTime,
             waypoints = waypoints,
             routePoints = routePoints,
-            segments = segments,
+            segments = labeledSegments,
         )
     }.getOrNull()
 
