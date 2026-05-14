@@ -235,6 +235,19 @@ class TMapApiClient(
 
     // ========== JSON 파싱 ==========
 
+    /**
+     * TMap 보행자 경로 파서 (single-pass accumulator).
+     *
+     * 핵심 아이디어: LineString 1개 = Segment 1개 매핑이 아니라,
+     *   "Point → Point 사이의 모든 LineString" 을 하나의 RouteSegment 로 병합.
+     *   (TMap 응답은 Point/LineString 교대 패턴이 아닌 경우가 있어 ─
+     *    Point→LineString→LineString→Point 처럼 LineString 이 연속될 수 있음.)
+     *
+     * 흐름:
+     *   - LineString 만나면 pendingLines 버퍼에 누적
+     *   - 다음 Point 만나면 waypoint 추가 후 pendingLines flush → 단일 segment 생성
+     *   - 마지막 trailing LineString 은 buggy 응답이므로 폐기 + 경고
+     */
     private fun parsePedestrianRoute(text: String): TMapRoute? = runCatching {
         // 🔧 [DEBUG-TMAP-RAW] LineString properties 검증용 임시 로그.
         // 확인 끝나면 이 블록 통째로 삭제할 것.
@@ -253,8 +266,8 @@ class TMapApiClient(
         val routePoints = mutableListOf<LatLng>()
         val segments = mutableListOf<RouteSegment>()
 
-        // 직전 Point feature 의 waypoint 인덱스. LineString segment 의 fromWaypointIndex 로 사용.
-        var lastWaypointIndex = -1
+        // 다음 Point 가 등장하면 단일 segment 로 병합되는 누적 버퍼.
+        val pendingLines = mutableListOf<RawLine>()
 
         for (feature in features) {
             val obj = feature.jsonObject
@@ -291,10 +304,28 @@ class TMapApiClient(
                         pointType = classifyPointType(turnType, description)
                     )
                 )
-                lastWaypointIndex = waypoints.size - 1
+                val newWaypointIdx = waypoints.size - 1
+
+                // pendingLines flush — 이전 waypoint(newWaypointIdx-1) → 방금 추가한 waypoint(newWaypointIdx) 구간.
+                if (pendingLines.isNotEmpty()) {
+                    if (newWaypointIdx >= 1) {
+                        segments.add(
+                            mergeIntoSegment(
+                                fromIdx = newWaypointIdx - 1,
+                                toIdx = newWaypointIdx,
+                                lines = pendingLines
+                            )
+                        )
+                    } else {
+                        // 첫 Point 보다 먼저 등장한 LineString — buggy 응답. 폐기.
+                        println("⚠️ [TMap parse] 첫 Point 이전 LineString ${pendingLines.size}개 폐기")
+                    }
+                    pendingLines.clear()
+                }
             }
 
             // LineString = 경로 선분 (지도 폴리라인 + 도로 속성)
+            // segment 는 즉시 생성하지 않고 pendingLines 에 누적한다.
             if (geometryType == "LineString") {
                 val coords = geometry["coordinates"]?.jsonArray ?: continue
                 val segPoints = mutableListOf<LatLng>()
@@ -304,7 +335,7 @@ class TMapApiClient(
                     val lat = (pair[1] as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull() ?: continue
                     val pt = LatLng(lat, lon)
                     segPoints.add(pt)
-                    routePoints.add(pt)
+                    routePoints.add(pt)  // 폴리라인 그리기용 — 기존 동작 유지
                 }
 
                 // LineString properties 추출
@@ -317,35 +348,23 @@ class TMapApiClient(
                 val name = properties.string("name") ?: ""
                 val description = properties.string("description") ?: ""
 
-                val baseRisk = RiskScoreCalculator.calculate(roadType, facilityType, name)
-
-                // fromWaypointIndex 는 직전 Point. toWaypointIndex 는 다음 Point — 아직 미생성.
-                // (Point/LineString 이 교대로 오는 응답 구조에서는 fromIdx + 1 이 다음 Point 의 인덱스가 됨.)
-                segments.add(
-                    RouteSegment(
-                        fromWaypointIndex = lastWaypointIndex,
-                        toWaypointIndex = lastWaypointIndex + 1,
+                pendingLines.add(
+                    RawLine(
                         distance = segDistance,
                         time = segTime,
                         roadType = roadType,
                         facilityType = facilityType,
                         name = name.ifBlank { description },
-                        points = segPoints,
-                        riskLevel = baseRisk
+                        coords = segPoints.toList()
                     )
                 )
             }
         }
 
-        // toWaypointIndex 가 waypoints 범위를 벗어나는 마지막 segment 보정
-        // (마지막 LineString 뒤에 Point 가 더 안 올 경우)
-        //
-        // 횡단보도 직후 segment 를 CAUTION 으로 승급하는 후처리는 의도적으로 제거.
-        // 위험은 "횡단보도를 건너는 그 순간" 이지 직후 인도가 아님 → waypoint 기준으로 판정.
-        val finalSegments = segments.map { seg ->
-            if (seg.toWaypointIndex >= waypoints.size) {
-                seg.copy(toWaypointIndex = waypoints.size - 1)
-            } else seg
+        // 마지막 Point 뒤에 trailing LineString 이 남아있으면 buggy 응답 — 폐기.
+        if (pendingLines.isNotEmpty()) {
+            println("⚠️ [TMap parse] 마지막 Point 이후 trailing LineString ${pendingLines.size}개 폐기")
+            pendingLines.clear()
         }
 
         TMapRoute(
@@ -353,9 +372,81 @@ class TMapApiClient(
             totalTime = totalTime,
             waypoints = waypoints,
             routePoints = routePoints,
-            segments = finalSegments,
+            segments = segments,
         )
     }.getOrNull()
+
+    // ========== Segment 병합 헬퍼 ==========
+
+    /** Point 사이에 누적된 LineString 1개 분. */
+    private data class RawLine(
+        val distance: Int,
+        val time: Int,
+        val roadType: Int,
+        val facilityType: Int,
+        val name: String,
+        val coords: List<LatLng>
+    )
+
+    /**
+     * 누적된 LineString 들을 단일 RouteSegment 로 병합.
+     *
+     *   - distance/time: 합산
+     *   - 대표 sub-line: 거리 기준 최장 (짧은 connector 가 대표가 되는 것 방지)
+     *   - name/roadType/facilityType: 대표의 값 사용
+     *   - 폴리라인: 첫 line 통째 + 후속 line 의 시작점 중복 제거하며 concat
+     *   - riskLevel: sub-line 별로 계산 후 가장 위험한 것 채택 (보수적)
+     */
+    private fun mergeIntoSegment(
+        fromIdx: Int,
+        toIdx: Int,
+        lines: List<RawLine>
+    ): RouteSegment {
+        val totalDistance = lines.sumOf { it.distance }
+        val totalTime = lines.sumOf { it.time }
+        val representative = lines.maxByOrNull { it.distance } ?: lines.first()
+
+        // 폴리라인 좌표: 인접 sub-line 의 시작점 중복 제거.
+        val mergedPoints = mutableListOf<LatLng>()
+        lines.forEachIndexed { i, line ->
+            if (i == 0) mergedPoints.addAll(line.coords)
+            else mergedPoints.addAll(line.coords.drop(1))
+        }
+
+        // 위험도: sub-line 별 계산 후 max-priority.
+        val mergedRisk = lines
+            .map { RiskScoreCalculator.calculate(it.roadType, it.facilityType, it.name) }
+            .maxByOrNull { riskPriority(it) }
+            ?: RiskLevel.NORMAL
+
+        // 머지가 실제 발생한 경우만 디버그 로그 (sub-line 1 개면 노이즈 방지로 생략).
+        if (lines.size > 1) {
+            val sub = lines.joinToString(" + ") {
+                "${it.name.ifBlank { "?" }}(${it.distance}m,road=${it.roadType})"
+            }
+            println("🔀 [Segment merge] wp[$fromIdx→$toIdx] ${lines.size}개 → $sub" +
+                    " ⇒ 대표='${representative.name}' 총=${totalDistance}m")
+        }
+
+        return RouteSegment(
+            fromWaypointIndex = fromIdx,
+            toWaypointIndex = toIdx,
+            distance = totalDistance,
+            time = totalTime,
+            roadType = representative.roadType,
+            facilityType = representative.facilityType,
+            name = representative.name,
+            points = mergedPoints,
+            riskLevel = mergedRisk
+        )
+    }
+
+    /** RiskLevel 우선순위 (병합 시 max 채택용). */
+    private fun riskPriority(risk: RiskLevel): Int = when (risk) {
+        RiskLevel.SAFE -> 0
+        RiskLevel.NORMAL -> 1
+        RiskLevel.CAUTION -> 2
+    }
 
     private fun parsePOIResults(text: String): List<POIResult> {
         // try/catch 로 명시적 처리 — runCatching.getOrElse 로 에러를 삼키지 않고
