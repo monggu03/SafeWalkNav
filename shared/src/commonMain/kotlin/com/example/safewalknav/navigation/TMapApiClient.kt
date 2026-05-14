@@ -337,19 +337,12 @@ class TMapApiClient(
             }
         }
 
-        // === 후처리: 횡단보도 직후 segment 위험도 승급 ===
-        // segment 의 fromWaypointIndex 가 가리키는 Waypoint 가 CROSSWALK 인 경우,
-        // 그 segment 는 차도를 건너는 직후 구간이므로 한 단계 위로 올림.
-        val upgradedSegments = segments.map { seg ->
-            val fromWp = waypoints.getOrNull(seg.fromWaypointIndex)
-            if (fromWp != null && fromWp.pointType == "CROSSWALK") {
-                seg.copy(riskLevel = RiskScoreCalculator.upgradeForCrosswalk(seg.riskLevel))
-            } else seg
-        }
-
         // toWaypointIndex 가 waypoints 범위를 벗어나는 마지막 segment 보정
         // (마지막 LineString 뒤에 Point 가 더 안 올 경우)
-        val finalSegments = upgradedSegments.map { seg ->
+        //
+        // 횡단보도 직후 segment 를 CAUTION 으로 승급하는 후처리는 의도적으로 제거.
+        // 위험은 "횡단보도를 건너는 그 순간" 이지 직후 인도가 아님 → waypoint 기준으로 판정.
+        val finalSegments = segments.map { seg ->
             if (seg.toWaypointIndex >= waypoints.size) {
                 seg.copy(toWaypointIndex = waypoints.size - 1)
             } else seg

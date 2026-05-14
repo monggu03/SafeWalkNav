@@ -221,8 +221,6 @@ class NavigationManager(
         val crosswalkCount = route.waypoints.count { isCrosswalkWaypoint(it) }
         val typeBreakdown = route.waypoints.groupingBy { it.pointType }.eachCount()
         val riskBreakdown = route.segments.groupingBy { it.riskLevel }.eachCount()
-        val dangerCount = route.segments.count { it.riskLevel == RiskLevel.DANGER }
-        val cautionCount = route.segments.count { it.riskLevel == RiskLevel.CAUTION }
         println("══════════ [NavManager] 경로 로드 완료 ══════════")
         println("총 거리: ${route.totalDistance}m, 예상 시간: ${route.totalTime}초 (~${route.totalTime / 60}분)")
         println("Waypoint: ${route.waypoints.size}개 (CROSSWALK ${crosswalkCount}개)")
@@ -239,7 +237,6 @@ class NavigationManager(
         println("──────────── segment 전체 (LineString) ────────────")
         route.segments.forEachIndexed { i, seg ->
             val riskMark = when (seg.riskLevel) {
-                RiskLevel.DANGER  -> "🔴"
                 RiskLevel.CAUTION -> "🟠"
                 RiskLevel.NORMAL  -> "🟡"
                 RiskLevel.SAFE    -> "🟢"
@@ -267,10 +264,8 @@ class NavigationManager(
         val totalM = route.totalDistance
         _guidanceMessage.value = buildString {
             append("${endName}까지 ${totalM}미터, 약 ${totalMin}분 소요됩니다.")
-            if (crosswalkCount > 0) append(" 횡단보도 ${crosswalkCount}개")
-            if (dangerCount > 0) append(", 주의 구간 ${dangerCount}곳")
-            else if (cautionCount > 0) append(", 주의 구간 ${cautionCount}곳")
-            append(". 안내를 시작합니다.")
+            if (crosswalkCount > 0) append(" 횡단보도 ${crosswalkCount}개.")
+            append(" 안내를 시작합니다.")
         }
 
         return true
@@ -392,12 +387,21 @@ class NavigationManager(
         // 외부 (안드 ML 검출 게이팅 등) 가 collect 할 수 있게 state flow 갱신
         _isInCrosswalkZone.value = isInCrossWalkZone
 
-        //횡단보도 상태 디버그 출력
+        // 현재 위치가 속한 segment 찾기 (currentWaypointIndex 직전에 진입한 segment)
+        //   진행 방향: waypoints[currentWaypointIndex-1] → waypoints[currentWaypointIndex]
+        //   해당 segment 는 toWaypointIndex == currentWaypointIndex 인 것.
+        val currentSegment = route.segments.firstOrNull {
+            it.fromWaypointIndex == currentWaypointIndex
+                    || it.toWaypointIndex == currentWaypointIndex
+        }
+
+        //횡단보도 상태 디버그 출력 (segment 정보 포함)
         _debugMessage.value =
             "횡단보도=$isInCrossWalkZone\n" +
                     "idx=$currentWaypointIndex/${route.waypoints.size}\n" +
                     "wp=${currentWp?.pointType}\n" +
-                    "roadType=${currentWp?.roadType}\n" +
+                    "seg='${currentSegment?.name}' road=${currentSegment?.roadType} " +
+                    "risk=${currentSegment?.riskLevel}\n" +
                     "turnType=${currentWp?.turnType}\n" +
                     "desc=${currentWp?.description}"
         if (isInCrossWalkZone) {
@@ -1032,19 +1036,22 @@ class NavigationManager(
             currentWaypointIndex++
             lastStraightGuidanceTime = currentTimeMillis()
         } else {
-            // 사전 안내 거리는 다음에 진입할 segment 의 위험도에 따라 동적 조정.
-            //   DANGER  → 50m (계단/육교 — 충분한 준비 시간)
-            //   CAUTION → 30m (횡단보도 등 — 표준)
-            //   NORMAL  → 20m
-            //   SAFE    → 0m  (사전 안내 생략)
-            val nextSegment = route.segmentEnteringFromWaypoint(currentWaypointIndex)
-            val preDist = preAnnounceDistance(nextSegment)
-            if (preDist > 0f && distToNext <= preDist && isKeyPoint(nextWaypoint)
+            // 사전 안내 거리는 "다음에 도달할 waypoint" 의 종류에 따라 결정.
+            //   CROSSWALK → 50m (횡단보도 — 충분한 준비 시간)
+            //   그 외 KEY → 30m (TURN/STAIRS/DESTINATION 등)
+            // 현재 segment 가 SAFE(순수 보행자도로) 면 사전 안내 자체 생략 — 목표 ① TTS 피로 감소.
+            val currentSegment = route.segments.firstOrNull {
+                it.toWaypointIndex == currentWaypointIndex
+            }
+            val preDist = preAnnounceDistance(nextWaypoint)
+            val suppressForSafe = currentSegment?.riskLevel == RiskLevel.SAFE
+                    && nextWaypoint.pointType != "CROSSWALK"  // 횡단보도 안내는 SAFE 구간이라도 유지
+            if (!suppressForSafe
+                && distToNext <= preDist && isKeyPoint(nextWaypoint)
                 && currentWaypointIndex != lastPreAnnouncedIndex
             ) {
                 lastPreAnnouncedIndex = currentWaypointIndex
-                val prefix = if (nextSegment?.riskLevel == RiskLevel.DANGER) "주의. " else ""
-                val message = "${prefix}${distToNext.toInt()}미터 앞 ${nextWaypoint.description}"
+                val message = "${distToNext.toInt()}미터 앞 ${nextWaypoint.description}"
                 speak(message)
                 // 사전 안내가 나왔으면 직진 타이머 리셋 (중복 방지)
                 lastStraightGuidanceTime = currentTimeMillis()
@@ -1052,13 +1059,13 @@ class NavigationManager(
         }
     }
 
-    /** 다음 segment 의 위험도에 따른 사전 안내 거리 (m). null 이면 NORMAL 로 간주. */
-    private fun preAnnounceDistance(segment: RouteSegment?): Float = when (segment?.riskLevel) {
-        RiskLevel.DANGER  -> 50f
-        RiskLevel.CAUTION -> 30f
-        RiskLevel.NORMAL  -> 20f
-        RiskLevel.SAFE    -> 0f
-        null              -> 30f  // segment 정보 없을 때 보수적 기본값
+    /**
+     * waypoint 종류에 따른 사전 안내 거리 (m).
+     * 횡단보도는 시각장애인에게 가장 중요한 위험 지점이므로 충분한 준비 시간 확보.
+     */
+    private fun preAnnounceDistance(waypoint: Waypoint): Float = when (waypoint.pointType) {
+        "CROSSWALK" -> 50f
+        else        -> 30f
     }
 
     /**
