@@ -83,3 +83,4 @@ DerivedData/
 .swiftpm/
 Pods/
 *.xcodeproj/project.xcworkspace/xcuserdata/
+.claude/

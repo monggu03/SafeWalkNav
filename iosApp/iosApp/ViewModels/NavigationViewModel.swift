@@ -7,6 +7,7 @@
 
 import Foundation
 import Combine
+import Speech
 import shared
 
 @MainActor
@@ -17,15 +18,39 @@ final class NavigationViewModel: ObservableObject {
     @Published private(set) var arrivalState: ArrivalState = .far
     @Published private(set) var isNavigating: Bool = false
     @Published private(set) var distanceToDestination: Float = .greatestFiniteMagnitude
-    @Published private(set) var searchResults: [POIResult] = []
-    @Published private(set) var errorMessage: String?
+    // didSet 으로 @Published 발화 시점/개수 확인 (SwiftUI 가 실제로 업데이트 받는지 검증)
+    @Published private(set) var searchResults: [POIResult] = [] {
+        didSet {
+            print("📣 [NavigationViewModel] searchResults didSet — count=\(searchResults.count)")
+            searchResults.enumerated().forEach { i, poi in
+                print("    [\(i)] \(poi.name) (\(poi.lat), \(poi.lon))")
+            }
+        }
+    }
+    @Published private(set) var errorMessage: String? {
+        didSet {
+            if let msg = errorMessage {
+                print("📣 [NavigationViewModel] errorMessage didSet — '\(msg)'")
+            }
+        }
+    }
     @Published private(set) var isAtCrosswalk: Bool = false
+
+    /// 음성 인식 진행 단계 — UI에서 상태 안내용
+    @Published private(set) var voiceFlowStage: VoiceFlowStage = .idle
+
+    enum VoiceFlowStage {
+        case idle
+        case listening          // STT 듣는 중
+        case searching          // 검색 중
+        case startingNavigation // 안내 시작 직전
+    }
 
     // MARK: - Dependencies
     private let tts: TtsManager
     private let locationTracker: LocationTracker
     private let headingProvider: HeadingProvider
-    //private let orientationMonitor: DeviceOrientationMonitor
+    private let stt: SttManager
     private let navigationManager: NavigationManager
 
     // MARK: - Subscriptions
@@ -34,12 +59,7 @@ final class NavigationViewModel: ObservableObject {
 
     private var lastSpokenGuidance: String = ""
 
-    // MARK: - Orientation Alert State
-    //private var lastSpokenIssue: OrientationIssue = .none
-    private var lastOrientationSpeakTime: Date = .distantPast
-    private let orientationRepeatInterval: TimeInterval = 5.0
-
-    // 🆕 디버깅: polling 카운터 (로그 무한 출력 방지)
+    // 디버깅: polling 카운터 (로그 무한 출력 방지)
     private var pollCount: Int = 0
 
     // MARK: - Init
@@ -47,18 +67,18 @@ final class NavigationViewModel: ObservableObject {
         tts: TtsManager,
         locationTracker: LocationTracker,
         headingProvider: HeadingProvider,
-        //orientationMonitor: DeviceOrientationMonitor,
+        stt: SttManager,
         navigationManager: NavigationManager
     ) {
         self.tts = tts
         self.locationTracker = locationTracker
         self.headingProvider = headingProvider
-        //self.orientationMonitor = orientationMonitor
+        self.stt = stt
         self.navigationManager = navigationManager
 
         print("🟢 [INIT] NavigationViewModel 생성됨")
         bindLocationToNavigation()
-        //bindHeadingToNavigation()
+        bindVoiceFlow()
         startPollingNavigationState()
     }
 
@@ -69,20 +89,46 @@ final class NavigationViewModel: ObservableObject {
     // MARK: - Public API
 
     func searchDestination(keyword: String) async {
+        print("🔎 [searchDestination] 시작 — keyword='\(keyword)'")
+
+        // 1) 위치 확인 (없으면 검색 자체가 실행 안 됨)
+        guard let loc = locationTracker.currentLocation else {
+            print("🔴 [searchDestination] currentLocation == nil — 검색 중단")
+            self.errorMessage = "현재 위치를 알 수 없습니다"
+            return
+        }
+        print("🔎 [searchDestination] currentLocation = (\(loc.latitude), \(loc.longitude))")
+
+        // 2) try? 가 아니라 do-catch 로 실제 에러를 그대로 출력
         do {
-            guard let loc = locationTracker.currentLocation else {
-                self.errorMessage = "현재 위치를 알 수 없습니다"
-                return
-            }
+            // 반경 50km — 도보 거리는 아니지만 특정 장소명 검색(예: "동국대학교")이
+            // 현재 위치에서 멀리 있어도 잡히도록 충분히 넓게 둔다.
+            // TMap API 가 centerLat/centerLon 기준 거리순 정렬해서 돌려주므로
+            // 가까운 결과가 항상 먼저 노출됨.
             let results = try await navigationManager.searchDestination(
                 keyword: keyword,
                 currentLat: KotlinDouble(value: loc.latitude),
                 currentLon: KotlinDouble(value: loc.longitude),
-                radiusKm: 5.0
+                radiusKm: 50.0
             )
+            print("🟢 [searchDestination] navigationManager 반환 — results.count=\(results.count)")
+            results.enumerated().forEach { i, poi in
+                print("    [\(i)] \(poi.name) (\(poi.lat), \(poi.lon)) addr='\(poi.address)'")
+            }
+
+            // shared 모듈에서 본문 파싱은 성공해도 결과 0개일 수 있음 — lastError 도 함께 확인
+            if let lastErr = navigationManager.lastError as String?, !lastErr.isEmpty {
+                print("⚠️ [searchDestination] navigationManager.lastError='\(lastErr)'")
+            }
+
             self.searchResults = results
-            self.errorMessage = nil
+            self.errorMessage = results.isEmpty
+                ? "검색 결과가 없습니다 (\(navigationManager.lastError as String? ?? "조용한 실패"))"
+                : nil
+            print("🟢 [searchDestination] @Published 할당 직후 self.searchResults.count=\(self.searchResults.count)")
         } catch {
+            print("🔴 [searchDestination] 예외 — \(type(of: error)): \(error)")
+            print("🔴 [searchDestination] localizedDescription=\(error.localizedDescription)")
             self.errorMessage = "검색 실패: \(error.localizedDescription)"
         }
     }
@@ -124,49 +170,103 @@ final class NavigationViewModel: ObservableObject {
         tts.stop()
     }
 
+    // MARK: - Voice Destination Input
+
+    /// 시각장애인용 음성 목적지 입력 — 버튼 한 번 누르면:
+    /// 1) "어디로 갈까요?" 안내
+    /// 2) STT 듣기 시작
+    /// 3) 인식된 키워드로 POI 검색
+    /// 4) 가장 가까운 결과로 자동 안내 시작
+    func startVoiceDestinationFlow() {
+        // 권한이 없으면 먼저 요청
+        guard stt.authorizationStatus == .authorized else {
+            Task {
+                let granted = await stt.requestAuthorization()
+                if granted {
+                    self.startVoiceDestinationFlow()
+                } else {
+                    self.errorMessage = "음성 인식 권한이 필요합니다"
+                    self.tts.speak("음성 인식 권한이 필요합니다. 설정에서 허용해 주세요.", priority: .high)
+                }
+            }
+            return
+        }
+
+        voiceFlowStage = .listening
+        tts.speak("어디로 갈까요? 목적지를 말씀하세요.", priority: .high)
+
+        // TTS가 끝난 후 STT 시작 (1.5초 정도면 TTS 종료 추정)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+            guard let self = self else { return }
+            guard self.voiceFlowStage == .listening else { return }
+            self.stt.startListening()
+        }
+    }
+
+    /// STT 듣기를 즉시 중단 (사용자가 취소할 때)
+    func cancelVoiceDestinationFlow() {
+        stt.stopListening()
+        voiceFlowStage = .idle
+    }
+
     // MARK: - Private Bindings
 
-    /// 🔴 디버깅 강화: 모든 단계에 로그
     private func bindLocationToNavigation() {
         print("🟢 [BIND] bindLocationToNavigation 시작")
 
         locationTracker.$currentLocation
             .sink { [weak self] gpsLocation in
-                print("🔵 [SINK] 발화 — value: \(String(describing: gpsLocation))")
-
-                guard let self else {
-                    print("🔴 [SINK] self가 nil — 바인딩 끊김")
-                    return
-                }
-                guard let gpsLocation = gpsLocation else {
-                    print("⚠️ [SINK] gpsLocation이 nil — 무시")
-                    return
-                }
-
-                print("🔵 [SINK] GPS = \(gpsLocation.latitude), \(gpsLocation.longitude)")
+                guard let self else { return }
+                guard let gpsLocation = gpsLocation else { return }
 
                 Task {
-                    print("🔵 [TASK] updateLocation 호출 직전")
                     do {
                         try await self.navigationManager.updateLocation(location: gpsLocation)
-                        print("🟢 [TASK] updateLocation 완료")
                     } catch {
                         print("🔴 [TASK] updateLocation 실패: \(error)")
                     }
                 }
             }
             .store(in: &cancellables)
-
-        print("🟢 [BIND] 구독 등록 완료, cancellables 개수: \(cancellables.count)")
     }
 
-//    private func bindHeadingToNavigation() {
-//        headingProvider.$currentHeading
-//            .sink { [weak self] heading in
-//                self?.navigationManager.updateCompassHeading(azimuth: Float(heading))
-//            }
-//            .store(in: &cancellables)
-//    }
+    /// STT 최종 결과 → 검색 → 자동 안내 시작
+    private func bindVoiceFlow() {
+        stt.finalResultPublisher
+            .sink { [weak self] recognizedText in
+                guard let self = self else { return }
+                Task { @MainActor in
+                    let keyword = recognizedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !keyword.isEmpty else {
+                        self.voiceFlowStage = .idle
+                        self.tts.speak("목적지를 인식하지 못했습니다. 다시 시도해 주세요.", priority: .high)
+                        return
+                    }
+                    await self.handleRecognizedDestination(keyword)
+                }
+            }
+            .store(in: &cancellables)
+    }
+
+    private func handleRecognizedDestination(_ keyword: String) async {
+        voiceFlowStage = .searching
+        tts.speak("\(keyword)을(를) 검색합니다.", priority: .normal)
+
+        await searchDestination(keyword: keyword)
+
+        guard let best = searchResults.first else {
+            voiceFlowStage = .idle
+            tts.speak("검색 결과가 없습니다. 다시 말씀해 주세요.", priority: .high)
+            return
+        }
+
+        voiceFlowStage = .startingNavigation
+        let name = String(describing: best.name)
+        tts.speak("\(name)으로 안내를 시작합니다.", priority: .high)
+
+        await startNavigation(to: best)
+        voiceFlowStage = .idle
+    }
 
     private func startPollingNavigationState() {
         pollingTask = Task { @MainActor [weak self] in
@@ -203,7 +303,7 @@ final class NavigationViewModel: ObservableObject {
                     }
                 }
 
-                // 🆕 5초마다 (poll 25회) 한 번씩 상태 요약 로그
+                // 5초마다 (poll 25회) 한 번씩 상태 요약 로그
                 if self.pollCount % 25 == 0 {
                     let dbg = self.navigationManager.debugMessage.value
                     let gpsStr = self.locationTracker.currentLocation
@@ -227,10 +327,6 @@ final class NavigationViewModel: ObservableObject {
                     self.isAtCrosswalk = newIsAtCrosswalk
                 }
 
-                // 7. drift / orientation
-                //self.handleDriftAlertIfNeeded()
-                //self.handleOrientationAlertIfNeeded()
-
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
         }
@@ -247,15 +343,6 @@ final class NavigationViewModel: ObservableObject {
         tts.speak(message, priority: priority)
     }
 
-//    private func handleDriftAlertIfNeeded() {
-//        guard isNavigating else { return }
-//        guard headingProvider.isDrifting else { return }
-//
-//        let direction = headingProvider.driftDegrees > 0 ? "오른쪽" : "왼쪽"
-//        let absDeg = Int(abs(headingProvider.driftDegrees))
-//        //tts.speak("\(direction)으로 \(absDeg)도 벗어났습니다", priority: .high)
-//    }
-
     // MARK: - 횡단보도 감지
 
     private func parseCrosswalkFromDebugMessage() -> Bool {
@@ -264,31 +351,4 @@ final class NavigationViewModel: ObservableObject {
         }
         return debug.contains("횡단보도=true")
     }
-
-    // MARK: - Orientation
-
-//    private func handleOrientationAlertIfNeeded() {
-//        let currentStatus = orientationMonitor.status
-//        let currentIssue = orientationMonitor.issue
-//
-//        if currentStatus == .normal {
-//            lastSpokenIssue = .none
-//            return
-//        }
-//
-//        guard currentStatus == .dangerous else { return }
-//        guard currentIssue != .none else { return }
-//        guard let message = currentIssue.ttsMessage else { return }
-//
-//        let now = Date()
-//        let isSameIssue = (currentIssue == lastSpokenIssue)
-//        let timeSinceLast = now.timeIntervalSince(lastOrientationSpeakTime)
-//
-//        if isSameIssue && timeSinceLast < orientationRepeatInterval {
-//            return
-//        }
-//
-//        tts.speak(message, priority: .high)
-//        lastSpokenIssue = currentIssue
-//        lastOrientationSpeakTime = now
-    }
+}
