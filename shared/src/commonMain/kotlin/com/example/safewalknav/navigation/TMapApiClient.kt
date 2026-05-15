@@ -346,7 +346,6 @@ class TMapApiClient(
                 val segDistance = properties.int("distance") ?: 0
                 val segTime = properties.int("time") ?: 0
                 val name = properties.string("name") ?: ""
-                val description = properties.string("description") ?: ""
 
                 // 도로명만 사용. description 으로 fallback 하면 ", 84m" / ", 3m" 같은
                 // TMap 더미 텍스트가 name 으로 들어와 TTS 가 어색해지므로 폐기.
