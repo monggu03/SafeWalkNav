@@ -380,4 +380,76 @@ class TrustBasedNavigatorTest {
             "인덱스 음수: ${result.currentWaypointIndex}"
         )
     }
+
+    // ─── 사전 안내 (annotation) 통합 ───
+
+    @Test
+    fun `annotations 미제공이면 annotationAnnouncement 는 항상 null`() {
+        val navigator = TrustBasedNavigator(makeStraightRoute())
+        val state = stateBefore(targetLon = 126.97840, offsetMeters = 5.0)
+
+        val result = navigator.update(state)
+
+        assertEquals(null, result.annotationAnnouncement)
+    }
+
+    @Test
+    fun `안내 거리 안에 들어오면 annotationAnnouncement 가 발화된다`() {
+        val waypoints = makeStraightRoute()
+        // W1 (인덱스 0) 을 시작 annotation 으로 등록.
+        // distanceFromStartM = 0 이고 트리거 거리(curve) = 15m 이내이면 발화.
+        val ann = PathAnnotation(
+            startWaypointIndex = 0,
+            endWaypointIndex = 1,
+            type = PathSegmentType.SLIGHT_CURVE,
+            direction = TurnDirection.RIGHT,
+            totalAngle = 20.0,
+            peakAngle = 10.0,
+            distanceFromStartM = 0.0,
+            announceMessage = MessageBuilder.buildAnnotationAnnounce(
+                PathAnnotation.defaults().copy(
+                    type = PathSegmentType.SLIGHT_CURVE,
+                    direction = TurnDirection.RIGHT,
+                ),
+            ),
+        )
+        val navigator = TrustBasedNavigator(
+            waypoints = waypoints,
+            annotations = listOf(ann),
+        )
+        // 사용자는 W1 5m 서쪽 — userCum ≈ -5m → gap = 0 - (-5) = 5m, 트리거 안.
+        val state = stateBefore(targetLon = 126.97840, offsetMeters = 5.0)
+
+        val result = navigator.update(state)
+
+        assertTrue(
+            result.annotationAnnouncement?.isNotBlank() == true,
+            "annotation 안내가 비어있다: ${result.annotationAnnouncement}",
+        )
+    }
+
+    @Test
+    fun `같은 annotation 은 두 번 발화되지 않는다`() {
+        val ann = PathAnnotation(
+            startWaypointIndex = 0,
+            endWaypointIndex = 1,
+            type = PathSegmentType.SLIGHT_CURVE,
+            direction = TurnDirection.RIGHT,
+            totalAngle = 20.0,
+            peakAngle = 10.0,
+            distanceFromStartM = 0.0,
+            announceMessage = "테스트 안내",
+        )
+        val navigator = TrustBasedNavigator(
+            waypoints = makeStraightRoute(),
+            annotations = listOf(ann),
+        )
+        val state = stateBefore(targetLon = 126.97840, offsetMeters = 5.0)
+
+        val first = navigator.update(state)
+        val second = navigator.update(state)
+
+        assertEquals("테스트 안내", first.annotationAnnouncement)
+        assertEquals(null, second.annotationAnnouncement)
+    }
 }

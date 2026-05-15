@@ -61,6 +61,27 @@ data class NavigatorConfig(
     val scoreSpeedNormal: Int = 20,
     val scoreSpeedAbnormal: Int = 5,
 
+    // ─── 보행 쏠림 보정 (Path Annotation) ───
+    // 경로 분석용 — RouteAnnotator가 waypoint 시퀀스를 곡선/회전으로 분류할 때 쓰는 임계값.
+    // 값은 모두 실 사용자 테스트로 추후 튜닝 대상이라 상수로 분리해 둔다.
+    val minSegmentDistanceM: Double = 3.0,
+    val noiseAngleThresholdDeg: Double = 10.0,
+    val turnPeakThresholdDeg: Double = 30.0,
+    val curveCumulativeThresholdDeg: Double = 30.0,
+    val slightThresholdDeg: Double = 30.0,
+    val sharpThresholdDeg: Double = 70.0,
+    val curveSignConsistencyRatio: Double = 0.75,
+
+    // 안내 시점 — 곡선/회전 시작 지점에서 얼마 전부터 미리 알릴지.
+    val announceDistanceCurveM: Double = 15.0,
+    val announceDistanceTurnM: Double = 20.0,
+    val announceDistanceSharpM: Double = 25.0,
+
+    // ─── 초기 방향 안내 ───
+    val initialHeadingToleranceDeg: Double = 15.0,
+    // gravity.z 는 화면이 하늘을 향한 평면 자세에서 -1.0 근처가 된다.
+    val flatPoseGravityZTolerance: Double = 0.2,
+    val flatPoseGravityXYTolerance: Double = 0.3,
 ) {
     companion object {
         /**

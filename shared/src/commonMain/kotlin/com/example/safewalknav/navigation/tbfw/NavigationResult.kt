@@ -15,6 +15,8 @@ package com.example.safewalknav.navigation.tbfw
  * @param distanceToWaypoint 현재 위치에서 다음 waypoint까지 거리 (m)
  * @param headingDiff 현재 heading - 목표 bearing (-180 ~ +180 도)
  * @param isFinished 모든 waypoint를 통과해서 더 이상 안내할 게 없는 상태
+ * @param annotationAnnouncement 이번 update 에서 새로 발화할 PathAnnotation 안내 (없으면 null).
+ *                               말 그대로 "사전 안내" — message 와는 별개로 곡선/회전 사전 알림용.
  */
 data class NavigationResult(
     val message: String,
@@ -25,6 +27,7 @@ data class NavigationResult(
     val distanceToWaypoint: Float,
     val headingDiff: Float,
     val isFinished: Boolean,
+    val annotationAnnouncement: String? = null,
 )
 
 /**

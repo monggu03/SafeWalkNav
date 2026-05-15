@@ -27,6 +27,12 @@ final class TBFWDemoViewModel: ObservableObject {
     /// TBFW가 생성한 안내 문장 (TTS로 읽을 텍스트)
     @Published private(set) var message: String = "대기 중..."
 
+    /// RouteAnnotator 가 분석한 경로 annotation 개수 (디버그/UI 용).
+    @Published private(set) var annotationCount: Int = 0
+
+    /// 사전 분석된 경로 — TBFWDemoView 가 HeadingGuideView 로 첫 waypoint 를 넘길 때 참고.
+    @Published private(set) var routeWaypoints: [Waypoint] = []
+
     /// 현재 Trust Score (0~100)
     @Published private(set) var trustScore: Int = 0
 
@@ -62,15 +68,25 @@ final class TBFWDemoViewModel: ObservableObject {
     /// 의존성 (외부에서 주입)
     private let locationTracker: LocationTracker
     private let headingProvider: HeadingProvider
+    /// 사전 안내 (annotation) 발화용. nil 이면 콘솔에만 로그.
+    private let tts: TtsManager?
 
     /// Combine 구독 토큰
     private var cancellables = Set<AnyCancellable>()
 
+    /// 직전에 TTS 로 발화한 annotation 메시지 — 같은 문장 연달아 발화 방지.
+    private var lastSpokenAnnouncement: String = ""
+
     // MARK: - Init
 
-    init(locationTracker: LocationTracker, headingProvider: HeadingProvider) {
+    init(
+        locationTracker: LocationTracker,
+        headingProvider: HeadingProvider,
+        tts: TtsManager? = nil,
+    ) {
         self.locationTracker = locationTracker
         self.headingProvider = headingProvider
+        self.tts = tts
     }
 
     // MARK: - Public API
@@ -80,17 +96,30 @@ final class TBFWDemoViewModel: ObservableObject {
     /// - Parameter waypoints: 따라갈 waypoint 리스트. nil이면 기본 데모 경로 사용.
     func start(waypoints: [Waypoint]? = nil) {
         let routeWaypoints = waypoints ?? Self.makeDemoRoute()
+        let config = NavigatorConfig.companion.defaults()
 
-        // TrustBasedNavigator 생성 — 기본 config 사용
+        // 1. 경로 사전 분석 — RouteAnnotator 가 곡선/회전을 미리 잡아낸다.
+        let annotated = RouteAnnotator(config: config).annotate(waypoints: routeWaypoints)
+        self.annotationCount = annotated.annotations.count
+        self.routeWaypoints = routeWaypoints
+        print("[TBFWDemo] RouteAnnotator: \(annotated.annotations.count)개 annotation 발견")
+        for ann in annotated.annotations {
+            print("  - [\(ann.startWaypointIndex)] \(ann.type) \(ann.direction) "
+                  + "@\(Int(ann.distanceFromStartM))m: \(ann.announceMessage)")
+        }
+
+        // 2. TrustBasedNavigator 생성 — annotation 도 함께 넘겨 사전 안내 활성화.
         self.navigator = TrustBasedNavigator(
             waypoints: routeWaypoints,
-            config: NavigatorConfig.companion.defaults()
+            config: config,
+            annotations: annotated.annotations,
         )
 
         self.totalWaypoints = routeWaypoints.count
         self.currentWaypointIndex = 0
         self.isFinished = false
         self.isRunning = true
+        self.lastSpokenAnnouncement = ""
         self.message = "TBFW 시작됨. GPS 신호 대기 중..."
 
         print("[TBFWDemo] sink 구독 시작 - locationTracker: \(locationTracker)")
@@ -154,6 +183,15 @@ final class TBFWDemoViewModel: ObservableObject {
         self.didPassWaypoint = result.didPassWaypoint
         self.isFinished = result.isFinished
 
+        // 사전 안내 (annotation) — TrustBasedNavigator 가 한 번만 돌려준다.
+        if let announcement = result.annotationAnnouncement,
+           !announcement.isEmpty,
+           announcement != lastSpokenAnnouncement {
+            lastSpokenAnnouncement = announcement
+            tts?.speak(announcement)
+            print("[TBFW] 🔔 annotation: \(announcement)")
+        }
+
         // 콘솔 로그 — 디버깅용
         print("""
             [TBFW] msg=\(result.message)
@@ -166,6 +204,12 @@ final class TBFWDemoViewModel: ObservableObject {
     }
 
     // MARK: - Demo Route
+
+    /// HeadingGuideView 등이 미리 첫 waypoint 를 알아야 할 때 쓰는 외부 노출 헬퍼.
+    /// 내부적으로 makeDemoRoute() 를 그대로 부른다.
+    static func makeDemoRoutePublic() -> [Waypoint] {
+        return makeDemoRoute()
+    }
 
     /// 데모용 기본 경로 — 서울 시청 근처 동쪽으로 3개 waypoint.
     /// 시뮬레이터 GPS를 Apple 본사가 아니라 직접 좌표 입력 시 사용.

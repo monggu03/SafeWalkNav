@@ -12,13 +12,16 @@ import shared
 struct TBFWDemoView: View {
     @EnvironmentObject var deps: AppDependencies
     @StateObject private var viewModel: TBFWDemoViewModel
+    /// 초기 방향 안내 화면 표시 여부.
+    @State private var showHeadingGuide: Bool = false
 
     /// AppDependencies에서 의존성을 받아 ViewModel 초기화.
     /// SwiftUI의 @StateObject는 init에서 만들어야 해서 약간 번거로운 패턴.
     init(deps: AppDependencies) {
         _viewModel = StateObject(wrappedValue: TBFWDemoViewModel(
             locationTracker: deps.locationTracker,
-            headingProvider: deps.headingProvider
+            headingProvider: deps.headingProvider,
+            tts: deps.tts,
         ))
     }
 
@@ -140,25 +143,52 @@ struct TBFWDemoView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
+                    // ─── annotation 디버그 ───
+                    GroupBox("🛣️ 사전 분석 (Path Annotation)") {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("annotation 개수: \(viewModel.annotationCount)")
+                            if viewModel.annotationCount == 0 {
+                                Text("이 데모 경로엔 곡선/회전이 없습니다.")
+                                    .foregroundColor(.gray)
+                                    .font(.caption)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
                     // ─── 컨트롤 버튼 ───
-                    HStack(spacing: 12) {
+                    VStack(spacing: 12) {
+                        // 초기 방향 안내 진입점 — 출발 전에 한 번만 사용.
                         if !viewModel.isRunning {
                             Button(action: {
-                                viewModel.start()
+                                showHeadingGuide = true
                             }) {
-                                Label("TBFW 시작", systemImage: "play.fill")
-                                    .frame(maxWidth: .infinity)
-                            }
-                            .buttonStyle(.borderedProminent)
-                        } else {
-                            Button(action: {
-                                viewModel.stop()
-                            }) {
-                                Label("TBFW 종료", systemImage: "stop.fill")
+                                Label("초기 방향 안내", systemImage: "location.north.line.fill")
                                     .frame(maxWidth: .infinity)
                             }
                             .buttonStyle(.bordered)
-                            .tint(.red)
+                            .disabled(deps.locationTracker.currentLocation == nil)
+                        }
+
+                        HStack(spacing: 12) {
+                            if !viewModel.isRunning {
+                                Button(action: {
+                                    viewModel.start()
+                                }) {
+                                    Label("TBFW 시작", systemImage: "play.fill")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.borderedProminent)
+                            } else {
+                                Button(action: {
+                                    viewModel.stop()
+                                }) {
+                                    Label("TBFW 종료", systemImage: "stop.fill")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(.red)
+                            }
                         }
                     }
                     .padding(.top, 8)
@@ -167,6 +197,32 @@ struct TBFWDemoView: View {
                 .padding()
             }
             .navigationTitle("TBFW 데모")
+            .navigationDestination(isPresented: $showHeadingGuide) {
+                headingGuideDestination
+            }
+        }
+    }
+
+    /// 초기 방향 안내 화면 — 현재 위치와 데모 첫 waypoint 가 모두 있을 때만 push.
+    @ViewBuilder
+    private var headingGuideDestination: some View {
+        if let location = deps.locationTracker.currentLocation,
+           let firstWp = viewModel.routeWaypoints.first ?? TBFWDemoViewModel.makeDemoRoutePublic().first {
+            HeadingGuideView(
+                tts: deps.tts,
+                currentLocation: location,
+                firstWaypoint: firstWp,
+                onReady: {
+                    showHeadingGuide = false
+                    viewModel.start()
+                },
+            )
+        } else {
+            VStack {
+                Text("위치 정보 또는 경로 정보를 가져오지 못했습니다.")
+                Button("닫기") { showHeadingGuide = false }
+                    .buttonStyle(.bordered)
+            }
         }
     }
 

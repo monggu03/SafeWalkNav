@@ -3,6 +3,7 @@ package com.example.safewalknav.navigation.tbfw
 import com.example.safewalknav.navigation.Waypoint
 import com.example.safewalknav.navigation.angleDiff
 import com.example.safewalknav.navigation.bearing
+import com.example.safewalknav.navigation.distanceBetween
 
 /**
  * TBFW (Trust-Based Forward Waypoint) Navigator의 facade.
@@ -32,10 +33,39 @@ import com.example.safewalknav.navigation.bearing
  * @param config 튜닝 가능한 threshold 설정 (기본값 OK)
  */
 class TrustBasedNavigator(
-    waypoints: List<Waypoint>,
-    private val config: NavigatorConfig = NavigatorConfig()
+    private val waypoints: List<Waypoint>,
+    private val config: NavigatorConfig = NavigatorConfig(),
+    /**
+     * RouteAnnotator 결과. 사전 안내(곡선/회전) 가 필요하지 않은 호출자는
+     * 비워둘 수 있고 그 경우 annotationAnnouncement 는 항상 null 이다.
+     */
+    private val annotations: List<PathAnnotation> = emptyList(),
 ) {
     private val tracker = ForwardOnlyTracker(waypoints)
+
+    /**
+     * waypoints[0] 부터 waypoints[i] 까지의 누적 거리.
+     * cumulativeDistances[k] = sum(distance(waypoints[i], waypoints[i+1]) for i in 0..k-1).
+     */
+    private val cumulativeDistances: List<Double> = run {
+        if (waypoints.isEmpty()) return@run emptyList()
+        val out = ArrayList<Double>(waypoints.size)
+        out.add(0.0)
+        var acc = 0.0
+        for (i in 1 until waypoints.size) {
+            val a = waypoints[i - 1]
+            val b = waypoints[i]
+            acc += distanceBetween(a.lat, a.lon, b.lat, b.lon).toDouble()
+            out.add(acc)
+        }
+        out
+    }
+
+    /**
+     * 이미 사전 안내한 annotation 의 startWaypointIndex 집합. 같은 annotation 을 두 번
+     * 발화하지 않기 위함.
+     */
+    private val announcedAnnotationIds = mutableSetOf<Int>()
 
     /**
      * 매 위치 업데이트마다 호출.
@@ -104,7 +134,17 @@ class TrustBasedNavigator(
             currentTarget = targetForMessage
         )
 
-        // Step 8: 결과 묶기
+        // Step 8: 사전 안내 (annotation) 트리거 검사
+        // didPass 한 직후라면 distance 가 옛 target 기준이므로 새 target 기준으로 재계산해
+        // 사용자 누적 거리가 정확하게 잡히게 한다.
+        val distanceForAnnouncement = if (didPass) {
+            tracker.distanceToTarget(location.latitude, location.longitude)
+        } else {
+            distance
+        }
+        val announcement = pickPendingAnnouncement(distanceForAnnouncement)
+
+        // Step 9: 결과 묶기
         return NavigationResult(
             message = message,
             didPassWaypoint = didPass,
@@ -113,8 +153,46 @@ class TrustBasedNavigator(
             trustLevel = trustLevel,
             distanceToWaypoint = distance,
             headingDiff = headingDifference,
-            isFinished = tracker.isFinished
+            isFinished = tracker.isFinished,
+            annotationAnnouncement = announcement,
         )
+    }
+
+    /**
+     * 현재 사용자 위치를 경로 시작점 기준 누적 거리로 환산.
+     *
+     * 근사식:
+     *   cumulative_user ≈ cumulativeDistances[currentIndex] - distanceToTarget
+     *   (currentIndex 의 waypoint 까지의 누적 거리에서, 그 waypoint 까지 남은 거리만큼 빼면
+     *    사용자가 그 segment 내에서 어디쯤 있는지가 된다.)
+     */
+    private fun userCumulativeDistance(distanceToTarget: Float): Double {
+        if (cumulativeDistances.isEmpty()) return 0.0
+        val idx = tracker.currentIndex.coerceAtMost(cumulativeDistances.size - 1)
+        return (cumulativeDistances[idx] - distanceToTarget).coerceAtLeast(0.0)
+    }
+
+    /**
+     * 곧 도달할 (announce 거리 이내) annotation 중 아직 발화하지 않은 첫 번째 것을 골라
+     * 안내 문장을 돌려준다. 한 번 발화한 annotation 은 다시는 돌려주지 않는다.
+     */
+    private fun pickPendingAnnouncement(distanceToTarget: Float): String? {
+        if (annotations.isEmpty()) return null
+        val userCum = userCumulativeDistance(distanceToTarget)
+        val candidate = annotations.firstOrNull { ann ->
+            if (ann.startWaypointIndex in announcedAnnotationIds) return@firstOrNull false
+            val triggerDist = announceDistanceFor(ann.type)
+            val gap = ann.distanceFromStartM - userCum
+            gap in 0.0..triggerDist
+        } ?: return null
+        announcedAnnotationIds.add(candidate.startWaypointIndex)
+        return candidate.announceMessage.takeIf { it.isNotBlank() }
+    }
+
+    private fun announceDistanceFor(type: PathSegmentType): Double = when (type) {
+        PathSegmentType.SHARP_TURN -> config.announceDistanceSharpM
+        PathSegmentType.TURN, PathSegmentType.SLIGHT_TURN -> config.announceDistanceTurnM
+        else -> config.announceDistanceCurveM
     }
 
     /**
@@ -128,7 +206,8 @@ class TrustBasedNavigator(
         trustLevel = TrustLevel.HIGH,
         distanceToWaypoint = 0f,
         headingDiff = 0f,
-        isFinished = true
+        isFinished = true,
+        annotationAnnouncement = null,
     )
 
     /**
