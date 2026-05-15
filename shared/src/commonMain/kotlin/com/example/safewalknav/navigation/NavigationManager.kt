@@ -1169,13 +1169,34 @@ class NavigationManager(
         if (now - lastStraightGuidanceTime < 20_000L) return
         lastStraightGuidanceTime = now
 
-        val distText = if (distToDestination >= 1000f) {
-            val km = distToDestination / 1000f
-            val rounded = kotlin.math.round(km * 10) / 10
-            "${rounded}킬로"
-        } else {
-            "${distToDestination.toInt()}미터"
+        // 현재 진행 중인 segment (currentWaypointIndex 직전에 진입한 segment).
+        //   진행 방향이 segment 의 마지막을 향하므로 toWaypointIndex == currentWaypointIndex.
+        val currentSegment = route.segments.firstOrNull {
+            it.toWaypointIndex == currentWaypointIndex
         }
+
+        val message = if (currentSegment != null) {
+            val rounded = roundDistanceForTts(distToNext.toInt())
+            when {
+                currentSegment.name == "출발지" -> "약 ${rounded}미터 더 이동하세요"
+                currentSegment.name == "도착지" -> "도착지까지 약 ${rounded}미터"
+                currentSegment.name == "보행자도로" -> "약 ${rounded}미터 직진"
+                currentSegment.name.isBlank() -> "약 ${rounded}미터 직진"
+                else -> "${currentSegment.name} 방향 약 ${rounded}미터 직진"
+            }
+        } else {
+            // segment 정보 없으면 거리만 안내 (백업)
+            val distText = if (distToDestination >= 1000f) {
+                val km = distToDestination / 1000f
+                val r = kotlin.math.round(km * 10) / 10
+                "${r}킬로"
+            } else {
+                "${distToDestination.toInt()}미터"
+            }
+            "${distText} 직진하세요"
+        }
+
+        speak(message)
     }
 
     // isCrosswalkWaypoint() / isOnCrosswalkSegment() — KMM 마이그레이션으로
