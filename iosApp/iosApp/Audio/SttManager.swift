@@ -43,10 +43,10 @@ final class SttManager: ObservableObject {
     // MARK: - 안전장치 타이머
     /// 무음 상태에서 자동 종료 (사용자가 말 안 하면 5초 후 자동 stop)
     private var silenceTimer: Timer?
-    private let silenceTimeout: TimeInterval = 1.2
+    private let silenceTimeout: TimeInterval = 5.0
     /// 최대 듣기 시간 (안전장치 — 무한 대기 방지)
     private var maxDurationTimer: Timer?
-    private let maxDuration: TimeInterval = 10.0
+    private let maxDuration: TimeInterval = 15.0
 
     // MARK: - Init
     init(localeIdentifier: String = "ko-KR", tts: TtsManager? = nil) {
@@ -202,60 +202,26 @@ final class SttManager: ObservableObject {
     }
 
     // MARK: - 타이머
-//    private func startTimers() {
-//        resetSilenceTimer()
-//        // 최대 듣기 시간 — 도달 시 강제 종료
-//        maxDurationTimer = Timer.scheduledTimer(withTimeInterval: maxDuration, repeats: false) { [weak self] _ in
-//            Task { @MainActor in
-//                self?.lastError = "음성 인식 시간 초과"
-//                self?.stopListening()
-//            }
-//        }
-//    }
     private func startTimers() {
-        // 무음 타이머는 첫 partial 결과가 도착했을 때 resetSilenceTimer()에서 무장.
-        // 시작 직후엔 maxDurationTimer만 활성화 — 인식 엔진 초기화 지연(~0.5s)으로
-        // 첫 발화 전에 종료되는 것을 막는다.
-
+        resetSilenceTimer()
+        // 최대 듣기 시간 — 도달 시 강제 종료
         maxDurationTimer = Timer.scheduledTimer(withTimeInterval: maxDuration, repeats: false) { [weak self] _ in
-            guard let self else { return }
-
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.lastError = "음성 인식 시간 초과"
-                self.stopListening()
+            Task { @MainActor in
+                self?.lastError = "음성 인식 시간 초과"
+                self?.stopListening()
             }
         }
     }
 
-//    private func resetSilenceTimer() {
-//        silenceTimer?.invalidate()
-//        silenceTimer = Timer.scheduledTimer(withTimeInterval: silenceTimeout, repeats: false) { [weak self] _ in
-//            Task { @MainActor in
-//                // 무음 5초 → 자동 종료 (이미 들은 partial 결과가 있으면 그걸 final로 처리)
-//                if let self = self, !self.partialText.isEmpty {
-//                    self.finalResultPublisher.send(self.partialText)
-//                }
-//                self?.stopListening()
-//            }
-//        }
-//    }
     private func resetSilenceTimer() {
         silenceTimer?.invalidate()
-
         silenceTimer = Timer.scheduledTimer(withTimeInterval: silenceTimeout, repeats: false) { [weak self] _ in
-            guard let self else { return }
-
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-
-                // 무음 5초 → 자동 종료
-                // 이미 들은 partial 결과가 있으면 그걸 final로 처리
-                if !self.partialText.isEmpty {
+            Task { @MainActor in
+                // 무음 5초 → 자동 종료 (이미 들은 partial 결과가 있으면 그걸 final로 처리)
+                if let self = self, !self.partialText.isEmpty {
                     self.finalResultPublisher.send(self.partialText)
                 }
-
-                self.stopListening()
+                self?.stopListening()
             }
         }
     }

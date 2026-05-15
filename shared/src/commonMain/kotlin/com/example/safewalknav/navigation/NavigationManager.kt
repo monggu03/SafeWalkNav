@@ -84,11 +84,6 @@ class NavigationManager(
     private var lastCornerAnnouncedIdx = -1   // 폴리라인 코너 중복 안내 방지
     private var lastRoadType = -1 // 이전 구간 도로 유형 (전환 안내용)
 
-    //클래스 변수 추가
-    private var lastSignalApiCallTime = 0L
-    private var lastSignalItstId: String? = null
-    private val signalApiCooldownMs = 60_000L
-
     // ========== Heading Smoothing (Circular Kalman Filter) ==========
     // 알고리즘 본체는 shared/commonMain/.../navigation/KalmanHeading.kt 에 분리됨.
     // 자세한 설명/파라미터는 그쪽 docstring 참조.
@@ -119,7 +114,7 @@ class NavigationManager(
      */
     private var leanAccumulator = 0 // 쏠림 누적 카운트
 
-    fun updateCompassHeading(azimuth: Float, currentTime: Long) {
+    /*fun updateCompassHeading(azimuth: Float, currentTime: Long) {
         _compassHeading.value = azimuth
 
         if (_isNavigating.value) {
@@ -154,6 +149,8 @@ class NavigationManager(
             }
         }
     }
+    */
+
 
     // ========== 경로 탐색 ==========
 
@@ -219,34 +216,11 @@ class NavigationManager(
         // === 진단: TMap 응답이 횡단보도를 별도 waypoint 로 만들었는지 검증 ===
         // 시각장애인 안내의 핵심 — 만약 CROSSWALK 0 개면 TMap API 가 sparse 응답한 것.
         val crosswalkCount = route.waypoints.count { isCrosswalkWaypoint(it) }
-        val typeBreakdown = route.waypoints.groupingBy { it.pointType }.eachCount()
-        val riskBreakdown = route.segments.groupingBy { it.riskLevel }.eachCount()
-        println("══════════ [NavManager] 경로 로드 완료 ══════════")
-        println("총 거리: ${route.totalDistance}m, 예상 시간: ${route.totalTime}초 (~${route.totalTime / 60}분)")
-        println("Waypoint: ${route.waypoints.size}개 (CROSSWALK ${crosswalkCount}개)")
-        println("Point type 분포: $typeBreakdown")
-        println("Segment: ${route.segments.size}개, 위험도 분포: $riskBreakdown")
-        println("RoutePoint(폴리라인 좌표): ${route.routePoints.size}개")
-        println("──────────── waypoint 전체 (untruncated) ────────────")
+        println("[NavManager] 경로 로드 완료 — ${route.waypoints.size}개 waypoint (CROSSWALK ${crosswalkCount}개, total ${route.totalDistance}m)")
         route.waypoints.forEachIndexed { i, wp ->
             val mark = if (isCrosswalkWaypoint(wp)) "🚦" else "  "
-            println("$mark [$i] type=${wp.pointType} turn=${wp.turnType} dist=${wp.distance}m " +
-                    "lat=${wp.lat} lon=${wp.lon}")
-            println("       desc=${wp.description}")
+            println("$mark [$i] type=${wp.pointType} turn=${wp.turnType} road=${wp.roadType} dist=${wp.distance}m desc=${wp.description.take(60)}")
         }
-        println("──────────── segment 전체 (LineString) ────────────")
-        route.segments.forEachIndexed { i, seg ->
-            val riskMark = when (seg.riskLevel) {
-                RiskLevel.CAUTION -> "🟠"
-                RiskLevel.NORMAL  -> "🟡"
-                RiskLevel.SAFE    -> "🟢"
-            }
-            println("$riskMark [$i] wp[${seg.fromWaypointIndex}→${seg.toWaypointIndex}] " +
-                    "dist=${seg.distance}m time=${seg.time}s " +
-                    "road=${seg.roadType} facility=${seg.facilityType} " +
-                    "name='${seg.name}' risk=${seg.riskLevel}")
-        }
-        println("════════════════════════════════════════════════")
         cachedNearbyPOIs = emptyList()
         cachedAddress = null
         arrivalInfoLoaded = false
@@ -262,11 +236,8 @@ class NavigationManager(
 
         val totalMin = route.totalTime / 60
         val totalM = route.totalDistance
-        _guidanceMessage.value = buildString {
-            append("${endName}까지 ${totalM}미터, 약 ${totalMin}분 소요됩니다.")
-            if (crosswalkCount > 0) append(" 횡단보도 ${crosswalkCount}개.")
-            append(" 안내를 시작합니다.")
-        }
+        _guidanceMessage.value =
+            "${endName}까지 ${totalM}미터, 약 ${totalMin}분 소요됩니다. 안내를 시작합니다."
 
         return true
     }
@@ -387,21 +358,12 @@ class NavigationManager(
         // 외부 (안드 ML 검출 게이팅 등) 가 collect 할 수 있게 state flow 갱신
         _isInCrosswalkZone.value = isInCrossWalkZone
 
-        // 현재 위치가 속한 segment 찾기 (currentWaypointIndex 직전에 진입한 segment)
-        //   진행 방향: waypoints[currentWaypointIndex-1] → waypoints[currentWaypointIndex]
-        //   해당 segment 는 toWaypointIndex == currentWaypointIndex 인 것.
-        val currentSegment = route.segments.firstOrNull {
-            it.fromWaypointIndex == currentWaypointIndex
-                    || it.toWaypointIndex == currentWaypointIndex
-        }
-
-        //횡단보도 상태 디버그 출력 (segment 정보 포함)
+        //횡단보도 상태 디버그 출력
         _debugMessage.value =
             "횡단보도=$isInCrossWalkZone\n" +
                     "idx=$currentWaypointIndex/${route.waypoints.size}\n" +
                     "wp=${currentWp?.pointType}\n" +
-                    "seg='${currentSegment?.name}' road=${currentSegment?.roadType} " +
-                    "risk=${currentSegment?.riskLevel}\n" +
+                    "roadType=${currentWp?.roadType}\n" +
                     "turnType=${currentWp?.turnType}\n" +
                     "desc=${currentWp?.description}"
         if (isInCrossWalkZone) {
@@ -426,21 +388,17 @@ class NavigationManager(
                             "signals=${trafficSignals.size}\n" +
                             "nearestId=${nearest?.itstId ?: "없음"}\n" +
                             "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
-                            "nearestSignalLat=${nearestSignal.lat}\n" +
-                            "nearestSignalLon=${nearestSignal.lon}\n" +
-                            "교차로 매칭 시도"
+                            "신호제어기 ID=${nearestSignal.itstId}\n" +
+                            "API 호출 시도"
 
-                fetchTrafficSignalData(
-                    signalLat = nearestSignal.lat,
-                    signalLon = nearestSignal.lon
-                )
+                fetchTrafficSignalData(nearestSignal.itstId)
             } else {
                 _debugMessage.value =
                     "횡단보도 감지됨\n" +
                             "signals=${trafficSignals.size}\n" +
                             "nearestId=${nearest?.itstId ?: "없음"}\n" +
                             "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
-                            "30m 이내 신호등 없음"
+                            "30m 이내 신호제어기 없음"
             }
         }
 
@@ -567,71 +525,27 @@ class NavigationManager(
     }
 
 
-    suspend fun fetchTrafficSignalData(
-        signalLat: Double,
-        signalLon: Double
-    ) {
-        _debugMessage.value = "fetchTrafficSignalData 진입"//위치 확인용 임시
-        val crossroadJson = signalApiClient.fetchIntersectionData()
+    private suspend fun fetchTrafficSignalData(itstId: String) {
+        val response = signalApiClient.fetchTrafficSignalData(itstId)
 
-        if (crossroadJson == null) {
-            _debugMessage.value = "교차로 API 실패"
-            return
-        }
+        if (response.status != "ERROR" && response.items.isNotEmpty()) {
+            val currentSignal = response.items.first()
 
-        if (crossroadJson.startsWith("ERROR")) {
-            _debugMessage.value = crossroadJson
-            return
-        }
-
-        val intersections = TrafficIntersectionParser.parse(crossroadJson)
-
-        val nearestIntersection = TrafficIntersectionParser.findNearest(
-            intersections = intersections,
-            lat = signalLat,
-            lon = signalLon,
-            radiusMeters = 100f
-        )
-
-        if (nearestIntersection == null) {
+            //신호 API 디버그
             _debugMessage.value =
-                "근처 교차로 없음\nintersections=${intersections.size}"
-            return
+                "신호 API 성공\nID=${currentSignal.itstId}\n상태=${currentSignal.signalState}\n남은 시간=${currentSignal.remainTime}초"
+
+            //신호등 상태 처리
+            handleSignalUpdate(currentSignal)
+        } else {
+            println("NavManager 신호 데이터를 가져오지 못했습니다.")
         }
-
-        val now = currentTimeMillis()
-
-        val isSameIntersection =
-            nearestIntersection.itstId == lastSignalItstId
-
-        val isCooldownActive =
-            now - lastSignalApiCallTime < signalApiCooldownMs
-
-        if (isSameIntersection && isCooldownActive) {
-            _debugMessage.value = "잔여시간 API 쿨다운 중"
-            return
-        }
-
-        lastSignalItstId = nearestIntersection.itstId
-        lastSignalApiCallTime = now
-
-        val remainJson = signalApiClient.fetchSignalRemainingData(
-            itstId = nearestIntersection.itstId
-        )
-
-        val parsedSignals = remainJson?.let {
-            TrafficSignalRemainingTimeParser.parse(it)
-        } ?: emptyList()
-
-        _debugMessage.value =
-            "교차로 매칭 성공\n" +
-                    "itstId=${nearestIntersection.itstId}\n" +
-                    "name=${nearestIntersection.itstNm}\n" +
-                    "parsedSignals=${parsedSignals.size}\n" +
-                    "잔여시간 API 응답=${if (remainJson != null && !remainJson.startsWith("ERROR")) "성공" else "실패"}\n" +
-                    "rawLength=${remainJson?.length ?: 0}"
     }
 
+    private fun handleSignalUpdate(item: SignalItem) {
+        _debugMessage.value =
+            "현재 신호=${item.signalState}\n남은 시간=${item.remainTime}초"
+    }
     /**
      * 안전한 시계 방향 계산
      * 속도가 너무 낮으면(정지 상태) bearing이 부정확하므로 "전방" 으로 대체
@@ -749,12 +663,7 @@ class NavigationManager(
         const val BASE_DEVIATION_THRESHOLD = 25f    // 기본 이탈 임계값 (m)
         const val MIN_DEVIATION_THRESHOLD = 20f     // 최소 임계값
         const val MAX_DEVIATION_THRESHOLD = 50f     // 최대 임계값
-        const val STATIONARY_SPEED = 0.5f           // 정지 판정 속도 (m/s) — 자세/직진 안내용
-        // 시각장애인은 1.8km/h 미만으로 천천히 걷는 경우가 많아 STATIONARY_SPEED(0.5)로
-        // 이탈을 막으면 잘못된 경로로 가도 재탐색이 안 됨. 이탈 판정 전용으로 더 낮은
-        // 임계값을 둔다(0.1m/s = 거의 정지). iOS CLLocation.speed가 -1(무효)인 경우는
-        // 0으로 coerce되므로 이 값도 같이 걸러진다.
-        const val DEVIATION_STATIONARY_SPEED = 0.1f
+        const val STATIONARY_SPEED = 0.5f           // 정지 판정 속도 (m/s)
         const val BASE_REROUTE_COOLDOWN = 15_000L   // 기본 재탐색 쿨다운 (ms)
         const val MAX_REROUTE_COOLDOWN = 60_000L    // 최대 재탐색 쿨다운 (ms)
         // Kalman 파라미터는 KalmanHeading.kt 내부 companion object 로 이동.
@@ -774,11 +683,8 @@ class NavigationManager(
     ): Boolean {
         val route = currentRoute ?: return false
 
-        // 거의 정지 상태에서만 이탈 판정 억제 (GPS 드리프트 오판 방지).
-        // STATIONARY_SPEED(0.5)보다 낮은 DEVIATION_STATIONARY_SPEED(0.1)을 쓰는 이유:
-        // 시각장애인은 천천히 걸어 0.5m/s 미만으로 이동하는 경우가 많은데, 그 상태에서
-        // 잘못된 길로 가도 재탐색이 안 되는 문제가 있었다.
-        if (speed < DEVIATION_STATIONARY_SPEED) {
+        // 정지 상태: GPS 드리프트로 인한 오판 방지
+        if (speed < STATIONARY_SPEED) {
             consecutiveDeviationCount = 0
             return false
         }
@@ -797,7 +703,6 @@ class NavigationManager(
 
         if (minDist > dynamicThreshold) {
             consecutiveDeviationCount++
-            println("[NavManager] 이탈 감지 ${consecutiveDeviationCount}/$DEVIATION_CONFIRM_COUNT — minDist=${minDist.toInt()}m, threshold=${dynamicThreshold.toInt()}m, speed=${speed}m/s")
         } else {
             consecutiveDeviationCount = 0
         }
@@ -970,34 +875,19 @@ class NavigationManager(
             BASE_REROUTE_COOLDOWN * (1 + consecutiveRerouteCount),
             MAX_REROUTE_COOLDOWN
         )
-        if (now - lastRerouteTime < cooldown) {
-            println("[NavManager] 재탐색 쿨다운 중 — ${(cooldown - (now - lastRerouteTime)) / 1000}초 남음")
-            return
-        }
+        if (now - lastRerouteTime < cooldown) return
         lastRerouteTime = now
         consecutiveRerouteCount++
 
-        println("[NavManager] 🔄 재탐색 시작 — pos=(${currentLat},${currentLon}) → dest=(${destinationLat},${destinationLon})")
-
-        // 같은 메시지 중복 발화 필터에 막히지 않도록 리셋
-        lastSpokenMessage = ""
         speak("경로를 이탈했습니다. 다시 탐색합니다.")
 
-        // 이탈 카운트 리셋 — 재탐색 직후 즉시 다시 이탈 판정되지 않도록
-        consecutiveDeviationCount = 0
-
-        // 입구 좌표(frontLat/Lon)가 있으면 그쪽으로 라우팅 (도착 판정은 실제 POI 기준)
         val success = startNavigation(
             currentLat, currentLon,
             destinationLat, destinationLon,
-            destinationName,
-            frontLat = destinationFrontLat,
-            frontLon = destinationFrontLon
+            destinationName
         )
 
         if (!success) {
-            println("[NavManager] 🔴 재탐색 실패")
-            lastSpokenMessage = ""
             speak("경로를 찾을 수 없습니다. 주변 도움을 요청하세요.")
         }
     }
@@ -1020,9 +910,7 @@ class NavigationManager(
             val roadTransition = getRoadTransitionMessage(nextWaypoint.roadType)
             lastRoadType = nextWaypoint.roadType
 
-            // 이 waypoint 통과 후 진입할 segment — 도로명/거리를 안내에 포함.
-            val nextSegment = route.segmentEnteringFromWaypoint(currentWaypointIndex)
-            val waypointMsg = buildWaypointMessage(nextWaypoint, nextSegment)
+            val waypointMsg = buildWaypointMessage(nextWaypoint)
 
             // 도로 전환 + 기존 안내를 자연스럽게 결합
             val message = when {
@@ -1037,37 +925,16 @@ class NavigationManager(
             }
             currentWaypointIndex++
             lastStraightGuidanceTime = currentTimeMillis()
-        } else {
-            // 사전 안내 거리는 "다음에 도달할 waypoint" 의 종류에 따라 결정.
-            //   CROSSWALK → 50m (횡단보도 — 충분한 준비 시간)
-            //   그 외 KEY → 30m (TURN/STAIRS/DESTINATION 등)
-            // 현재 segment 가 SAFE(순수 보행자도로) 면 사전 안내 자체 생략 — 목표 ① TTS 피로 감소.
-            val currentSegment = route.segments.firstOrNull {
-                it.toWaypointIndex == currentWaypointIndex
-            }
-            val preDist = preAnnounceDistance(nextWaypoint)
-            val suppressForSafe = currentSegment?.riskLevel == RiskLevel.SAFE
-                    && nextWaypoint.pointType != "CROSSWALK"  // 횡단보도 안내는 SAFE 구간이라도 유지
-            if (!suppressForSafe
-                && distToNext <= preDist && isKeyPoint(nextWaypoint)
-                && currentWaypointIndex != lastPreAnnouncedIndex
-            ) {
-                lastPreAnnouncedIndex = currentWaypointIndex
-                val message = "${distToNext.toInt()}미터 앞 ${nextWaypoint.description}"
-                speak(message)
-                // 사전 안내가 나왔으면 직진 타이머 리셋 (중복 방지)
-                lastStraightGuidanceTime = currentTimeMillis()
-            }
+        } else if (distToNext <= 30f && isKeyPoint(nextWaypoint)
+            && currentWaypointIndex != lastPreAnnouncedIndex
+        ) {
+            // 사전 안내: 30m 전에 미리 알림 (기존 20m → GPS 오차 감안 확대)
+            lastPreAnnouncedIndex = currentWaypointIndex
+            val message = "${distToNext.toInt()}미터 앞 ${nextWaypoint.description}"
+            speak(message)
+            // 사전 안내가 나왔으면 직진 타이머 리셋 (중복 방지)
+            lastStraightGuidanceTime = currentTimeMillis()
         }
-    }
-
-    /**
-     * waypoint 종류에 따른 사전 안내 거리 (m).
-     * 횡단보도는 시각장애인에게 가장 중요한 위험 지점이므로 충분한 준비 시간 확보.
-     */
-    private fun preAnnounceDistance(waypoint: Waypoint): Float = when (waypoint.pointType) {
-        "CROSSWALK" -> 50f
-        else        -> 30f
     }
 
     /**
@@ -1169,34 +1036,13 @@ class NavigationManager(
         if (now - lastStraightGuidanceTime < 20_000L) return
         lastStraightGuidanceTime = now
 
-        // 현재 진행 중인 segment (currentWaypointIndex 직전에 진입한 segment).
-        //   진행 방향이 segment 의 마지막을 향하므로 toWaypointIndex == currentWaypointIndex.
-        val currentSegment = route.segments.firstOrNull {
-            it.toWaypointIndex == currentWaypointIndex
-        }
-
-        val message = if (currentSegment != null) {
-            val rounded = roundDistanceForTts(distToNext.toInt())
-            when {
-                currentSegment.name == "출발지" -> "약 ${rounded}미터 더 이동하세요"
-                currentSegment.name == "도착지" -> "도착지까지 약 ${rounded}미터"
-                currentSegment.name == "보행자도로" -> "약 ${rounded}미터 직진"
-                currentSegment.name.isBlank() -> "약 ${rounded}미터 직진"
-                else -> "${currentSegment.name} 방향 약 ${rounded}미터 직진"
-            }
+        val distText = if (distToDestination >= 1000f) {
+            val km = distToDestination / 1000f
+            val rounded = kotlin.math.round(km * 10) / 10
+            "${rounded}킬로"
         } else {
-            // segment 정보 없으면 거리만 안내 (백업)
-            val distText = if (distToDestination >= 1000f) {
-                val km = distToDestination / 1000f
-                val r = kotlin.math.round(km * 10) / 10
-                "${r}킬로"
-            } else {
-                "${distToDestination.toInt()}미터"
-            }
-            "${distText} 직진하세요"
+            "${distToDestination.toInt()}미터"
         }
-
-        speak(message)
     }
 
     // isCrosswalkWaypoint() / isOnCrosswalkSegment() — KMM 마이그레이션으로
@@ -1328,71 +1174,16 @@ class NavigationManager(
         }
     }
 
-    /**
-     * waypoint 도착 시 음성 안내 메시지를 만든다.
-     *
-     * @param waypoint 도착한 waypoint
-     * @param nextSegment 이 waypoint 통과 후 진입할 segment. null 이면 도로명 정보 생략.
-     *
-     *   기본 형식: "{turn 안내}. {다음 도로명 + 거리}"
-     *   예) CROSSWALK + 다음 테헤란로 233m
-     *       → "횡단보도입니다. 직진하세요. 테헤란로 방향 약 230미터 직진"
-     */
-    private fun buildWaypointMessage(
-        waypoint: Waypoint,
-        nextSegment: RouteSegment? = null
-    ): String {
-        val turnMsg = when (waypoint.pointType) {
+    private fun buildWaypointMessage(waypoint: Waypoint): String {
+        return when (waypoint.pointType) {
             "CROSSWALK" -> "횡단보도입니다. ${getTurnDescription(waypoint.turnType)}"
             "TURN" -> getTurnDescription(waypoint.turnType)
             "STAIRS" -> "계단이 있습니다"
             "DESTINATION" -> ""
-            else -> if (isKeyPoint(waypoint)) waypoint.description else ""
+            else -> {
+                if (isKeyPoint(waypoint)) waypoint.description else ""
+            }
         }
-
-        val segMsg = nextSegment?.let { buildSegmentDirectionMessage(it) } ?: ""
-
-        return when {
-            turnMsg.isNotEmpty() && segMsg.isNotEmpty() -> "$turnMsg $segMsg"
-            turnMsg.isNotEmpty() -> turnMsg
-            else -> segMsg
-        }
-    }
-
-    /**
-     * segment 의 도로명 + 남은 거리를 TTS 친화적인 한국어로.
-     *
-     *   "출발지"        → 빈 문자열 (출발 직후엔 도로명 의미 없음)
-     *   "도착지"        → "도착지까지 약 N미터"
-     *   "보행자도로"    → "약 N미터 직진"        (도로명 생략 — 어색)
-     *   빈 문자열       → "약 N미터 직진"
-     *   그 외 도로명    → "{이름} 방향 약 N미터 직진"
-     *
-     *   distance < 20m 이면 안내 생략 (너무 짧으면 노이즈).
-     */
-    private fun buildSegmentDirectionMessage(segment: RouteSegment): String {
-        if (segment.distance < 20) return ""
-        val rounded = roundDistanceForTts(segment.distance)
-        val distText = "약 ${rounded}미터"
-        return when {
-            segment.name == "출발지" -> ""
-            segment.name == "도착지" -> "도착지까지 ${distText}"
-            segment.name == "보행자도로" -> "${distText} 직진"
-            segment.name.isBlank() -> "${distText} 직진"
-            else -> "${segment.name} 방향 ${distText} 직진"
-        }
-    }
-
-    /**
-     * TTS 안내용 거리 라운딩.
-     *   <50m  : m 단위 그대로
-     *   <200m : 10m 단위
-     *   그 외 : 50m 단위
-     */
-    private fun roundDistanceForTts(m: Int): Int = when {
-        m < 50  -> m
-        m < 200 -> ((m + 5) / 10) * 10
-        else    -> ((m + 25) / 50) * 50
     }
 
     private fun isKeyPoint(waypoint: Waypoint): Boolean {
