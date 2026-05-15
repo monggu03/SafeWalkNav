@@ -8,6 +8,7 @@
 //  - ±15° 임계값 초과 시 알림 (시각장애인 좌우 이탈 감지)
 //
 
+
 import Foundation
 import CoreLocation
 import Combine
@@ -123,3 +124,4 @@ extension HeadingProvider: CLLocationManagerDelegate {
         }
     }
 }
+

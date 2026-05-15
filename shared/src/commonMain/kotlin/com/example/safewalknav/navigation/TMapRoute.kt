@@ -9,71 +9,26 @@ package com.example.safewalknav.navigation
 data class TMapRoute(
     val totalDistance: Int,        // 전체 거리 (m)
     val totalTime: Int,            // 전체 소요시간 (초)
-    val waypoints: List<Waypoint>, // 경유 포인트 리스트 (Point feature)
-    val routePoints: List<LatLng> = emptyList(),  // 경로 전체 좌표 (지도 그리기용)
-    val segments: List<RouteSegment> = emptyList() // 구간 단위 정보 (LineString feature)
-) {
-    /**
-     * 주어진 waypoint 인덱스에서 시작하는 segment 반환.
-     * (currentWaypointIndex 통과 후 진입하게 될 segment.)
-     */
-    fun segmentEnteringFromWaypoint(waypointIndex: Int): RouteSegment? =
-        segments.firstOrNull { it.fromWaypointIndex == waypointIndex }
-}
+    val waypoints: List<Waypoint>, // 경유 포인트 리스트
+    val routePoints: List<LatLng> = emptyList()  // 경로 전체 좌표 (지도 그리기용)
+)
 
 /** 위도/경도 쌍 */
 data class LatLng(val lat: Double, val lon: Double)
 
 /**
- * 경로 상의 핵심 안내 포인트 (TMap Point feature 1개).
- * 교차로, 횡단보도, 방향전환 등 안내가 필요한 지점.
- *
- * NOTE: roadType 필드는 backward-compat 용으로 남겨두지만
- *       Point feature 에는 실제 roadType 이 없어 항상 0 으로 채워진다.
- *       구간의 도로 유형이 필요하면 [TMapRoute.segments] 의 [RouteSegment.roadType] 을 사용할 것.
+ * 경로 상의 핵심 안내 포인트
+ * 교차로, 횡단보도, 방향전환 등 안내가 필요한 지점
  */
 data class Waypoint(
     val lat: Double,               // 위도
     val lon: Double,               // 경도
     val turnType: Int,             // 회전 유형 (TMap 코드)
     val description: String,       // 안내 문구 ("우회전", "횡단보도 건넘" 등)
-    val distance: Int,             // 다음 포인트까지 누적 거리 (m, properties.totalDistance)
-    val roadType: Int,             // ⚠️ Point 엔 roadType 없음 — 항상 0. RouteSegment.roadType 사용.
+    val distance: Int,             // 다음 포인트까지 거리 (m)
+    val roadType: Int,             // 도로 유형 (인도/차도 구분)
     val pointType: String          // "TURN", "CROSSWALK", "DESTINATION" 등
 )
-
-/**
- * 두 Waypoint 사이의 경로 구간 (TMap LineString feature 1개).
- * 도로 속성 + 위험도 계산 결과를 담는다.
- */
-data class RouteSegment(
-    val fromWaypointIndex: Int,    // 시작 waypoint 인덱스 (이 segment 진입 직전 통과한 Point)
-    val toWaypointIndex: Int,      // 끝 waypoint 인덱스 (다음에 도달할 Point)
-    val distance: Int,             // 구간 거리 (m, LineString properties.distance)
-    val time: Int,                 // 구간 소요시간 (초, properties.time. 없으면 0)
-    val roadType: Int,             // LineString properties.roadType (TMap 도로유형 코드)
-    val facilityType: Int,         // LineString properties.facilityType. 없으면 -1
-    val name: String,              // 도로명 ("테헤란로", "보행자도로" 등)
-    val points: List<LatLng>,      // 구간 폴리라인 좌표
-    val riskLevel: RiskLevel       // RiskScoreCalculator 산출값
-)
-
-/**
- * 구간 위험도 등급 (3단계).
- *
- * 도시 보행 환경에 맞춘 segment 분류:
- *   SAFE    — 순수 보행자도로 segment. TTS 빈도 낮춰도 됨.
- *   NORMAL  — 차도 인접 인도 (도로명이 있는 segment). 표준 안내.
- *   CAUTION — 예약 (현재 미사용). 향후 자전거도로/공사구간 등 확장용.
- *
- * NOTE: 횡단보도는 segment 의 RiskLevel 이 아니라 waypoint(pointType == "CROSSWALK") 로 판정한다.
- *       "횡단보도 직후 보행자도로 segment" 까지 CAUTION 으로 올리면 SAFE 가 거의 사라지기 때문.
- *       위험한 건 "횡단보도를 건너는 그 순간" 이지 "건넌 후 인도를 걷는 19m" 가 아니다.
- *
- *       계단/육교/지하도 (DANGER 등급) 는 강남역 raw response 에서 미관찰 → 일단 제외.
- *       해당 경로가 관찰되면 다시 추가할 것.
- */
-enum class RiskLevel { SAFE, NORMAL, CAUTION }
 
 /**
  * 목적지 도착 상태

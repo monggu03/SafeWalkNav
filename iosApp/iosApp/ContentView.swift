@@ -52,6 +52,13 @@ struct ContentView: View {
                     Text("상태")
                 }
                 .tag(2)
+            TBFWDemoView(deps: deps)
+                .tabItem {
+                    Image(systemName: "ladybug.fill")
+                    Text("TBFW")
+                }
+                .tag(3)
+
         }
         .onAppear {
             deps.locationTracker.start()
@@ -101,7 +108,6 @@ struct NavigationTab: View {
 
                     SearchSection(searchKeyword: $searchKeyword)
                         .environmentObject(navVM)
-                        .environmentObject(deps)
 
                     if navVM.isNavigating {
                         Button(showMap ? "지도 숨기기" : "지도 보기") {
@@ -218,59 +224,10 @@ struct NavigationStatusCard: View {
 struct SearchSection: View {
     @Binding var searchKeyword: String
     @EnvironmentObject var navVM: NavigationViewModel
-    @EnvironmentObject var deps: AppDependencies
-
-    private var voiceButtonText: String {
-        switch navVM.voiceFlowStage {
-        case .idle:               return "🎤 음성으로 목적지 말하기"
-        case .listening:          return "듣는 중… 말씀하세요"
-        case .searching:          return "검색 중…"
-        case .startingNavigation: return "안내 시작 중…"
-        }
-    }
-
-    private var voiceButtonColor: Color {
-        switch navVM.voiceFlowStage {
-        case .idle:      return .blue
-        case .listening: return .red
-        default:         return .gray
-        }
-    }
 
     var body: some View {
-        // SwiftUI 가 실제로 searchResults 변경을 관찰해 body 를 다시 그리는지 확인하는 로그.
-        // (@Published 가 발화해도 View 가 구독 안 하면 안 찍힘 → 바인딩 끊김 진단용)
-        let _ = print("🖼️ [SearchSection.body] redraw — searchResults.count=\(navVM.searchResults.count) errorMessage=\(navVM.errorMessage ?? "nil")")
-
-        return GroupBox("목적지 검색") {
-            VStack(spacing: 12) {
-                // 시각장애인용 음성 입력 버튼 (큰 면적, 한 번 누르면 자동 안내 시작)
-                Button(action: handleVoiceTap) {
-                    HStack {
-                        Image(systemName: navVM.voiceFlowStage == .listening
-                              ? "mic.fill"
-                              : "mic.circle.fill")
-                            .font(.title)
-                        Text(voiceButtonText)
-                            .font(.headline)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 56)
-                    .foregroundColor(.white)
-                    .background(voiceButtonColor)
-                    .cornerRadius(12)
-                }
-                .accessibilityLabel("음성으로 목적지 말하기")
-                .accessibilityHint("버튼을 누르고 목적지 이름을 말하면 자동으로 안내가 시작됩니다.")
-
-                if navVM.voiceFlowStage == .listening && !deps.stt.partialText.isEmpty {
-                    Text("인식 중: \(deps.stt.partialText)")
-                        .font(.subheadline)
-                        .foregroundColor(.blue)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                Divider()
-
+        GroupBox("목적지 검색") {
+            VStack(spacing: 8) {
                 HStack {
                     TextField("예: 강남역, 스타벅스", text: $searchKeyword)
                         .textFieldStyle(.roundedBorder)
@@ -278,14 +235,6 @@ struct SearchSection: View {
                         Task { await navVM.searchDestination(keyword: searchKeyword) }
                     }
                     .buttonStyle(.borderedProminent)
-                }
-
-                // 검색 결과가 0개면 사용자에게도 보이게 (errorMessage 가 비어있어도 빈 상태 표시)
-                if navVM.searchResults.isEmpty {
-                    Text(navVM.errorMessage ?? "검색 결과가 여기에 표시됩니다")
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 ForEach(Array(navVM.searchResults.prefix(5).enumerated()), id: \.offset) { _, poi in
@@ -307,14 +256,6 @@ struct SearchSection: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private func handleVoiceTap() {
-        if navVM.voiceFlowStage == .listening {
-            navVM.cancelVoiceDestinationFlow()
-        } else if navVM.voiceFlowStage == .idle {
-            navVM.startVoiceDestinationFlow()
         }
     }
 }
@@ -446,7 +387,50 @@ struct StatusTab: View {
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        
                     }
+
+//                    GroupBox("🎯 IMU 자세 (좌표계 진단 모드)") {
+//                        VStack(alignment: .leading, spacing: 6) {
+//                            Text("모니터링 중: \(deps.orientationMonitor.isMonitoring ? "✅" : "❌")")
+//                     
+//                            Divider()
+//                     
+//                            // ⭐ raw 값 (CoreMotion 원본)
+//                            Text("📊 Raw (CoreMotion 원본)")
+//                                .font(.caption)
+//                                .foregroundColor(.gray)
+//                            Text("rawPitch: \(deps.orientationMonitor.rawPitch, specifier: "%.1f")°")
+//                            Text("rawRoll:  \(deps.orientationMonitor.rawRoll, specifier: "%.1f")°")
+//                            Text("rawYaw:   \(deps.orientationMonitor.rawYaw, specifier: "%.1f")°")
+//                     
+//                            Divider()
+//                     
+//                            // ⭐ 중력 벡터 (가장 신뢰할 수 있는 자세 정보)
+//                            Text("🌐 Gravity (자세의 정답지)")
+//                                .font(.caption)
+//                                .foregroundColor(.gray)
+//                            Text("gx: \(deps.orientationMonitor.gravityX, specifier: "%+.2f")")
+//                            Text("gy: \(deps.orientationMonitor.gravityY, specifier: "%+.2f")")
+//                            Text("gz: \(deps.orientationMonitor.gravityZ, specifier: "%+.2f")")
+//                     
+//                            Divider()
+//                     
+//                            // 보정된 값 (진단 모드에서는 raw와 동일)
+//                            Text("🔧 보정된 값 (현재는 raw와 동일)")
+//                                .font(.caption)
+//                                .foregroundColor(.gray)
+//                            Text("Pitch: \(deps.orientationMonitor.pitch, specifier: "%.1f")°")
+//                            Text("Roll:  \(deps.orientationMonitor.roll, specifier: "%.1f")°")
+//                     
+//                            Divider()
+//                     
+//                            Text("가속도 분산: \(deps.orientationMonitor.accelerationVariance, specifier: "%.2f") m/s²")
+//                                .font(.caption)
+//                        }
+//                        .frame(maxWidth: .infinity, alignment: .leading)
+//                        .font(.system(.body, design: .monospaced))   // 숫자 정렬용 monospace
+//                    }
 
                     GroupBox("🔊 TTS") {
                         VStack(alignment: .leading, spacing: 6) {
@@ -502,6 +486,29 @@ struct StatusTab: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    GroupBox("🌊 옵티컬 플로우") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("분석 중: \(deps.opticalFlow.isAnalyzing ? "✅" : "❌")")
+                            if let result = deps.opticalFlow.lastResult {
+                                Text("dx: \(result.averageDx, specifier: "%.2f") px")
+                                Text("dy: \(result.averageDy, specifier: "%.2f") px")
+                                HStack {
+                                    Text("크기: \(result.magnitude, specifier: "%.2f") px")
+                                    if result.isMoving {
+                                        Text("🟢 움직임")
+                                            .foregroundColor(.green)
+                                            .fontWeight(.bold)
+                                    } else {
+                                        Text("⚪ 정지")
+                                            .foregroundColor(.gray)
+                                    }
+                                }
+                            } else {
+                                Text("결과 없음").foregroundColor(.gray)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
                 .padding()
             }
@@ -530,6 +537,32 @@ struct StatusTab: View {
         @unknown default:          return "?"
         }
     }
+    
+//    private func statusText(_ status: OrientationStatus) -> String {
+//        switch status {
+//        case .normal:    return "정상 ✅"
+//        case .warning:   return "경고 ⚠️"
+//        case .dangerous: return "위험 🚨"
+//        }
+//    }
+//     
+//    private func statusColor(_ status: OrientationStatus) -> Color {
+//        switch status {
+//        case .normal:    return .green
+//        case .warning:   return .orange
+//        case .dangerous: return .red
+//        }
+//    }
+//     
+//    private func issueText(_ issue: OrientationIssue) -> String {
+//        switch issue {
+//        case .none:         return "-"
+//        case .pitchTooLow:  return "휴대폰을 너무 아래로 숙임"
+//        case .pitchTooHigh: return "휴대폰을 너무 위로 들음"
+//        case .rollTilted:   return "휴대폰이 좌우로 기울어짐"
+//        case .shaking:      return "휴대폰이 심하게 흔들림"
+//        }
+//    }
 }
 
 #Preview {
