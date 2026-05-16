@@ -1,5 +1,8 @@
 package com.example.safewalknav.navigation
 
+import com.example.safewalknav.navigation.tbfw.NavigatorConfig
+import com.example.safewalknav.navigation.tbfw.RouteAnnotationLogger
+import com.example.safewalknav.navigation.tbfw.RouteAnnotator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -221,6 +224,21 @@ class NavigationManager(
             val mark = if (isCrosswalkWaypoint(wp)) "🚦" else "  "
             println("$mark [$i] type=${wp.pointType} turn=${wp.turnType} road=${wp.roadType} dist=${wp.distance}m desc=${wp.description.take(60)}")
         }
+
+        // RouteAnnotator 사전 분석 결과 로그 — 임계값 튜닝/검증용.
+        // 실제 안내에는 아직 사용하지 않는다 (NavigationManager 는 자체 announceUpcomingCorner 사용).
+        // 지도와 비교해 분류가 맞는지 확인할 수 있게 사람이 읽기 좋은 포맷으로 찍는다.
+        runCatching {
+            val annotated = RouteAnnotator(NavigatorConfig()).annotate(route.waypoints)
+            RouteAnnotationLogger.log(
+                annotated = annotated,
+                routeName = "현재 위치 → ${endName}",
+                totalDistanceM = route.totalDistance,
+            )
+        }.onFailure { e ->
+            println("[NavManager] RouteAnnotator 로그 실패: ${e.message}")
+        }
+
         cachedNearbyPOIs = emptyList()
         cachedAddress = null
         arrivalInfoLoaded = false

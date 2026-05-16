@@ -99,14 +99,16 @@ final class TBFWDemoViewModel: ObservableObject {
         let config = NavigatorConfig.companion.defaults()
 
         // 1. 경로 사전 분석 — RouteAnnotator 가 곡선/회전을 미리 잡아낸다.
+        //    사람이 읽기 좋은 디버그 로그는 RouteAnnotationLogger 가 출력한다.
         let annotated = RouteAnnotator(config: config).annotate(waypoints: routeWaypoints)
         self.annotationCount = annotated.annotations.count
         self.routeWaypoints = routeWaypoints
-        print("[TBFWDemo] RouteAnnotator: \(annotated.annotations.count)개 annotation 발견")
-        for ann in annotated.annotations {
-            print("  - [\(ann.startWaypointIndex)] \(ann.type) \(ann.direction) "
-                  + "@\(Int(ann.distanceFromStartM))m: \(ann.announceMessage)")
-        }
+        RouteAnnotationLogger.shared.log(
+            annotated: annotated,
+            routeName: "TBFW 데모 경로",
+            totalDistanceM: nil,
+            config: config,
+        )
 
         // 2. TrustBasedNavigator 생성 — annotation 도 함께 넘겨 사전 안내 활성화.
         self.navigator = TrustBasedNavigator(
