@@ -11,6 +11,7 @@
 import Foundation
 import AVFoundation
 import Combine
+import UIKit
 
 /// 시각장애인용 음성 안내 매니저
 final class TtsManager: NSObject, ObservableObject {
@@ -18,6 +19,9 @@ final class TtsManager: NSObject, ObservableObject {
     // MARK: - Published State
     /// 현재 음성 출력 중인지 여부 (UI에서 확인 가능)
     @Published private(set) var isSpeaking: Bool = false
+
+    /// VoiceOver가 켜져 있는지 (외부에서 디버그 표시용)
+    @Published private(set) var isVoiceOverRunning: Bool = UIAccessibility.isVoiceOverRunning
 
     // MARK: - Private Properties
     private let synthesizer = AVSpeechSynthesizer()
@@ -36,6 +40,27 @@ final class TtsManager: NSObject, ObservableObject {
         super.init()
         synthesizer.delegate = self
         configureAudioSession()
+        observeVoiceOverChanges()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    private func observeVoiceOverChanges() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(voiceOverStatusChanged),
+            name: UIAccessibility.voiceOverStatusDidChangeNotification,
+            object: nil
+        )
+    }
+
+    @objc private func voiceOverStatusChanged() {
+        DispatchQueue.main.async {
+            self.isVoiceOverRunning = UIAccessibility.isVoiceOverRunning
+            print("[TtsManager] VoiceOver=\(self.isVoiceOverRunning ? "ON" : "OFF")")
+        }
     }
 
     // MARK: - Audio Session 설정
@@ -66,6 +91,18 @@ final class TtsManager: NSObject, ObservableObject {
 
         // 2. 같은 메시지 반복 방지
         if shouldSkipDuplicate(text: text) {
+            return
+        }
+
+        DebugLogger.shared.log("TTS", String(text.prefix(60)))
+
+        // 🆕 VoiceOver가 켜져 있으면 시스템 안내(announcement)로 우회.
+        // AVSpeechSynthesizer와 VoiceOver가 동시에 말하면 음성이 겹치므로
+        // VoiceOver의 자체 큐에 양보한다.
+        if UIAccessibility.isVoiceOverRunning {
+            UIAccessibility.post(notification: .announcement, argument: text)
+            lastSpokenText = text
+            lastSpeakTime = Date()
             return
         }
 

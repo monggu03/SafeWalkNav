@@ -36,6 +36,7 @@ final class AppDependencies: ObservableObject {
         let tts = TtsManager()
         let locationTracker = LocationTracker()
         let headingProvider = HeadingProvider()
+        let stt = SttManager(tts: tts)
         //let orientationMonitor = DeviceOrientationMonitor()
 
         // 2. KMM 매니저 (TMap + T-Data API 키로 초기화)
@@ -56,11 +57,12 @@ final class AppDependencies: ObservableObject {
             trafficSignals: []
         )
 
-        // 3. 통합 ViewModel — orientationMonitor도 주입
+        // 3. 통합 ViewModel — STT까지 주입해서 음성 목적지 입력 지원
         let navigationViewModel = NavigationViewModel(
             tts: tts,
             locationTracker: locationTracker,
             headingProvider: headingProvider,
+            stt: stt,
             //orientationMonitor: orientationMonitor,
             navigationManager: navigationManager
         )
@@ -71,7 +73,7 @@ final class AppDependencies: ObservableObject {
         self.headingProvider = headingProvider
         //self.orientationMonitor = orientationMonitor
         self.navigationManager = navigationManager
-        self.stt = SttManager(tts: tts)
+        self.stt = stt
         // ⭐ 옵티컬 플로우 분석기 먼저 생성
         let opticalFlow = OpticalFlowAnalyzer()
         self.opticalFlow = opticalFlow
