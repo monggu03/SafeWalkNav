@@ -86,6 +86,10 @@ class NavigationManager(
     private var lastStraightGuidanceTime = 0L // 직진 구간 안내 타이머
     private var lastCornerAnnouncedIdx = -1   // 폴리라인 코너 중복 안내 방지
     private var lastRoadType = -1 // 이전 구간 도로 유형 (전환 안내용)
+    // 횡단보도 진입 시점에 "X시 방향으로 횡단보도를 건너세요" 1회 안내용 상태.
+    // 시각장애인이 어느 방향에 횡단보도가 있는지 모르므로 zone 진입 transition 에서 발화.
+    private var wasInCrosswalkZone = false
+    private var lastCrosswalkAnnouncedWpIdx = -1
 
     // ========== Heading Smoothing (Circular Kalman Filter) ==========
     // 알고리즘 본체는 shared/commonMain/.../navigation/KalmanHeading.kt 에 분리됨.
@@ -212,6 +216,8 @@ class NavigationManager(
         currentWaypointIndex = 0
         currentRoutePointIndex = 0
         lastPreAnnouncedIndex = -1
+        wasInCrosswalkZone = false
+        lastCrosswalkAnnouncedWpIdx = -1
         _isNavigating.value = true
         _arrivalState.value = ArrivalState.FAR
         _distanceToDestination.value = Float.MAX_VALUE
@@ -267,6 +273,56 @@ class NavigationManager(
         _guidanceMessage.value = message // 안내 메시지를 업데이트하는 역할
     }
 
+    /**
+     * 횡단보도 zone 진입 시 1회 호출 — 시각장애인이 어느 방향에 횡단보도가 있는지 알 수 있게
+     * "X시 방향으로 횡단보도를 건너세요" 형식으로 발화한다.
+     *
+     * 방향 산출:
+     *   - 횡단보도 waypoint 다음의 waypoint(=건넌 후 도달할 점)를 타겟으로 잡고
+     *     사용자 heading 기준 시계 방향을 구한다.
+     *   - 다음 waypoint 가 없거나 (정지 상태로 heading 부정확하면) "전방" 으로 폴백.
+     *
+     * 한 횡단보도당 한 번만 발화 — `lastCrosswalkAnnouncedWpIdx` 로 중복 방지.
+     */
+    private fun announceCrosswalkDirection(
+        route: TMapRoute,
+        currentLat: Double, currentLon: Double,
+        userBearing: Float, speed: Float,
+    ) {
+        // currentWaypointIndex 부근(현재 ± 직전/직후 2개)에서 CROSSWALK 를 찾는다.
+        // zone 판정은 segment 기반이라 currentWaypointIndex 가 정확히 CROSSWALK 가 아닐 수 있음.
+        val searchStart = maxOf(0, currentWaypointIndex - 1)
+        val searchEnd = minOf(currentWaypointIndex + 3, route.waypoints.size)
+        var crosswalkIdx = -1
+        for (i in searchStart until searchEnd) {
+            if (isCrosswalkWaypoint(route.waypoints[i])) {
+                crosswalkIdx = i
+                break
+            }
+        }
+        if (crosswalkIdx == -1) return  // CROSSWALK waypoint 못 찾음 — zone 오판정 가능성
+        if (crosswalkIdx == lastCrosswalkAnnouncedWpIdx) return
+        lastCrosswalkAnnouncedWpIdx = crosswalkIdx
+
+        // 건너고 나서 갈 다음 waypoint — 횡단 방향의 기준점.
+        val targetWp = route.waypoints.getOrNull(crosswalkIdx + 1)
+
+        val message = if (targetWp == null || speed < 0.3f) {
+            // 정지 상태에서는 GPS bearing 부정확 → 시계방향 안내 무의미.
+            "전방에 횡단보도가 있습니다. 신호를 확인하고 건너세요."
+        } else {
+            val clockDir = getClockDirection(
+                currentLat, currentLon,
+                targetWp.lat, targetWp.lon,
+                userBearing,
+            )
+            "${clockDir} 방향으로 횡단보도를 건너세요. 신호를 확인하세요."
+        }
+
+        // forceRepeat — 직전과 같은 메시지여도(드물지만) 발화되도록.
+        speak(message, forceRepeat = true)
+    }
+
     fun stopNavigation() {
         _isNavigating.value = false
         currentRoute = null
@@ -282,6 +338,8 @@ class NavigationManager(
         lastStraightGuidanceTime = 0L
         lastCornerAnnouncedIdx = -1
         lastRoadType = -1
+        wasInCrosswalkZone = false
+        lastCrosswalkAnnouncedWpIdx = -1
         cachedNearbyPOIs = emptyList()
         cachedAddress = null
         arrivalInfoLoaded = false
@@ -378,6 +436,13 @@ class NavigationManager(
         )
         // 외부 (안드 ML 검출 게이팅 등) 가 collect 할 수 있게 state flow 갱신
         _isInCrosswalkZone.value = isInCrossWalkZone
+
+        // zone 진입(false→true) 시점에 횡단 방향을 1회 안내 — 시각장애인이 어느 쪽에
+        // 횡단보도가 있는지 모르기 때문. 매 update 마다 호출되므로 transition 만 잡는다.
+        if (isInCrossWalkZone && !wasInCrosswalkZone) {
+            announceCrosswalkDirection(route, currentLat, currentLon, userBearing, speed)
+        }
+        wasInCrosswalkZone = isInCrossWalkZone
 
         //횡단보도 상태 디버그 출력
         _debugMessage.value =
