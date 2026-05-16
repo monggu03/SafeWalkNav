@@ -248,6 +248,17 @@ final class NavigationViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
+    /// HeadingProvider 의 drift 알림 — 직선 구간에서 base heading 대비 ±15° 이상 벗어나면 1회 발화.
+    /// option (b) 작업에서 보존: feature/walking-drift 의 쏠림 보정 핵심 동작.
+    private func handleDriftAlertIfNeeded() {
+        guard isNavigating else { return }
+        guard headingProvider.isDrifting else { return }
+
+        let direction = headingProvider.driftDegrees > 0 ? "오른쪽" : "왼쪽"
+        let absDeg = Int(abs(headingProvider.driftDegrees))
+        tts.speak("\(direction)으로 \(absDeg)도 벗어났습니다", priority: .high)
+    }
+
     private func handleRecognizedDestination(_ keyword: String) async {
         voiceFlowStage = .searching
         tts.speak("\(keyword)을(를) 검색합니다.", priority: .normal)
@@ -326,6 +337,9 @@ final class NavigationViewModel: ObservableObject {
                     print("🚦 [CROSSWALK] \(self.isAtCrosswalk) → \(newIsAtCrosswalk)")
                     self.isAtCrosswalk = newIsAtCrosswalk
                 }
+
+                // 7. drift 알림 (HeadingProvider 기반)
+                self.handleDriftAlertIfNeeded()
 
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
