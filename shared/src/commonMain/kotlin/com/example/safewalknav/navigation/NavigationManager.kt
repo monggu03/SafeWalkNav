@@ -254,8 +254,11 @@ class NavigationManager(
 
         val totalMin = route.totalTime / 60
         val totalM = route.totalDistance
-        _guidanceMessage.value =
-            "${endName}까지 ${totalM}미터, 약 ${totalMin}분 소요됩니다. 안내를 시작합니다."
+        _guidanceMessage.value = buildString {
+            append("${endName}까지 ${totalM}미터, 약 ${totalMin}분 소요됩니다.")
+            if (crosswalkCount > 0) append(" 횡단보도 ${crosswalkCount}개.")
+            append(" 안내를 시작합니다.")
+        }
 
         return true
     }
