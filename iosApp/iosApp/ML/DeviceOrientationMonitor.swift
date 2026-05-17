@@ -88,6 +88,8 @@ final class DeviceOrientationMonitor: ObservableObject {
 
     // MARK: - Lifecycle
 
+    /// CoreMotion의 Device Motion 스트림(0.1초 간격) 구독을 시작한다.
+    /// 이미 모니터링 중이거나 디바이스가 지원하지 않으면 조용히 무시.
     func start() {
         guard manager.isDeviceMotionAvailable else {
             print("[OrientationMonitor] Device Motion 사용 불가")
@@ -114,6 +116,7 @@ final class DeviceOrientationMonitor: ObservableObject {
         print("[OrientationMonitor] 모니터링 시작")
     }
 
+    /// 모니터링을 중단하고 가속도 윈도우 버퍼를 비운다.
     func stop() {
         guard isMonitoring else { return }
         manager.stopDeviceMotionUpdates()
@@ -124,6 +127,8 @@ final class DeviceOrientationMonitor: ObservableObject {
 
     // MARK: - Motion Handling
 
+    /// CMDeviceMotion 콜백마다 호출 — raw 각도를 °로 변환하고
+    /// chest-mount 오프셋(86°)을 적용한 뒤, 가속도 분산으로 흔들림까지 평가해 Published에 반영한다.
     private func handleMotionUpdate(_ motion: CMDeviceMotion) {
         // 1. raw 값
         let rawPitchDeg = motion.attitude.pitch * 180.0 / .pi
@@ -229,6 +234,8 @@ final class DeviceOrientationMonitor: ObservableObject {
         return (.normal, .none)
     }
 
+    /// 가속도 크기 샘플의 분산을 계산 — 흔들림 정도 정량화에 사용.
+    /// 샘플이 2개 미만이면 0 반환.
     private func computeVariance(_ samples: [Double]) -> Double {
         guard samples.count >= 2 else { return 0 }
         let mean = samples.reduce(0, +) / Double(samples.count)

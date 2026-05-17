@@ -31,6 +31,12 @@ final class AppDependencies: ObservableObject {
     let navigationViewModel: NavigationViewModel
 
     // MARK: - Init
+    /// 앱 실행 시 한 번만 호출 — 모든 매니저/뷰모델을 같은 인스턴스로 묶어
+    /// 생명주기를 단일화한다. 순서가 중요:
+    /// 1) Swift 네이티브 매니저 생성 (TTS/GPS/heading/STT)
+    /// 2) KMM NavigationManager에 API 키 주입
+    /// 3) 통합 NavigationViewModel 구성
+    /// 4) OpticalFlow → TrafficLightDetector 순으로 카메라 의존성 연결
     init() {
         // 1. Swift native 매니저들
         let tts = TtsManager()

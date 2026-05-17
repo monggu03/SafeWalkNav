@@ -18,6 +18,8 @@ struct HeadingGuideView: View {
     /// state == .ready 도달 시 호출. 데모/실서비스 흐름에서 다음 단계로 넘어갈 때 사용.
     private let onReady: () -> Void
 
+    /// HeadingGuide(StateObject)를 내부에서 생성하며, 출발 전 단계에 필요한
+    /// 위치/첫 waypoint/완료 콜백을 주입받는다.
     init(
         tts: TtsManager,
         currentLocation: GpsLocation,
@@ -97,6 +99,7 @@ struct HeadingGuideView: View {
 
     // MARK: - View Helpers
 
+    /// 현재 guide.state에 맞는 SF Symbol 아이콘을 그린다 (자세 대기/방향 대기/준비 완료).
     private var stateIcon: some View {
         switch guide.state {
         case .waitingForFlatPose:
@@ -108,6 +111,7 @@ struct HeadingGuideView: View {
         }
     }
 
+    /// 상태별 강조 색상 (자세 대기 = 주황, 방향 대기 = 파랑, ready = 초록).
     private var stateColor: Color {
         switch guide.state {
         case .waitingForFlatPose: return .orange
@@ -116,6 +120,7 @@ struct HeadingGuideView: View {
         }
     }
 
+    /// 상태를 한국어 라벨로 변환 (디버그 GroupBox용).
     private var stateText: String {
         switch guide.state {
         case .waitingForFlatPose: return "자세 대기"
@@ -124,6 +129,7 @@ struct HeadingGuideView: View {
         }
     }
 
+    /// 현재 trueHeading을 도(°) 표기로 변환. -1(보정 필요)은 안내 문구로 표시.
     private var headingText: String {
         guide.currentHeading < 0 ? "보정 필요" : "\(Int(guide.currentHeading))°"
     }

@@ -36,6 +36,7 @@ final class TtsManager: NSObject, ObservableObject {
     private let minRepeatInterval: TimeInterval = 3.0
 
     // MARK: - Init
+    /// AVSpeechSynthesizer delegate 연결, 오디오 세션 구성, VoiceOver 상태 옵저버 등록을 한 번에 처리.
     override init() {
         super.init()
         synthesizer.delegate = self
@@ -43,10 +44,12 @@ final class TtsManager: NSObject, ObservableObject {
         observeVoiceOverChanges()
     }
 
+    /// 등록한 NotificationCenter 옵저버를 해제 (메모리 누수 방지).
     deinit {
         NotificationCenter.default.removeObserver(self)
     }
 
+    /// VoiceOver 켜짐/꺼짐 알림을 구독하여 isVoiceOverRunning을 실시간 반영.
     private func observeVoiceOverChanges() {
         NotificationCenter.default.addObserver(
             self,
@@ -56,6 +59,7 @@ final class TtsManager: NSObject, ObservableObject {
         )
     }
 
+    /// VoiceOver 상태 변경 NotificationCenter 콜백 — 메인 스레드에서 published 값을 갱신.
     @objc private func voiceOverStatusChanged() {
         DispatchQueue.main.async {
             self.isVoiceOverRunning = UIAccessibility.isVoiceOverRunning
@@ -64,7 +68,9 @@ final class TtsManager: NSObject, ObservableObject {
     }
 
     // MARK: - Audio Session 설정
-    /// 다른 앱 소리(예: 음악)와 섞여서 재생되도록 설정
+    /// 다른 앱 소리(예: 음악)와 섞여서 재생되도록 설정.
+    /// .playback + .voicePrompt + mixWithOthers/duckOthers 조합으로
+    /// 안내가 나오는 동안만 배경 오디오를 자동 덕킹한다.
     private func configureAudioSession() {
         do {
             let session = AVAudioSession.sharedInstance()
@@ -157,6 +163,7 @@ extension TtsManager {
 
 // MARK: - AVSpeechSynthesizerDelegate
 extension TtsManager: AVSpeechSynthesizerDelegate {
+    /// 발화 시작 시점 — isSpeaking을 true로 갱신해 UI에 반영.
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                            didStart utterance: AVSpeechUtterance) {
         DispatchQueue.main.async {
@@ -164,6 +171,7 @@ extension TtsManager: AVSpeechSynthesizerDelegate {
         }
     }
 
+    /// 발화 정상 종료 시점 — isSpeaking을 false로 되돌린다.
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                            didFinish utterance: AVSpeechUtterance) {
         DispatchQueue.main.async {
@@ -171,6 +179,7 @@ extension TtsManager: AVSpeechSynthesizerDelegate {
         }
     }
 
+    /// stop() 또는 high priority 발화로 인해 중단된 경우의 콜백 — 상태만 초기화.
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
                            didCancel utterance: AVSpeechUtterance) {
         DispatchQueue.main.async {

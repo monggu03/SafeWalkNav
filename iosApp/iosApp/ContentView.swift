@@ -367,6 +367,7 @@ struct StatusTab: View {
         }
     }
 
+    /// CoreLocation 권한 상태(`CLAuthorizationStatus`)를 상태 탭에 표시할 한국어 문자열로 변환.
     private func authText(_ status: CLAuthorizationStatus) -> String {
         switch status {
         case .notDetermined:       return "미정"

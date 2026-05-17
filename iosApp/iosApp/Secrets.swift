@@ -22,6 +22,9 @@ enum Secrets {
 
     // MARK: - Private Helper
 
+    /// Secrets.plist에서 문자열 값을 읽어옴.
+    /// 파일/키/값 중 하나라도 누락되면 fatalError로 즉시 크래시 — 빌드 단계에서
+    /// 잘못된 설정을 빨리 잡아내기 위함 (런타임에 조용히 실패하지 않도록).
     private static func value(forKey key: String) -> String {
         guard let url = Bundle.main.url(forResource: "Secrets", withExtension: "plist"),
               let data = try? Data(contentsOf: url),

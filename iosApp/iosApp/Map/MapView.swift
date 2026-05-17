@@ -73,6 +73,9 @@ struct MapView: View {
 
     // MARK: - Camera Control
 
+    /// 현재 위치와 경로 상황에 맞춰 지도 카메라를 재배치.
+    /// 경로가 2점 이상이면 경로 전체가 보이도록, 아니면 현재 위치를 중심으로 좁게 줌인.
+    /// onAppear와 currentLocation 변경 시 호출된다.
     private func updateCamera() {
         guard let location = currentLocation else { return }
 
@@ -90,7 +93,9 @@ struct MapView: View {
         }
     }
 
-    /// 좌표 배열을 모두 포함하는 MKCoordinateRegion 계산
+    /// 좌표 배열을 모두 포함하는 MKCoordinateRegion을 계산.
+    /// min/max 위경도로 bounding box를 만든 뒤 20% 여유를 더해 가장자리 잘림을 방지한다.
+    /// 좌표가 비어 있으면 서울 시청을 기본 fallback으로 사용.
     private func regionThatFits(_ coordinates: [CLLocationCoordinate2D]) -> MKCoordinateRegion {
         guard !coordinates.isEmpty else {
             return MKCoordinateRegion(

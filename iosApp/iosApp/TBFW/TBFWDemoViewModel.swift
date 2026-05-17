@@ -79,6 +79,8 @@ final class TBFWDemoViewModel: ObservableObject {
 
     // MARK: - Init
 
+    /// 위치/방위/TTS 의존성을 주입받아 ViewModel을 구성한다.
+    /// tts는 옵셔널 — nil이면 사전 안내(annotation)는 콘솔 로그로만 남는다.
     init(
         locationTracker: LocationTracker,
         headingProvider: HeadingProvider,

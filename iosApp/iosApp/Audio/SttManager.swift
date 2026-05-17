@@ -49,6 +49,8 @@ final class SttManager: ObservableObject {
     private let maxDuration: TimeInterval = 15.0
 
     // MARK: - Init
+    /// 지정 로케일(기본 ko-KR)로 SFSpeechRecognizer를 만들고 TTS 참조를 보관.
+    /// AppDependencies가 STT/TTS를 동시에 만들 때 순환 의존 문제로 tts는 nil 가능.
     init(localeIdentifier: String = "ko-KR", tts: TtsManager? = nil) {
         self.speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: localeIdentifier))
         self.tts = tts
@@ -131,6 +133,9 @@ final class SttManager: ObservableObject {
     }
 
     // MARK: - 내부: 인식 시작
+    /// AudioEngine에 마이크 탭을 설치해 SFSpeechAudioBufferRecognitionRequest로 흘려보내고
+    /// recognitionTask 콜백에서 partial/final 결과를 처리한다.
+    /// 가능한 경우 온디바이스 인식 사용 (오프라인 + 프라이버시).
     private func beginRecognition(with recognizer: SFSpeechRecognizer) throws {
         // 이전 task 정리
         recognitionTask?.cancel()
@@ -186,6 +191,8 @@ final class SttManager: ObservableObject {
     }
 
     // MARK: - 오디오 세션 관리
+    /// 오디오 세션을 STT 녹음 모드(.record/.measurement/.duckOthers)로 전환.
+    /// .measurement는 음성 인식 정확도에 최적화된 모드.
     private func configureAudioSessionForRecording() throws {
         let session = AVAudioSession.sharedInstance()
         // .record + .measurement = STT 인식률에 최적화된 조합
@@ -194,6 +201,7 @@ final class SttManager: ObservableObject {
         try session.setActive(true, options: .notifyOthersOnDeactivation)
     }
 
+    /// STT 종료 후 TTS 재생을 위해 .playback 카테고리로 되돌린다.
     private func configureAudioSessionForPlayback() throws {
         // STT 종료 후 TTS가 다시 말할 수 있도록 .playback으로 복귀
         let session = AVAudioSession.sharedInstance()
@@ -202,6 +210,8 @@ final class SttManager: ObservableObject {
     }
 
     // MARK: - 타이머
+    /// 무음 타이머(5초)와 최대 듣기 타이머(15초)를 동시에 가동.
+    /// 사용자가 말이 없거나 인식이 끝나지 않을 때 자동 종료 보장.
     private func startTimers() {
         resetSilenceTimer()
         // 최대 듣기 시간 — 도달 시 강제 종료
@@ -213,6 +223,8 @@ final class SttManager: ObservableObject {
         }
     }
 
+    /// 사용자 발화가 감지될 때마다 호출 — 무음 타이머를 5초로 재설정한다.
+    /// 타이머 만료 시 partial 결과가 있다면 그걸 final로 송출.
     private func resetSilenceTimer() {
         silenceTimer?.invalidate()
         silenceTimer = Timer.scheduledTimer(withTimeInterval: silenceTimeout, repeats: false) { [weak self] _ in
@@ -227,6 +239,8 @@ final class SttManager: ObservableObject {
     }
 
     // MARK: - 정리
+    /// 타이머/오디오 엔진/recognitionTask/buffer tap을 모두 정리하고 partialText를 비운다.
+    /// stopListening과 startListening 실패 경로 양쪽에서 호출되는 공통 해제 루틴.
     private func cleanup() {
         silenceTimer?.invalidate()
         silenceTimer = nil
@@ -245,6 +259,8 @@ final class SttManager: ObservableObject {
         partialText = ""
     }
 
+    /// 인스턴스 소멸 시 오디오 엔진만 정지.
+    /// deinit는 nonisolated라 main-actor 격리 cleanup()을 직접 호출할 수 없다.
     deinit {
         // deinit는 nonisolated. cleanup은 main actor 격리이므로 직접 호출 불가.
         // 인스턴스 종료 시점엔 task가 곧 정리되므로 여기서는 엔진 정지만.

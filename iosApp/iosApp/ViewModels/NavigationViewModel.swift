@@ -74,6 +74,8 @@ final class NavigationViewModel: ObservableObject {
     private var pollCount: Int = 0
 
     // MARK: - Init
+    /// shared(KMM)의 `NavigationManager`와 iOS 센서/음성 매니저를 주입받아 ViewModel을 구성.
+    /// 생성 즉시 위치/heading/STT 바인딩과 KMM 상태 폴링을 시작한다.
     init(
         tts: TtsManager,
         locationTracker: LocationTracker,
@@ -96,12 +98,15 @@ final class NavigationViewModel: ObservableObject {
         startPollingNavigationState()
     }
 
+    /// ViewModel이 해제될 때 KMM 상태 폴링 Task를 정리한다 (Combine 구독은 `cancellables`가 자동 해제).
     deinit {
         pollingTask?.cancel()
     }
 
     // MARK: - Public API
 
+    /// 현재 GPS 위치 기준 반경 5km 안에서 키워드로 POI를 검색하고 `searchResults`에 채운다.
+    /// 위치가 없거나 KMM 검색이 실패하면 `errorMessage`에 사유를 기록한다.
     func searchDestination(keyword: String) async {
         do {
             guard let loc = locationTracker.currentLocation else {
@@ -121,6 +126,9 @@ final class NavigationViewModel: ObservableObject {
         }
     }
 
+    /// 선택한 POI로 KMM 안내를 시작한다.
+    /// 경로 생성에 성공하면 setBaseHeading()을 즉시 부르지 않고, 경로 첫 segment 방향을
+    /// 사용자가 향할 때까지 캘리브레이션 단계를 거친 뒤 일반 안내로 진입한다.
     func startNavigation(to poi: POIResult) async {
         guard let currentLoc = locationTracker.currentLocation else {
             self.errorMessage = "현재 위치를 알 수 없습니다"
@@ -164,6 +172,7 @@ final class NavigationViewModel: ObservableObject {
         }
     }
 
+    /// 안내를 중단하고 관련 상태(heading base, 캘리브레이션, TTS, 음성 단계, 검색 결과)를 모두 초기화.
     func stopNavigation() {
         navigationManager.stopNavigation()
         headingProvider.clearBaseHeading()
@@ -256,6 +265,8 @@ final class NavigationViewModel: ObservableObject {
         print("🟢 [BIND] 구독 등록 완료, cancellables 개수: \(cancellables.count)")
     }
 
+    /// 나침반 heading을 KMM에 전달하기 위한 자리. 현재는 compass 기반 쏠림 보정을
+    /// shared 측에서 비활성화했기 때문에 본문이 비어 있다 (의도적 no-op).
     private func bindHeadingToNavigation() {
         // ⚠️ Compass 기반 쏠림 비활성화 — shared 쪽 주석 처리와 연동
             // headingProvider.$currentHeading
@@ -286,6 +297,8 @@ final class NavigationViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
+    /// STT가 인식한 키워드로 POI 검색을 돌리고 결과 화면(.results)으로 전환.
+    /// 결과가 비면 idle로 돌아가 다시 말하도록 TTS로 안내한다.
     private func handleRecognizedDestination(_ keyword: String) async {
         voiceFlowStage = .searching
         DebugLogger.shared.log("VOICE", "검색 키워드: \(keyword)")
@@ -311,6 +324,8 @@ final class NavigationViewModel: ObservableObject {
         )
     }
 
+    /// KMM의 `StateFlow`를 SwiftUI에서 직접 구독할 수 없어 200ms 간격으로 폴링해 `@Published`로 미러링.
+    /// 안내 메시지, 도착 단계, 거리, 횡단보도 여부, drift를 한 사이클 안에서 모두 갱신한다.
     private func startPollingNavigationState() {
         pollingTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
@@ -381,6 +396,8 @@ final class NavigationViewModel: ObservableObject {
 
     // MARK: - Side Effects
 
+    /// KMM의 안내 메시지가 바뀔 때마다 호출 — 같은 문장 반복 발화를 막고,
+    /// 캘리브레이션 중이면 발화를 잠시 미룬다. 도착 메시지는 우선순위를 높여 읽는다.
     private func handleGuidanceChange(_ message: String) {
         guard !message.isEmpty else { return }
         guard message != lastSpokenGuidance else { return }
@@ -393,6 +410,8 @@ final class NavigationViewModel: ObservableObject {
         tts.speak(message, priority: priority)
     }
 
+    /// drift(경로 이탈) 음성 알림 훅. 사용자 결정에 따라 현재는 무음으로 비활성화 —
+    /// 시각 표시는 `headingProvider.isDrifting`을 통해 ContentView가 직접 사용한다.
     private func handleDriftAlertIfNeeded() {
         // 사용자 결정: 걷는 중 drift 음성 알림은 silently 끔
         // (시각 표시는 ContentView 에서 headingProvider.isDrifting 으로 그대로 노출)
@@ -401,6 +420,8 @@ final class NavigationViewModel: ObservableObject {
 
     // MARK: - 횡단보도 감지
 
+    /// KMM의 debugMessage 문자열에서 "횡단보도=true" 토큰을 찾아 현재 횡단보도 위인지 판별.
+    /// (전용 StateFlow를 추가하지 않고 디버그 메시지를 재사용하는 임시 방식)
     private func parseCrosswalkFromDebugMessage() -> Bool {
         guard let debug = navigationManager.debugMessage.value as? String else {
             return false
@@ -448,6 +469,8 @@ final class NavigationViewModel: ObservableObject {
         case timedOut   // 10초 지남 — 그냥 현재 방향으로 base 잡고 진행
     }
 
+    /// 캘리브레이션 종료 — 현재 heading을 base로 고정하고, 정렬됐는지/타임아웃됐는지에 따라
+    /// 다른 안내 멘트를 읽어준다. 대기 중이던 가이던스가 있다면 한 번 발화한다.
     private func finishCalibration(reason: CalibrationFinishReason) {
         cancelCalibration()
         headingProvider.setBaseHeading()
@@ -470,6 +493,7 @@ final class NavigationViewModel: ObservableObject {
         }
     }
 
+    /// 진행 중인 캘리브레이션 구독/타임아웃 Task/타깃 bearing을 모두 해제 (재시작·중단 공통 정리).
     private func cancelCalibration() {
         calibrationCancellable?.cancel()
         calibrationCancellable = nil

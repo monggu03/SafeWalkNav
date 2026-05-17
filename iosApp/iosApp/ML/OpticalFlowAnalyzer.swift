@@ -85,6 +85,7 @@ final class OpticalFlowAnalyzer: ObservableObject, @unchecked Sendable {
     }
 
     /// 분석 상태 초기화 (탭 전환, 횡단보도 벗어남 등). 어느 스레드에서 호출해도 안전.
+    /// 이전 프레임 캐시를 비우고 published 상태도 메인 스레드에서 리셋한다.
     func reset() {
         processingQueue.async { [weak self] in
             guard let self = self else { return }
@@ -101,6 +102,9 @@ final class OpticalFlowAnalyzer: ObservableObject, @unchecked Sendable {
 
     // MARK: - Internal: processingQueue에서만 호출됨
 
+    /// 실제 분석 본체. processingQueue 위에서 직렬로 실행되며,
+    /// minIntervalSeconds 이내 재호출은 스킵하고 첫 프레임은 캐싱만 한다.
+    /// 결과/플래그 업데이트는 MainActor로 hop해서 SwiftUI에 안전하게 전달.
     private func performAnalysis(pixelBuffer: CVPixelBuffer, roi: CGRect?) {
         let now = Date()
         guard now.timeIntervalSince(lastAnalysisTime) >= minIntervalSeconds else {
@@ -145,6 +149,9 @@ final class OpticalFlowAnalyzer: ObservableObject, @unchecked Sendable {
     
     // MARK: - Core Computation
 
+    /// 두 프레임 사이의 dense optical flow를 Vision으로 계산한 뒤
+    /// ROI 평균값으로 요약한 결과를 반환. Vision 호출이 실패하거나
+    /// 관측치가 없으면 nil.
     private func computeOpticalFlow(
         from previous: CVPixelBuffer,
         to current: CVPixelBuffer,
@@ -170,7 +177,9 @@ final class OpticalFlowAnalyzer: ObservableObject, @unchecked Sendable {
         return averageFlow(in: observation.pixelBuffer, roi: roi)
     }
 
-    /// 플로우 버퍼의 ROI 영역 평균 (dx, dy) 계산
+    /// 플로우 버퍼의 ROI 영역 평균 (dx, dy) 계산.
+    /// 픽셀 포맷은 채널당 Float32 2개(dx, dy)이므로 raw 포인터로 직접 순회한다.
+    /// magnitude > movementThreshold이면 isMoving=true로 표시.
     private func averageFlow(in flowBuffer: CVPixelBuffer, roi: CGRect?) -> OpticalFlowResult? {
 
         CVPixelBufferLockBaseAddress(flowBuffer, .readOnly)
@@ -222,7 +231,8 @@ final class OpticalFlowAnalyzer: ObservableObject, @unchecked Sendable {
         )
     }
 
-    /// 정규화 ROI(0~1) → 픽셀 인덱스 범위
+    /// 정규화 ROI(0~1) → 픽셀 인덱스 범위.
+    /// roi가 nil이거나 비정상 범위면 전체 프레임으로 폴백.
     private func pixelRange(
         for roi: CGRect?,
         width: Int,

@@ -60,6 +60,7 @@ final class HeadingGuide: NSObject, ObservableObject {
 
     // MARK: - Init
 
+    /// TTS와 임계값 설정(NavigatorConfig)을 외부에서 주입. config 기본값은 KMM의 defaults().
     init(tts: TtsManager, config: NavigatorConfig = NavigatorConfig.companion.defaults()) {
         self.tts = tts
         self.config = config
@@ -178,10 +179,12 @@ final class HeadingGuide: NSObject, ObservableObject {
 private final class HeadingDelegate: NSObject, CLLocationManagerDelegate {
     private let onHeading: (Double) -> Void
 
+    /// trueHeading 값을 받을 콜백을 저장. HeadingGuide가 약한 참조로 다시 메인 액터에 디스패치.
     init(onHeading: @escaping (Double) -> Void) {
         self.onHeading = onHeading
     }
 
+    /// CLLocationManager가 새 방향 정보를 통보할 때 호출되는 표준 delegate 메서드.
     func locationManager(_ manager: CLLocationManager,
                          didUpdateHeading newHeading: CLHeading) {
         // trueHeading 사용 — 진북 기준. magnetic 은 자북 보정이 필요해 부정확.

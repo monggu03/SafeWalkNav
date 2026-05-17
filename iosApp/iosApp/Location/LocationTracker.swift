@@ -33,6 +33,8 @@ final class LocationTracker: NSObject, ObservableObject {
     private let manager = CLLocationManager()
 
     // MARK: - Init
+    /// CLLocationManager를 도보 내비게이션에 맞게 구성:
+    /// 최고 정확도 + 1m 단위 업데이트 + fitness activity (배터리/정확도 균형).
     override init() {
         super.init()
         manager.delegate = self
@@ -67,6 +69,8 @@ final class LocationTracker: NSObject, ObservableObject {
     }
 
     // MARK: - Private Helpers
+    /// 실제 GPS 업데이트 시작 + 추적 플래그 on.
+    /// `start()`와 권한 변경 콜백 양쪽에서 호출되므로 분리.
     private func startUpdating() {
         manager.startUpdatingLocation()
         isTracking = true
@@ -94,7 +98,8 @@ extension LocationTracker: CLLocationManagerDelegate {
         }
     }
 
-    /// 새 위치가 들어올 때마다 호출
+    /// 새 위치가 들어올 때마다 호출.
+    /// CLLocation → KMM `GpsLocation`으로 변환해 publish (Android와 공통 모델 사용).
     func locationManager(_ manager: CLLocationManager,
                          didUpdateLocations locations: [CLLocation]) {
         guard let clLocation = locations.last else { return }
@@ -109,7 +114,7 @@ extension LocationTracker: CLLocationManagerDelegate {
         }
     }
 
-    /// 에러 발생 시
+    /// 에러 발생 시 — 권한 거부/GPS 비활성 등. 현재는 로그만 남기고 계속 시도.
     func locationManager(_ manager: CLLocationManager,
                          didFailWithError error: Error) {
         print("[LocationTracker] 위치 업데이트 실패: \(error.localizedDescription)")

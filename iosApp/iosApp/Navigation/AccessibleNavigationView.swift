@@ -61,6 +61,8 @@ struct AccessibleNavigationView: View {
         case idle, listening, searching, results, navigating
     }
 
+    /// 현재 ViewModel 상태를 풀스크린 화면 단계 하나로 환산.
+    /// 안내 중이면 무조건 .navigating, 그 외에는 voiceFlowStage + 검색 결과 유무로 결정.
     private var screenState: ScreenState {
         if navVM.isNavigating { return .navigating }
         switch navVM.voiceFlowStage {
@@ -73,6 +75,7 @@ struct AccessibleNavigationView: View {
         }
     }
 
+    /// screenState에 따라 다섯 가지 풀스크린 뷰 중 하나를 그린다.
     @ViewBuilder
     private var stateContent: some View {
         switch screenState {
@@ -86,23 +89,26 @@ struct AccessibleNavigationView: View {
 
     // MARK: - IDLE
 
+    /// 시작 화면: 화면 전체가 큰 안내문 + STT 트리거 버튼 역할.
+    /// VoiceOver ON이면 더블탭, OFF면 단순 탭으로 음성 흐름 시작.
     private var idleView: some View {
-        Text("화면을 2초간\n길게 눌러주세요")
+        Text("화면을 두 손가락으로\n두 번 터치하세요")
             .font(.system(size: 56, weight: .bold))
             .foregroundColor(.yellow)
             .multilineTextAlignment(.center)
             .padding()
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
-            // VoiceOver OFF: 2초 길게 누르면 STT
-            .onLongPressGesture(minimumDuration: 2.0) {
-                DebugLogger.shared.log("GESTURE", "long-press → start STT")
+            // VoiceOver OFF: 단순 탭으로 STT (개발/테스트용 폴백)
+            .onTapGesture {
+                guard !UIAccessibility.isVoiceOverRunning else { return }
+                DebugLogger.shared.log("GESTURE", "tap → start STT")
                 navVM.startVoiceDestinationFlow()
             }
             // VoiceOver ON: 한 번 탭으로 포커스, 두 번 탭으로 활성화
             .accessibilityElement()
             .accessibilityLabel("음성 안내 시작")
-            .accessibilityHint("두 번 탭하여 목적지를 말씀하세요. 또는 두 손가락으로 더블탭하세요.")
+            .accessibilityHint("두 손가락으로 두 번 터치하면 목적지를 말할 수 있습니다.")
             .accessibilityAddTraits(.isButton)
             .accessibilityAction {
                 DebugLogger.shared.log("GESTURE", "VoiceOver activate → start STT")
@@ -112,6 +118,7 @@ struct AccessibleNavigationView: View {
 
     // MARK: - LISTENING
 
+    /// STT 청취 중 화면: 빨간 마이크 아이콘, 실시간 partial 텍스트, 취소 버튼.
     private var listeningView: some View {
         VStack(spacing: 24) {
             Image(systemName: "mic.fill")
@@ -151,6 +158,7 @@ struct AccessibleNavigationView: View {
 
     // MARK: - SEARCHING
 
+    /// 목적지 검색 중 로딩 화면 (스피너 + "검색 중…" 텍스트).
     private var searchingView: some View {
         VStack(spacing: 24) {
             ProgressView()
@@ -167,6 +175,8 @@ struct AccessibleNavigationView: View {
 
     // MARK: - RESULTS (3 stacked yellow buttons)
 
+    /// POI 검색 결과 상위 3개를 화면을 꽉 채우는 노란 버튼으로 세로 적층.
+    /// 더블탭하면 해당 POI로 안내 시작.
     private var resultsView: some View {
         VStack(spacing: 2) {
             ForEach(Array(navVM.searchResults.prefix(3).enumerated()), id: \.offset) { idx, poi in
@@ -199,6 +209,7 @@ struct AccessibleNavigationView: View {
 
     // MARK: - NAVIGATING
 
+    /// 안내 진행 화면: 안내 메시지, 남은 거리, drift(경로 이탈) 경고, 종료 버튼.
     private var navigatingView: some View {
         VStack(spacing: 20) {
             Spacer()
@@ -248,6 +259,8 @@ struct AccessibleNavigationView: View {
 
     // MARK: - Helpers
 
+    /// 남은 거리를 "N m" 문자열로 포맷. 무한대/NaN/100km 초과면 "--m" 표시
+    /// (안내 초기 거리 미계산 시점 가드).
     private var distanceText: String {
         let d = navVM.distanceToDestination
         if d.isInfinite || d.isNaN || d > 100_000 {
@@ -256,6 +269,7 @@ struct AccessibleNavigationView: View {
         return "\(Int(d))m"
     }
 
+    /// 현재 위치에서 POI까지 직선거리(미터). 위치 미확보면 0.
     private func distanceM(to poi: POIResult) -> Int {
         guard let loc = deps.locationTracker.currentLocation else { return 0 }
         let from = CLLocation(latitude: loc.latitude, longitude: loc.longitude)
@@ -263,6 +277,9 @@ struct AccessibleNavigationView: View {
         return Int(from.distance(from: to))
     }
 
+    /// VoiceOver Magic Tap(두 손가락 더블탭) 핸들러.
+    /// 현재 단계에 따라 안내 시작/중단/취소/재시작을 적절히 분기.
+    /// 결과 화면에서는 흐름을 리셋하지 않고 안내만 들려준다(선택권 유지).
     private func handleMagicTap() {
         DebugLogger.shared.log("GESTURE", "MagicTap (stage=\(navVM.voiceFlowStage))")
         switch navVM.voiceFlowStage {
@@ -274,7 +291,15 @@ struct AccessibleNavigationView: View {
             }
         case .listening:
             navVM.cancelVoiceDestinationFlow()
-        case .searching, .results, .startingNavigation:
+        case .results:
+            // 결과 화면에서는 흐름을 리셋하지 않음.
+            // 사용자는 한 손가락으로 스와이프해서 원하는 곳을 고른 뒤 두 번 탭하면 됨.
+            deps.tts.speak(
+                "원하는 곳을 한 손가락으로 탐색한 뒤 두 번 탭하세요.",
+                priority: .high
+            )
+        case .searching, .startingNavigation:
+            // 검색/시작 중에는 사용자가 다시 말하려는 의도로 간주 → 흐름 재시작
             navVM.cancelVoiceDestinationFlow()
             navVM.startVoiceDestinationFlow()
         }

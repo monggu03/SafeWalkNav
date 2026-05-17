@@ -43,6 +43,8 @@ final class HeadingProvider: NSObject, ObservableObject {
     private var baseHeading: Double?
 
     // MARK: - Init
+    /// CLLocationManager를 나침반 전용으로 설정 (위치 업데이트는 별도 트래커가 처리).
+    /// headingFilter 1° = 미세한 떨림은 무시하고 1° 단위로만 콜백.
     override init() {
         super.init()
         manager.delegate = self
@@ -51,7 +53,7 @@ final class HeadingProvider: NSObject, ObservableObject {
 
     // MARK: - Public API
 
-    /// heading 추적 시작
+    /// heading 추적 시작. 기기에 자기 센서가 없으면(시뮬레이터 등) 조용히 무시.
     func start() {
         guard CLLocationManager.headingAvailable() else {
             print("[HeadingProvider] 이 기기는 나침반을 지원하지 않음")
@@ -62,7 +64,7 @@ final class HeadingProvider: NSObject, ObservableObject {
         print("[HeadingProvider] heading 추적 시작")
     }
 
-    /// heading 추적 중단
+    /// heading 추적 중단 (내비게이션 종료 시).
     func stop() {
         manager.stopUpdatingHeading()
         isTracking = false
@@ -78,7 +80,8 @@ final class HeadingProvider: NSObject, ObservableObject {
         print("[HeadingProvider] base heading 설정: \(currentHeading)°")
     }
 
-    /// base heading 초기화 (커브/회전 시점에 호출)
+    /// base heading 초기화 (커브/회전 시점에 호출).
+    /// 회전 중에는 drift 판정이 의미 없으므로 hasBaseHeading=false로 비활성화.
     func clearBaseHeading() {
         baseHeading = nil
         hasBaseHeading = false
@@ -102,6 +105,8 @@ final class HeadingProvider: NSObject, ObservableObject {
 // MARK: - CLLocationManagerDelegate
 extension HeadingProvider: CLLocationManagerDelegate {
 
+    /// 새 heading 콜백 — magneticHeading만 사용 (실내에서도 동작).
+    /// base가 설정된 상태에서만 drift를 계산하고 임계값 초과 시 isDrifting을 true로.
     func locationManager(_ manager: CLLocationManager,
                          didUpdateHeading newHeading: CLHeading) {
         // magneticHeading: 자기 북쪽 기준 (실시간 사용 가능)
