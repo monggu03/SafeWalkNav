@@ -1,4 +1,4 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.walking
 
 /**
  * Heading 분석용 CSV 로그 인터페이스.

@@ -1,4 +1,4 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.geo
 
 import kotlin.math.PI
 import kotlin.math.atan2

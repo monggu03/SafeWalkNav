@@ -1,5 +1,6 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.geo
 
+import com.example.safewalknav.navigation.tmap.LatLng
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sqrt
