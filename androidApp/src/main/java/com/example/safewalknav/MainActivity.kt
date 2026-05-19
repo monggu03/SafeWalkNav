@@ -41,7 +41,6 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -55,8 +54,6 @@ import com.example.safewalknav.navigation.NavigationManager
 import com.example.safewalknav.navigation.POIResult
 import com.example.safewalknav.navigation.TMapApiClient
 import com.example.safewalknav.navigation.toGpsLocation
-import com.example.safewalknav.navigation.NavigationConstants
-import com.example.safewalknav.ml.WalkingLeanAnalyzer // OpenCV 기반 보행 쏠림 분석기 임포트
 import com.google.android.gms.common.api.ResolvableApiException
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationServices
@@ -66,12 +63,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -175,15 +167,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // 2차 (PR-3, 김수영): ImageAnalysis use case 추가 → 신호등 detection + 횡단보도 줄무늬.
     private var cameraProvider: ProcessCameraProvider? = null
 
-// ==================== 카메라 및 비전 쏠림 (PR-AI) ====================
-
-    private var analysisExecutor: ExecutorService? = null
-
-    // 비전 기반 보행 쏠림 누적 변수 및 타이머
-    private var cvLeanAccumulator = 0
-    private var lastGuidanceTime: Long = 0L
-    private val guidanceCooldownMs: Long = 5000L
-
     // ==================== 진동 / 효과음 ====================
 
     private lateinit var vibrator: Vibrator
@@ -217,12 +200,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var currentAzimuth = 0f
     private val magnetometerAvailable: Boolean
         get() = magnetometer != null
-
-    // WalkingDiagnostic 제거 후 내부에 직접 유지할 센서 방위각 이력 버퍼
-    private val azimuthHistory = mutableListOf<Float>()
-    private val maxHistory = NavigationConstants.MAX_DIAGNOSTIC_HISTORY
-    private val leanThreshold = NavigationConstants.LEAN_THRESHOLD
-    private var sensorLeanAccumulator = 0
 
     // ==================== TTS 상태 ====================
 
@@ -306,55 +283,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     if (az < 0) az += 360f
                     val delta = ((az - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.15f * delta + 360f) % 360f
-
-                    if (::navigationManager.isInitialized) {
-                        navigationManager.updateCompassHeading(currentAzimuth, now)
-                    }
+                    navigationManager.updateCompassHeading(currentAzimuth, now)
                 }
-
-                // WalkingDiagnostic 제거에 따라 인라인으로 센서 기반 쏠림 분석 수행
-                if (appState == AppState.NAVIGATING) {
-                    processSensorLeanAnalysis(currentAzimuth, now)
-                }
+                // 현재 시스템 시간을 찍어서 NavigationManager에 전달
+                navigationManager.updateCompassHeading(currentAzimuth, now)
             }
         }
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-    }
-    /**
-     * 기존 WalkingDiagnostic 소스 기능을 수용하여 센서 기반 쏠림을 진단합니다.
-     */
-    private fun processSensorLeanAnalysis(azimuth: Float, currentTime: Long) {
-        azimuthHistory.add(azimuth)
-        if (azimuthHistory.size > maxHistory) {
-            azimuthHistory.removeAt(0)
-        }
-
-
-        val averageAzimuth = azimuthHistory.takeLast(10).average().toFloat()
-        val targetBearing = navigationManager.destinationLat.toFloat() // 목적지 방향 추종 기준 분기 정책 활용
-
-        var angleDiff = targetBearing - averageAzimuth
-        while (angleDiff > 180f) angleDiff -= 360f
-        while (angleDiff < -180f) angleDiff += 360f
-
-        if (currentTime - lastGuidanceTime >= guidanceCooldownMs) {
-            when {
-                angleDiff > leanThreshold -> sensorLeanAccumulator--
-                angleDiff < -leanThreshold -> sensorLeanAccumulator++
-                else -> sensorLeanAccumulator = 0
-            }
-
-            if (abs(sensorLeanAccumulator) >= 3) {
-                val message = if (sensorLeanAccumulator <= -3) {
-                    "왼쪽으로 치우쳤습니다. 오른쪽으로 오세요."
-                } else {
-                    "오른쪽으로 치우쳤습니다. 왼쪽으로 오세요."
-                }
-                speakTTS(message)
-                lastGuidanceTime = currentTime
-                sensorLeanAccumulator = 0
-            }
-        }
     }
 
     // ==================== Activity 라이프사이클 ====================
@@ -1258,23 +1193,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     it.setSurfaceProvider(pv.surfaceProvider)
                 }
 
-                val useCases = mutableListOf<androidx.camera.core.UseCase>(preview)
-                val executor = analysisExecutor
-
-                if (executor != null) {
-                    // OpenCV 기반 보행 쏠림(Lean)전용 이미지 분석기 단독 연동
-                    val leanAnalysis = ImageAnalysis.Builder()
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
-                    leanAnalysis.setAnalyzer(executor, WalkingLeanAnalyzer { leanDeviation ->
-                        if (navigationManager.isNavigating.value) {
-                            runOnUiThread { handleVisionLeanFeedback(leanDeviation) }
-                        }
-                    })
-                    useCases += leanAnalysis
-                    Log.d("SafeWalkNav", "ImageAnalysis bound — OpenCV WalkingLeanAnalyzer 단독 활성화")
-                }
-
                 provider.unbindAll()
                 provider.bindToLifecycle(
                     this,
@@ -1288,46 +1206,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
         }, ContextCompat.getMainExecutor(this))
     }
-    /**
-     * OpenCV 기반 보행 편차 피드백 가이드 처리 스케줄러
-     */
-    private fun handleVisionLeanFeedback(deviation: Float) {
-        val now = System.currentTimeMillis()
 
-        // 순수 비전 기반 쏠림 판단 임계값 기준 설정
-        val visionThreshold = 12.0f
-
-        when {
-            deviation > visionThreshold -> {
-                // 우측 쏠림 누적 증가
-                cvLeanAccumulator++
-            }
-            deviation < -visionThreshold -> {
-                // 좌측 쏠림 누적 감소
-                cvLeanAccumulator--
-            }
-            else -> {
-                // 💡 요청사항 3: 사용자가 안내를 듣고 피드백하여 정상 범위(-12 ~ +12도 안쪽)로
-                // 똑바로 걷기 시작했다면 기존에 잘못 누적되어 대기 중이던 점수를 즉시 리셋(초기화)합니다.
-                cvLeanAccumulator = 0
-            }
-        }
-
-        if (now - lastGuidanceTime < guidanceCooldownMs) return
-
-        // 연속 프레임(5회) 동안 쏠림 탐지 시 피드백 작동
-        if (abs(cvLeanAccumulator) >= 15) {
-            val message = if (cvLeanAccumulator >= 15) {
-                "오른쪽으로 치우쳤습니다. 왼쪽으로 오세요."
-            } else {
-                "왼쪽으로 치우쳤습니다. 오른쪽으로 오세요."
-            }
-            speakTTS(message)
-            vibrateWarning()
-            lastGuidanceTime = now
-            cvLeanAccumulator = 0
-        }
-    }
     private fun stopCamera() {
         try {
             cameraProvider?.unbindAll()

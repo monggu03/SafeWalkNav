@@ -102,7 +102,4 @@ dependencies {
     // OpenCV (Android) — 점자블록(노란색) / 횡단보도 줄무늬 검출
     // quickbirdstudios 패키지: 비공식이지만 안정성 검증된 OpenCV Android 빌드
     implementation("com.quickbirdstudios:opencv:4.5.3.0")
-
-    // OpenCV Android SDK (프로젝트 구조에 맞게 포함 혹은 aar 파일 빌드 처리)
-    //implementation(project(":opencv"))
 }
