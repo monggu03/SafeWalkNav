@@ -100,7 +100,12 @@ final class TBFWDemoViewModel: ObservableObject {
 
         // 1. 경로 사전 분석 — RouteAnnotator 가 곡선/회전을 미리 잡아낸다.
         //    사람이 읽기 좋은 디버그 로그는 RouteAnnotationLogger 가 출력한다.
-        let annotated = RouteAnnotator(config: config).annotate(waypoints: routeWaypoints)
+        // segments 는 Swift 에서 Kotlin default 인자가 안 보이므로 명시적으로 빈 배열 전달.
+        // INTERNAL_CURVE 검출을 켜려면 TMap 응답의 RouteSegment 리스트를 여기에 넘기면 됨 (Step 2).
+        let annotated = RouteAnnotator(config: config).annotate(
+            waypoints: routeWaypoints,
+            segments: []
+        )
         self.annotationCount = annotated.annotations.count
         self.routeWaypoints = routeWaypoints
         RouteAnnotationLogger.shared.log(
