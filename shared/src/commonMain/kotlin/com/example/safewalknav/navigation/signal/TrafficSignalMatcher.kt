@@ -1,4 +1,7 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.signal
+
+import com.example.safewalknav.navigation.signal.TrafficSignalLocation
+import com.example.safewalknav.navigation.geo.distanceBetween
 
 object TrafficSignalMatcher {
     fun findNearestSignal(

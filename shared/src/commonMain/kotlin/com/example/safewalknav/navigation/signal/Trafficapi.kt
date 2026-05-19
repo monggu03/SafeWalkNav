@@ -1,4 +1,4 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.signal
 
 /**
  * 횡단보도 신호등 잔여시간 조회 API 계약.

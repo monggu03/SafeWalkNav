@@ -1,5 +1,8 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.tmap
 
+import com.example.safewalknav.navigation.tmap.POIResult
+import com.example.safewalknav.navigation.route.RiskScoreCalculator
+import com.example.safewalknav.navigation.geo.distanceBetween
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.get
@@ -13,7 +16,7 @@ import io.ktor.http.ContentType
 import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -568,5 +571,5 @@ private fun JsonObject.string(key: String): String? =
 private fun JsonObject.int(key: String): Int? =
     (this[key] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
 
-private fun kotlinx.serialization.json.JsonElement.string(): String? =
+private fun JsonElement.string(): String? =
     (this as? JsonPrimitive)?.contentOrNull

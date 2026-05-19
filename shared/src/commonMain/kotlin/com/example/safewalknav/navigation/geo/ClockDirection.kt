@@ -1,4 +1,4 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.geo
 
 /**
  * 현재 위치에서 목적지 방향을 시계 방향으로 안내.

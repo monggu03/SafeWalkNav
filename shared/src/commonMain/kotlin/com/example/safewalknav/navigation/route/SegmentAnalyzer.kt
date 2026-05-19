@@ -1,6 +1,9 @@
 // 📁 shared/commonMain/.../navigation/SegmentAnalyzer.kt
 
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.route
+
+import com.example.safewalknav.navigation.walking.isCrosswalkWaypoint
+import com.example.safewalknav.navigation.tmap.TMapRoute
 
 enum class DangerLevel { SAFE, CAUTION, DANGER }
 

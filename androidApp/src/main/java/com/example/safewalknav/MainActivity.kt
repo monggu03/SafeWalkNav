@@ -58,11 +58,11 @@ import java.util.Date
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import com.example.safewalknav.navigation.AndroidHeadingLogger
-import com.example.safewalknav.navigation.ArrivalState
+import com.example.safewalknav.navigation.tmap.ArrivalState
 import com.example.safewalknav.navigation.NavigationManager
-import com.example.safewalknav.navigation.POIResult
-import com.example.safewalknav.navigation.SignalApiClient
-import com.example.safewalknav.navigation.TMapApiClient
+import com.example.safewalknav.navigation.tmap.POIResult
+import com.example.safewalknav.navigation.signal.SignalApiClient
+import com.example.safewalknav.navigation.tmap.TMapApiClient
 import com.example.safewalknav.navigation.toGpsLocation
 import com.google.android.gms.common.api.ResolvableApiException
 import com.google.android.gms.location.LocationRequest
@@ -78,13 +78,10 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
-import com.example.safewalknav.navigation.TrafficSignalLocation
+import com.example.safewalknav.navigation.signal.TrafficSignalLocation
 import com.example.safewalknav.traffic.TrafficSignalDatabase
 import com.example.safewalknav.traffic.TrafficSignalRepository
-import com.example.safewalknav.navigation.SeoulTrafficSignalLocationApiClient
-import com.example.safewalknav.traffic.TrafficSignalRemainingTimeParser
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import com.example.safewalknav.navigation.signal.SeoulTrafficSignalLocationApiClient
 
 
 /**

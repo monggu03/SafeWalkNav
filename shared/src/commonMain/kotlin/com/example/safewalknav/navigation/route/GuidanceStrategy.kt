@@ -1,6 +1,6 @@
 // 📁 shared/commonMain/.../navigation/GuidanceStrategy.kt
 
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.route
 
 data class GuidanceConfig(
     val preAlertDistance: Int,      // 몇 미터 전부터 사전 안내

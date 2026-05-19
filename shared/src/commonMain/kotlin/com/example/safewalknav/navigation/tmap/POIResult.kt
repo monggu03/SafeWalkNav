@@ -1,4 +1,4 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.tmap
 
 /**
  * POI(Point of Interest) 검색 결과.

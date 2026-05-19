@@ -1,8 +1,8 @@
 package com.example.safewalknav.navigation.tbfw
 
-import com.example.safewalknav.navigation.Waypoint
-import com.example.safewalknav.navigation.bearing
-import com.example.safewalknav.navigation.distanceBetween
+import com.example.safewalknav.navigation.tmap.Waypoint
+import com.example.safewalknav.navigation.geo.bearing
+import com.example.safewalknav.navigation.geo.distanceBetween
 import kotlin.math.abs
 
 /**

@@ -1,4 +1,4 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.tmap
 
 /**
  * TMap 보행자 경로 데이터 모델

@@ -1,6 +1,4 @@
-package com.example.safewalknav.navigation
-
-import kotlin.math.abs
+package com.example.safewalknav.navigation.walking
 
 /**
  * [기존 WalkingDiagnostic.kt 고도화 이식]

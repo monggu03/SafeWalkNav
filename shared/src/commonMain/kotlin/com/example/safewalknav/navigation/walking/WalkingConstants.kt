@@ -1,4 +1,4 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.walking
 
 /**
  * 보행 분석 및 내비게이션 알고리즘에서 사용하는 공통 임계값 상수들

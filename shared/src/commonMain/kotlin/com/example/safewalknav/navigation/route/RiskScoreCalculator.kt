@@ -1,4 +1,6 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.route
+
+import com.example.safewalknav.navigation.tmap.RiskLevel
 
 /**
  * Segment 위험도 분류 (3단계 단순화 버전).

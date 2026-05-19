@@ -1,6 +1,7 @@
 package com.example.safewalknav.navigation
 
 import android.location.Location
+import com.example.safewalknav.navigation.platform.GpsLocation
 
 /**
  * Android `Location` → KMM `GpsLocation` 변환.

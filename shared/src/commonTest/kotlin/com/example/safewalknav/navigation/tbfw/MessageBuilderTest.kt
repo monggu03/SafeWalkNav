@@ -1,6 +1,6 @@
 package com.example.safewalknav.navigation.tbfw
 
-import com.example.safewalknav.navigation.Waypoint
+import com.example.safewalknav.navigation.tmap.Waypoint
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue

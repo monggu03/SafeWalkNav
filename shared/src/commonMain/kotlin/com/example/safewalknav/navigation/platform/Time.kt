@@ -1,4 +1,4 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.platform
 
 /**
  * 플랫폼 무관 현재 시각 (Unix epoch millis).
