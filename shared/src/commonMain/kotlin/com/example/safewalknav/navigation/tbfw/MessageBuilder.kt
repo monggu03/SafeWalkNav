@@ -1,6 +1,6 @@
 package com.example.safewalknav.navigation.tbfw
 
-import com.example.safewalknav.navigation.Waypoint
+import com.example.safewalknav.navigation.tmap.Waypoint
 
 /**
  * 안내 문장 생성기.

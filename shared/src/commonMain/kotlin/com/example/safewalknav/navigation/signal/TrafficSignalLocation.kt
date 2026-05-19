@@ -1,4 +1,4 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.signal
 
 data class TrafficSignalLocation(
     val itstId: String,

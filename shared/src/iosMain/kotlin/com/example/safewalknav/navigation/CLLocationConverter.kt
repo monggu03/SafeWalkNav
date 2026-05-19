@@ -2,6 +2,7 @@
 
 package com.example.safewalknav.navigation
 
+import com.example.safewalknav.navigation.platform.GpsLocation
 import kotlinx.cinterop.useContents
 import kotlinx.cinterop.ExperimentalForeignApi
 import platform.CoreLocation.CLLocation

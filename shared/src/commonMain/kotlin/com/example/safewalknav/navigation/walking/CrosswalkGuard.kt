@@ -1,4 +1,7 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.walking
+
+import com.example.safewalknav.navigation.geo.distanceBetween
+import com.example.safewalknav.navigation.tmap.Waypoint
 
 /**
  * waypoint가 횡단보도 관련인지 판정.
@@ -37,10 +40,10 @@ fun isCrosswalkWaypoint(wp: Waypoint): Boolean {
  */
 
 fun isOnCrosswalkSegment(
-        currentLat: Double,
-        currentLon: Double,
-        waypoints: List<Waypoint>,
-        currentWaypointIndex: Int
+    currentLat: Double,
+    currentLon: Double,
+    waypoints: List<Waypoint>,
+    currentWaypointIndex: Int
     ): Boolean {
         if (waypoints.isEmpty()) return false
 
