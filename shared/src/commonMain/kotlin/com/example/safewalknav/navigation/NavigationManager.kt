@@ -23,11 +23,17 @@ class NavigationManager(
     private var trafficSignals: List<TrafficSignalLocation> = emptyList(), //횡단보도 주변 신호등 데이터
 ) {
     private val walkingDiagnostic = WalkingDiagnostic()
+    private val motionFilter = WalkingMotionFilter()
     // --- 여기 아래 코드를 추가해줘 ---
     private val _compassHeading = MutableStateFlow(0f)
     private var currentTargetBearing: Float = 0f // 현재 목표 방위각 저장용 변수
 
     // 외부에서 관찰할 수 있는 StateFlow (필요시)
+
+    //WalkingMotionFilter 적용
+
+
+
 
     fun updateTrafficSignals(signals: List<TrafficSignalLocation>) {
         trafficSignals = signals
@@ -230,6 +236,7 @@ class NavigationManager(
 
         // Heading Kalman 상태 리셋
         kalmanHeading.reset()
+        motionFilter.reset()
 
         // CSV 로그 시작 (logDirectory 미지정이면 no-op)
         openLogWriter()
@@ -295,6 +302,11 @@ class NavigationManager(
     // ========== 경로 추종 ==========
 
     suspend fun updateLocation(location: GpsLocation) {
+        // ⭐ 보행자 물리 제약 검사
+        if (!motionFilter.isPlausible(location.latitude, location.longitude, currentTimeMillis())) {
+            println("[NM] 비현실적 GPS 점 무시")
+            return
+        }
         if (!_isNavigating.value) return
         val route = currentRoute ?: return
 
