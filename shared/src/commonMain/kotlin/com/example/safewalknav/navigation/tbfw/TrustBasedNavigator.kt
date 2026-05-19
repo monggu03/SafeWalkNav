@@ -192,6 +192,7 @@ class TrustBasedNavigator(
     private fun announceDistanceFor(type: PathSegmentType): Double = when (type) {
         PathSegmentType.SHARP_TURN -> config.announceDistanceSharpM
         PathSegmentType.TURN, PathSegmentType.SLIGHT_TURN -> config.announceDistanceTurnM
+        PathSegmentType.INTERNAL_CURVE -> config.announceDistanceCurveM
         else -> config.announceDistanceCurveM
     }
 

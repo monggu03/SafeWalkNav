@@ -1,5 +1,6 @@
 package com.example.safewalknav.navigation.tbfw
 
+import com.example.safewalknav.navigation.tmap.RouteSegment
 import com.example.safewalknav.navigation.tmap.Waypoint
 import com.example.safewalknav.navigation.geo.bearing
 import com.example.safewalknav.navigation.geo.distanceBetween
@@ -28,74 +29,99 @@ class RouteAnnotator(
     private val config: NavigatorConfig = NavigatorConfig(),
 ) {
     /**
-     * waypoint 리스트를 분석해 AnnotatedRoute 반환.
-     * waypoint 가 3개 미만이면 비교할 segment 가 없어 빈 annotation 으로 돌려준다.
+     * waypoint 리스트(+ 선택적으로 segment 리스트)를 분석해 AnnotatedRoute 반환.
+     *
+     * Stage A — waypoint 간 곡선/회전 분석 (기존 동작):
+     *   waypoints 가 3개 미만이면 비교할 segment 가 없어 Stage A 는 건너뛴다.
+     *
+     * Stage B — LineString 내부 곡선 분석 (신규):
+     *   segments 가 비어 있지 않으면 각 RouteSegment 의 폴리라인 좌표를 스캔해
+     *   TMap 이 단일 LineString 으로 묶어버린 내부 곡선을 INTERNAL_CURVE 로 검출한다.
+     *   기본값 emptyList 이므로 기존 호출자(annotate(waypoints))는 동작이 100% 동일.
+     *
+     * 두 단계 결과를 합친 뒤 distanceFromStartM 오름차순으로 정렬해 반환.
      */
-    fun annotate(waypoints: List<Waypoint>): AnnotatedRoute {
-        if (waypoints.size < 3) {
-            return AnnotatedRoute(waypoints, emptyList())
-        }
-
+    fun annotate(
+        waypoints: List<Waypoint>,
+        segments: List<RouteSegment> = emptyList(),
+    ): AnnotatedRoute {
         val annotations = mutableListOf<PathAnnotation>()
         val cumulativeDistances = computeCumulativeDistances(waypoints)
 
-        var i = 0
-        while (i < waypoints.size - 2) {
-            val a = waypoints[i]
-            val b = waypoints[i + 1]
-            val c = waypoints[i + 2]
+        // ─── Stage A: waypoint 간 분석 (기존 로직, 시그니처/임계값 변경 없음) ───
+        if (waypoints.size >= 3) {
+            var i = 0
+            while (i < waypoints.size - 2) {
+                val a = waypoints[i]
+                val b = waypoints[i + 1]
+                val c = waypoints[i + 2]
 
-            val d1 = distanceBetween(a.lat, a.lon, b.lat, b.lon).toDouble()
-            val d2 = distanceBetween(b.lat, b.lon, c.lat, c.lon).toDouble()
+                val d1 = distanceBetween(a.lat, a.lon, b.lat, b.lon).toDouble()
+                val d2 = distanceBetween(b.lat, b.lon, c.lat, c.lon).toDouble()
 
-            // 짧은 구간 — 각도 판단 자체를 건너뜀 (직진 처리 X, 단순히 다음 인덱스로).
-            if (d1 < config.minSegmentDistanceM || d2 < config.minSegmentDistanceM) {
-                i++
-                continue
-            }
-
-            val b1 = bearing(a.lat, a.lon, b.lat, b.lon).toDouble()
-            val b2 = bearing(b.lat, b.lon, c.lat, c.lon).toDouble()
-            val delta = normalizeAngle(b2 - b1)
-
-            when {
-                // 단일 회전 — peak 우선. 곡선 후보보다 먼저 검사.
-                abs(delta) >= config.turnPeakThresholdDeg -> {
-                    annotations.add(
-                        buildTurnAnnotation(
-                            startIdx = i,
-                            endIdx = i + 1,
-                            delta = delta,
-                            distanceFromStartM = cumulativeDistances[i],
-                        )
-                    )
+                // 짧은 구간 — 각도 판단 자체를 건너뜀 (직진 처리 X, 단순히 다음 인덱스로).
+                if (d1 < config.minSegmentDistanceM || d2 < config.minSegmentDistanceM) {
                     i++
+                    continue
                 }
 
-                // 곡선 후보 — 노이즈 임계 초과 시 같은 부호로 연속 스캔.
-                abs(delta) >= config.noiseAngleThresholdDeg -> {
-                    val curve = scanCurve(waypoints, i)
-                    val sigOk = curve.consistencyRatio >= config.curveSignConsistencyRatio
-                    val cumOk = abs(curve.cumulative) >= config.curveCumulativeThresholdDeg
-                    if (sigOk && cumOk) {
+                val b1 = bearing(a.lat, a.lon, b.lat, b.lon).toDouble()
+                val b2 = bearing(b.lat, b.lon, c.lat, c.lon).toDouble()
+                val delta = normalizeAngle(b2 - b1)
+
+                when {
+                    // 단일 회전 — peak 우선. 곡선 후보보다 먼저 검사.
+                    abs(delta) >= config.turnPeakThresholdDeg -> {
                         annotations.add(
-                            buildCurveAnnotation(
+                            buildTurnAnnotation(
                                 startIdx = i,
-                                endIdx = curve.endIdx,
-                                cumulative = curve.cumulative,
-                                peak = curve.peak,
+                                endIdx = i + 1,
+                                delta = delta,
                                 distanceFromStartM = cumulativeDistances[i],
                             )
                         )
-                        i = curve.endIdx
-                    } else {
                         i++
                     }
-                }
 
-                else -> i++  // 직진 (노이즈 수준)
+                    // 곡선 후보 — 노이즈 임계 초과 시 같은 부호로 연속 스캔.
+                    abs(delta) >= config.noiseAngleThresholdDeg -> {
+                        val curve = scanCurve(waypoints, i)
+                        val sigOk = curve.consistencyRatio >= config.curveSignConsistencyRatio
+                        val cumOk = abs(curve.cumulative) >= config.curveCumulativeThresholdDeg
+                        if (sigOk && cumOk) {
+                            annotations.add(
+                                buildCurveAnnotation(
+                                    startIdx = i,
+                                    endIdx = curve.endIdx,
+                                    cumulative = curve.cumulative,
+                                    peak = curve.peak,
+                                    distanceFromStartM = cumulativeDistances[i],
+                                )
+                            )
+                            i = curve.endIdx
+                        } else {
+                            i++
+                        }
+                    }
+
+                    else -> i++  // 직진 (노이즈 수준)
+                }
             }
         }
+
+        // ─── Stage B: 각 RouteSegment 내부 곡선 분석 (신규) ───
+        for (segment in segments) {
+            if (segment.points.size < 3) continue
+            val segDistance = cumulativeDistances.getOrNull(segment.fromWaypointIndex) ?: continue
+            val internal = scanInternalCurve(segment, segDistance)
+            if (internal != null) {
+                annotations.add(internal)
+            }
+        }
+
+        // Stage A 결과는 이미 waypoint 인덱스 오름차순 = 거리 오름차순.
+        // Stage B 가 끼어들 수 있으므로 최종 정렬로 순서를 보장.
+        annotations.sortBy { it.distanceFromStartM }
 
         return AnnotatedRoute(waypoints, annotations)
     }
@@ -220,6 +246,73 @@ class RouteAnnotator(
             startWaypointIndex = startIdx,
             endWaypointIndex = endIdx,
             type = type,
+            direction = direction,
+            totalAngle = cumulative,
+            peakAngle = peak,
+            distanceFromStartM = distanceFromStartM,
+            announceMessage = "",
+        )
+        return partial.copy(announceMessage = MessageBuilder.buildAnnotationAnnounce(partial))
+    }
+
+    /**
+     * RouteSegment 의 내부 폴리라인(`segment.points`) 을 슬라이딩 윈도우로 훑어
+     * 누적 곡률을 구한다. scanCurve 와 동일한 임계값을 사용하지만 끊는 조건은 없고
+     * (전체 segment 가 한 LineString 이므로) 모든 sub-segment 의 delta 를 누적한 뒤
+     * 마지막에 한꺼번에 판정한다.
+     *
+     * @return 임계 통과 시 INTERNAL_CURVE 타입의 PathAnnotation, 아니면 null.
+     */
+    private fun scanInternalCurve(
+        segment: RouteSegment,
+        distanceFromStartM: Double,
+    ): PathAnnotation? {
+        val points = segment.points
+        if (points.size < 3) return null
+
+        // 첫 sub-segment(인덱스 0,1,2) 의 부호를 기준. 짧은 구간이라도 일단 sign 만 얻고,
+        // 실제 loop 에서는 minSegmentDistanceM 미만이면 skip 하므로 결과 카운트는 0 일 수 있다.
+        val b1First = bearing(points[0].lat, points[0].lon, points[1].lat, points[1].lon).toDouble()
+        val b2First = bearing(points[1].lat, points[1].lon, points[2].lat, points[2].lon).toDouble()
+        val deltaFirst = normalizeAngle(b2First - b1First)
+        val sign = if (deltaFirst >= 0) 1.0 else -1.0
+
+        var cumulative = 0.0
+        var peak = 0.0
+        var sameSignCount = 0
+        var totalCount = 0
+
+        for (i in 0 until points.size - 2) {
+            val a = points[i]
+            val b = points[i + 1]
+            val c = points[i + 2]
+
+            val d1 = distanceBetween(a.lat, a.lon, b.lat, b.lon).toDouble()
+            val d2 = distanceBetween(b.lat, b.lon, c.lat, c.lon).toDouble()
+            if (d1 < config.minSegmentDistanceM || d2 < config.minSegmentDistanceM) continue
+
+            val b1 = bearing(a.lat, a.lon, b.lat, b.lon).toDouble()
+            val b2 = bearing(b.lat, b.lon, c.lat, c.lon).toDouble()
+            val delta = normalizeAngle(b2 - b1)
+
+            cumulative += delta
+            if (abs(delta) > abs(peak)) peak = delta
+            totalCount++
+            val sameSign = (delta >= 0 && sign > 0) || (delta < 0 && sign < 0)
+            if (sameSign) sameSignCount++
+        }
+
+        if (totalCount == 0) return null
+
+        val consistencyRatio = sameSignCount.toDouble() / totalCount
+        if (abs(cumulative) < config.curveCumulativeThresholdDeg) return null
+        if (consistencyRatio < config.curveSignConsistencyRatio) return null
+
+        val direction = if (cumulative >= 0) TurnDirection.RIGHT else TurnDirection.LEFT
+        val partial = PathAnnotation(
+            startWaypointIndex = segment.fromWaypointIndex,
+            endWaypointIndex = segment.toWaypointIndex,
+            type = PathSegmentType.INTERNAL_CURVE,
             direction = direction,
             totalAngle = cumulative,
             peakAngle = peak,

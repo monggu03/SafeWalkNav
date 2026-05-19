@@ -128,6 +128,8 @@ object MessageBuilder {
                 "잠시 후 ${dir}으로 꺾어집니다."
             PathSegmentType.SHARP_TURN ->
                 "잠시 후 ${dir}으로 크게 꺾어집니다."
+            PathSegmentType.INTERNAL_CURVE ->
+                "앞쪽 도로가 ${dir}으로 휘어집니다. 인도를 따라가세요."
             PathSegmentType.STRAIGHT -> ""
         }
     }
