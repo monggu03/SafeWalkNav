@@ -1,7 +1,6 @@
 package com.example.safewalknav.navigation.signal
 
 import io.ktor.client.HttpClient
-import io.ktor.client.HttpClientConfig
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
@@ -11,9 +10,9 @@ class SeoulTrafficSignalLocationApiClient(
     private val apiKey: String
 ) {
     private val httpClient = HttpClient {
-        HttpClientConfig.install(HttpTimeout.Plugin) {
-            HttpTimeout.HttpTimeoutCapabilityConfiguration.connectTimeoutMillis = 10_000
-            HttpTimeout.HttpTimeoutCapabilityConfiguration.requestTimeoutMillis = 10_000
+        install(HttpTimeout) {
+            connectTimeoutMillis = 10_000
+            requestTimeoutMillis = 10_000
         }
     }
 

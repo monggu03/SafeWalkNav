@@ -1,5 +1,7 @@
 package com.example.safewalknav.navigation.platform
 
+import android.util.Log as AndroidLog
+
 /**
  * Android 측 Logger 구현 — `android.util.Log` 에 위임.
  */
