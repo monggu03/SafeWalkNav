@@ -108,7 +108,8 @@ class NavigationManager(
     private var lastRerouteTime = 0L
     private var lastPreAnnouncedIndex = -1
     private var consecutiveRerouteCount = 0  // 연속 재탐색 횟수 (쿨다운 점진 증가)
-    private var lastStraightGuidanceTime = 0L // 직진 구간 안내 타이머
+    private var lastStraightGuidanceTime = 0L // 직진 안내 전용 타이머 (provideDirectionalGuidance 의 straight 분기)
+    private var lastCorrectionGuidanceTime = 0L // bearing/cross-track 보정 안내 전용 타이머 (직진 안내와 쿨다운 분리)
     private var lastCornerAnnouncedIdx = -1   // 폴리라인 코너 중복 안내 방지
     private var lastRoadType = -1 // 이전 구간 도로 유형 (전환 안내용)
     // 횡단보도 진입 시점에 "X시 방향으로 횡단보도를 건너세요" 1회 안내용 상태.
@@ -357,19 +358,21 @@ class NavigationManager(
         if (crosswalkIdx == lastCrosswalkAnnouncedWpIdx) return
         lastCrosswalkAnnouncedWpIdx = crosswalkIdx
 
-        // 건너고 나서 갈 다음 waypoint — 횡단 방향의 기준점.
-        val targetWp = route.waypoints.getOrNull(crosswalkIdx + 1)
-
-        val message = if (targetWp == null || speed < 0.3f) {
-            // 정지 상태에서는 GPS bearing 부정확 → 시계방향 안내 무의미.
+        // 횡단보도 waypoint 자체의 좌표 — 사용자가 알아야 할 건 "횡단보도가 어느 쪽에 있는지".
+        val crosswalkWp = route.waypoints.getOrNull(crosswalkIdx)
+        val message = if (crosswalkWp == null) {
             "전방에 횡단보도가 있습니다. 신호를 확인하고 건너세요."
         } else {
-            val clockDir = getClockDirection(
+            val side = getLeftRightDirection(
                 currentLat, currentLon,
-                targetWp.lat, targetWp.lon,
-                userBearing,
+                crosswalkWp.lat, crosswalkWp.lon,
+                userBearing, speed,
             )
-            "${clockDir} 방향으로 횡단보도를 건너세요. 신호를 확인하세요."
+            if (side == "전방") {
+                "전방에 횡단보도가 있습니다. 신호를 확인하고 건너세요."
+            } else {
+                "${side}에 횡단보도가 있습니다. 신호를 확인하고 건너세요."
+            }
         }
 
         // forceRepeat — 직전과 같은 메시지여도(드물지만) 발화되도록.
@@ -389,6 +392,7 @@ class NavigationManager(
         lastRerouteTime = 0L
         lastPreAnnouncedIndex = -1
         lastStraightGuidanceTime = 0L
+        lastCorrectionGuidanceTime = 0L
         lastCornerAnnouncedIdx = -1
         lastRoadType = -1
         wasInCrosswalkZone = false
@@ -555,7 +559,7 @@ class NavigationManager(
         }
 
         // waypoint 안내
-        updateWaypointGuidance(currentLat, currentLon)
+        updateWaypointGuidance(currentLat, currentLon, userBearing, speed)
 
         // 폴리라인 기반 코너 선제 안내 (T-Map waypoint 누락 보완)
         if (_arrivalState.value == ArrivalState.FAR) {
@@ -1115,7 +1119,8 @@ class NavigationManager(
     // ========== Waypoint 안내 ==========
 
     private fun updateWaypointGuidance(
-        currentLat: Double, currentLon: Double
+        currentLat: Double, currentLon: Double,
+        userBearing: Float, speed: Float,
     ) {
         val route = currentRoute ?: return
         if (currentWaypointIndex >= route.waypoints.size) return
@@ -1163,7 +1168,23 @@ class NavigationManager(
                 && currentWaypointIndex != lastPreAnnouncedIndex
             ) {
                 lastPreAnnouncedIndex = currentWaypointIndex
-                val message = "${distToNext.toInt()}미터 앞 ${nextWaypoint.description}"
+
+                // 횡단보도는 좌/우 위치를 안내 — 시각장애 보행자가 어느 쪽으로 가야 할지 알 수 있게.
+                val message = if (nextWaypoint.pointType == "CROSSWALK") {
+                    val side = getLeftRightDirection(
+                        currentLat, currentLon,
+                        nextWaypoint.lat, nextWaypoint.lon,
+                        userBearing, speed,
+                    )
+                    if (side == "전방") {
+                        "${distToNext.toInt()}미터 앞에 횡단보도가 있습니다"
+                    } else {
+                        "${distToNext.toInt()}미터 앞 ${side}에 횡단보도가 있을 예정입니다"
+                    }
+                } else {
+                    "${distToNext.toInt()}미터 앞 ${nextWaypoint.description}"
+                }
+
                 speak(message)
                 // 사전 안내가 나왔으면 직진 타이머 리셋 (중복 방지)
                 lastStraightGuidanceTime = currentTimeMillis()
@@ -1233,7 +1254,7 @@ class NavigationManager(
         val crossTrackThreshold = if (onCrosswalk) 1.0f else 2f
 
         // 점진적 곡선 대응: bearing 차이 + 측면 이탈(cross-track) 둘 다 판정
-        if (!stationary && now - lastStraightGuidanceTime >= cooldownMs) {
+        if (!stationary && now - lastCorrectionGuidanceTime >= cooldownMs) {
             val diff = angleDiff(routeBearing, userBearing)
             val absDiff = abs(diff)
             val crossTrack = computeSignedCrossTrack(
@@ -1241,9 +1262,9 @@ class NavigationManager(
             )
             val absCross = abs(crossTrack)
 
-            // 1. bearing 기반 (큰 편차 우선)
+            // 1. bearing 기반 (큰 편차 우선) — 사용자가 향한 방향을 "틀어야" 하는 상황.
             if (absDiff >= bearingThreshold) {
-                lastStraightGuidanceTime = now
+                lastCorrectionGuidanceTime = now
                 val side = if (diff > 0) "오른쪽" else "왼쪽"
                 val message = if (onCrosswalk) {
                     // 횡단보도에서는 짧고 즉각적인 멘트로 — 직진 유지에 집중
@@ -1251,16 +1272,16 @@ class NavigationManager(
                 } else when {
                     // 90° 이상 큰 편차도 45° 분기와 동일 멘트로 안내 (별도 멘트 제거).
                     absDiff >= 45f -> "${side}으로 방향을 틀어주세요"
-                    else -> "약간 ${side}으로 가세요"
+                    else -> "약간 ${side}으로 방향을 트세요"
                 }
                 speak(message, forceRepeat = true)
                 return
             }
 
-            // 2. cross-track 기반 (완만한 곡선에서 점진적 측면 드리프트 감지)
+            // 2. cross-track 기반 (완만한 곡선에서 점진적 측면 드리프트 감지) — 사용자가 "위치를 옮겨야" 하는 상황.
             // crossTrack > 0 → 사용자가 경로 왼쪽에 있음 → 오른쪽으로 가야 함
             if (absCross >= crossTrackThreshold) {
-                lastStraightGuidanceTime = now
+                lastCorrectionGuidanceTime = now
                 val side = if (crossTrack > 0) "오른쪽" else "왼쪽"
                 val message = if (onCrosswalk) {
                     "횡단보도. 약간 ${side}으로"
@@ -1274,9 +1295,9 @@ class NavigationManager(
             }
         }
 
-        // 직진 안내 (20초 간격 유지) — 횡단보도에서는 직진 안내 자체는 생략 (중복 방지)
+        // 직진 안내 — 시각장애 보행자 안심감을 위해 5초 간격. 횡단보도에서는 직진 안내 자체는 생략.
         if (onCrosswalk) return
-        if (now - lastStraightGuidanceTime < 20_000L) return
+        if (now - lastStraightGuidanceTime < 5_000L) return
         lastStraightGuidanceTime = now
 
         // 현재 진행 중인 segment (currentWaypointIndex 직전에 진입한 segment).
@@ -1507,6 +1528,42 @@ class NavigationManager(
 
     private fun isKeyPoint(waypoint: Waypoint): Boolean {
         return waypoint.pointType in listOf("CROSSWALK", "TURN", "STAIRS", "DESTINATION")
+    }
+
+    /**
+     * 사용자 진행 방향 기준으로 타겟 좌표가 왼쪽/오른쪽/전방 중 어디에 있는지 판정.
+     *
+     * 진행 방향 결정 우선순위:
+     *   1. 이동 중(speed >= 0.3) → userBearing (Kalman 평활화된 heading)
+     *   2. 정지 중(speed < 0.3)  → routeBearing (경로 진행 방향, computeRouteBearingAhead)
+     *   3. 둘 다 없으면 → "전방" 폴백
+     *
+     * 판정 임계값:
+     *   - |각도 차이| < 20° → "전방"
+     *   - 그 외 양수       → "오른쪽" (시계 방향)
+     *   - 그 외 음수       → "왼쪽" (반시계 방향)
+     *
+     * 시각장애 보행자에게 시계방향("2시 방향") 보다 좌/우/전방이 더 직관적이라 도입.
+     */
+    private fun getLeftRightDirection(
+        currentLat: Double, currentLon: Double,
+        targetLat: Double, targetLon: Double,
+        userBearing: Float, speed: Float,
+    ): String {
+        val referenceBearing: Float = if (speed >= 0.3f) {
+            userBearing
+        } else {
+            computeRouteBearingAhead(25f) ?: return "전방"
+        }
+
+        val bearingToTarget = bearing(currentLat, currentLon, targetLat, targetLon)
+        val diff = angleDiff(bearingToTarget, referenceBearing)
+
+        return when {
+            abs(diff) < 20f -> "전방"
+            diff > 0 -> "오른쪽"
+            else -> "왼쪽"
+        }
     }
 
     private fun getTurnDescription(turnType: Int): String {
