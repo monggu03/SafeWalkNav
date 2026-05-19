@@ -103,9 +103,29 @@ extension LocationTracker: CLLocationManagerDelegate {
     func locationManager(_ manager: CLLocationManager,
                          didUpdateLocations locations: [CLLocation]) {
         guard let clLocation = locations.last else { return }
-
-        // ⭐ 핵심: KMM의 extension으로 변환
-        // CLLocationConverter.kt의 toGpsLocation() 호출
+        
+        // ⭐ Gate 1: accuracy 유효성 확인
+        // horizontalAccuracy가 음수면 측위 실패 (iOS 규약)
+        guard clLocation.horizontalAccuracy > 0 else {
+            print("[LocationTracker] 측위 실패 (accuracy<0) — 무시")
+            return
+        }
+        
+        // ⭐ Gate 2: 정확도가 너무 나쁜 점은 무시
+        // 25m = Constants.kt의 GPS_ACCURACY_LIMIT와 동일
+        guard clLocation.horizontalAccuracy <= 25.0 else {
+            print("[LocationTracker] GPS 부정확 (\(clLocation.horizontalAccuracy)m) — 무시")
+            return
+        }
+        
+        // ⭐ Gate 3: 오래된 캐시 위치 제거
+        // CLLocationManager가 startUpdatingLocation 직후 옛날 위치를 던지는 문제 회피
+        let age = -clLocation.timestamp.timeIntervalSinceNow
+        guard age < 5.0 else {
+            print("[LocationTracker] 오래된 GPS (\(age)초 전) — 무시")
+            return
+        }
+        
         let gpsLocation = CLLocationConverterKt.toGpsLocation(clLocation)
         
         DispatchQueue.main.async {
