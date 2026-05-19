@@ -20,6 +20,10 @@ import kotlin.math.sin
  *   - 정지(speed < stationarySpeed): STATIONARY_NOISE — GPS bearing은 잡음 그 자체이므로 사실상 무시
  *   - 그 외: max(MEAS_NOISE_FLOOR, accuracy * MEAS_NOISE_GAIN) — GPS 정확도 나쁘면 측정을 덜 믿음
  *
+ * Accuracy Gating:
+ *   accuracy가 MAX_ACCEPTABLE_ACCURACY 초과 시 측정 자체를 거부하고 이전 추정치를 유지한다.
+ *   터널/지하/건물 협곡 등에서 GPS가 극단적으로 망가질 때 추정치 오염을 방지.
+ *
  * Kalman gain K = predicted_uncertainty / (predicted_uncertainty + measurement_noise)
  *   K → 1: 측정값 적극 수용. K → 0: 이전 추정값 유지.
  *
@@ -66,6 +70,13 @@ class KalmanHeading(
             smoothedHeading = ((rawHeading % 360f) + 360f) % 360f
             lastGain = 1.0
             initialized = true
+            return smoothedHeading
+        }
+
+        // ⭐ ----- Accuracy Gating -----
+        // GPS accuracy가 너무 나쁘면 측정 자체를 거부 (터널, 지하, 빌딩 협곡 등)
+        // 추정치를 그대로 유지하여 오염 방지.
+        if (accuracy > MAX_ACCEPTABLE_ACCURACY) {
             return smoothedHeading
         }
 
@@ -117,5 +128,6 @@ class KalmanHeading(
         const val MEAS_NOISE_GAIN = 3.0
         const val MEAS_NOISE_FLOOR = 5.0
         const val STATIONARY_NOISE = 999.0
+        const val MAX_ACCEPTABLE_ACCURACY = 30f  // ⭐ GPS accuracy 임계값 (m). 초과 시 측정 거부.
     }
 }
