@@ -39,8 +39,11 @@ struct DebugLogOverlay: View {
                             HStack(alignment: .top, spacing: 4) {
                                 Text(Self.formatter.string(from: entry.timestamp))
                                     .foregroundColor(.gray)
-                                Text("[\(entry.tag)]")
-                                    .foregroundColor(.cyan)
+                                // StdoutCapture 로 들어온 라인은 tag 가 비어 있음 → 브래킷 생략.
+                                if !entry.tag.isEmpty {
+                                    Text("[\(entry.tag)]")
+                                        .foregroundColor(.cyan)
+                                }
                                 Text(entry.message)
                                     .foregroundColor(entry.level.color)
                             }

@@ -41,12 +41,28 @@ final class SttManager: ObservableObject {
     private weak var tts: TtsManager?
 
     // MARK: - 안전장치 타이머
-    /// 무음 상태에서 자동 종료 (사용자가 말 안 하면 5초 후 자동 stop)
+    /// 무음 상태에서 자동 종료. 1.2s 는 한국어 중간 호흡(예: "충무로역… 1번 출구") 사이에서 끊겨서 1.8s 로 완화.
     private var silenceTimer: Timer?
-    private let silenceTimeout: TimeInterval = 1.2
+    private let silenceTimeout: TimeInterval = 1.8
     /// 최대 듣기 시간 (안전장치 — 무한 대기 방지)
     private var maxDurationTimer: Timer?
     private let maxDuration: TimeInterval = 10.0
+
+    // MARK: - 인식 정확도 힌트
+    /// 시연용 POI / 명령어 키워드. SFSpeech 가 비슷한 발음 중 이 단어들 쪽으로 편향해서 인식하게 함.
+    /// 시연 시나리오에 맞게 후속 PR 에서 동적 주입으로 전환 예정 (현재는 하드코딩).
+    private static let contextualHints: [String] = [
+        // 지하철역
+        "충무로역", "강남역", "명동역", "동대문역", "을지로3가역", "을지로입구역",
+        "종로3가역", "종로5가역", "동대문역사문화공원역", "시청역", "광화문역",
+        // 출구
+        "1번 출구", "2번 출구", "3번 출구", "4번 출구",
+        "5번 출구", "6번 출구", "7번 출구", "8번 출구",
+        // 학교 / 주요 시설
+        "동국대학교", "동국대학교 정문", "동국대학교 후문",
+        // 시연 시나리오에서 자주 나오는 일반어
+        "출발", "도착", "안내", "취소",
+    ]
 
     // MARK: - Init
     init(localeIdentifier: String = "ko-KR", tts: TtsManager? = nil) {
@@ -138,10 +154,11 @@ final class SttManager: ObservableObject {
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
-        // 온디바이스 처리 가능하면 사용 (네트워크 불필요, 프라이버시 우수)
-        if recognizer.supportsOnDeviceRecognition {
-            request.requiresOnDeviceRecognition = true
-        }
+        // 한국어 on-device 모델은 서버 모델보다 정확도가 낮아 시연 시 POI 인식이 잘 안 됨.
+        // 네트워크가 가능하면 서버 모델을 쓰도록 명시적으로 false (네트워크 없으면 iOS 가 자동 fallback).
+        request.requiresOnDeviceRecognition = false
+        // 자주 쓰는 POI / 명령어를 힌트로 주어 비슷한 발음 인식 편향을 줄임.
+        request.contextualStrings = Self.contextualHints
         self.recognitionRequest = request
 
         // 오디오 입력 노드 → request에 버퍼 전달

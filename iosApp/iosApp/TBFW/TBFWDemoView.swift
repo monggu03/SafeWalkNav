@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import Combine
 import shared
 
 struct TBFWDemoView: View {
@@ -216,6 +217,8 @@ struct TBFWDemoView: View {
                     showHeadingGuide = false
                     viewModel.start()
                 },
+                // GPS 움직임이 잡히면 HeadingGuideView 가 자동으로 dismiss 한다.
+                locationPublisher: deps.locationTracker.$currentLocation.eraseToAnyPublisher(),
             )
         } else {
             VStack {
