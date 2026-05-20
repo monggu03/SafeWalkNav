@@ -61,6 +61,19 @@ final class NavigationViewModel: ObservableObject {
     }
     @Published private(set) var annotationMarkers: [AnnotationMarker] = []
 
+    /// 디버그 패널 — 발화 로그 (최근 20개)
+    @Published private(set) var announcementLog: [String] = []
+
+    /// 디버그 패널 — 사용자가 다가가고 있는 미발화 annotation 정보
+    struct UpcomingAnnotation {
+        let type: String
+        let direction: String
+        let totalAngle: Double
+        let distanceM: Double
+        let message: String
+    }
+    @Published private(set) var upcomingAnnotation: UpcomingAnnotation?
+
     /// 음성 인식 진행 단계 — UI에서 상태 안내용
     @Published private(set) var voiceFlowStage: VoiceFlowStage = .idle
 
@@ -354,6 +367,8 @@ final class NavigationViewModel: ObservableObject {
 
                 // 7. 지도 시각화 갱신
                 self.refreshRouteVisualization()
+                self.refreshAnnouncementLog()
+                self.refreshUpcomingAnnotation()
 
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
@@ -430,5 +445,65 @@ final class NavigationViewModel: ObservableObject {
         if markers.count != annotationMarkers.count {
             annotationMarkers = markers
         }
+    }
+
+    /// 발화 로그 StateFlow → @Published 동기화.
+    private func refreshAnnouncementLog() {
+        let log = (navigationManager.announcementLog.value as? [String]) ?? []
+        if log.count != announcementLog.count {
+            announcementLog = log
+        }
+    }
+
+    /// 다가오는(아직 발화 안 된, 현재 waypoint 이후의) annotation 중 가장 가까운 것 1건.
+    private func refreshUpcomingAnnotation() {
+        guard let route = navigationManager.currentRoute,
+              let loc = locationTracker.currentLocation,
+              let anns = navigationManager.annotations.value as? [PathAnnotation],
+              !anns.isEmpty
+        else {
+            if upcomingAnnotation != nil { upcomingAnnotation = nil }
+            return
+        }
+
+        var best: (PathAnnotation, Double)? = nil
+        for ann in anns {
+            if ann.announceMessage.isEmpty { continue }
+            let startIdx = Int(ann.startWaypointIndex)
+            guard startIdx >= 0, startIdx < route.waypoints.count else { continue }
+            let wp = route.waypoints[startIdx]
+            let dist = haversineMeters(
+                loc.latitude, loc.longitude, wp.lat, wp.lon
+            )
+            if best == nil || dist < best!.1 {
+                best = (ann, dist)
+            }
+        }
+
+        if let (ann, dist) = best {
+            upcomingAnnotation = UpcomingAnnotation(
+                type: ann.type.name,
+                direction: ann.direction.name,
+                totalAngle: ann.totalAngle,
+                distanceM: dist,
+                message: ann.announceMessage
+            )
+        } else if upcomingAnnotation != nil {
+            upcomingAnnotation = nil
+        }
+    }
+
+    /// Haversine 거리 (m) — RouteAnnotator 와 같은 결과를 내야 할 만큼 정확하지 않아도 됨 (디버그 표시용).
+    private func haversineMeters(
+        _ lat1: Double, _ lon1: Double, _ lat2: Double, _ lon2: Double
+    ) -> Double {
+        let r = 6371000.0
+        let dLat = (lat2 - lat1) * .pi / 180.0
+        let dLon = (lon2 - lon1) * .pi / 180.0
+        let a = sin(dLat / 2) * sin(dLat / 2)
+              + cos(lat1 * .pi / 180.0) * cos(lat2 * .pi / 180.0)
+              * sin(dLon / 2) * sin(dLon / 2)
+        let c = 2 * atan2(sqrt(a), sqrt(1 - a))
+        return r * c
     }
 }
