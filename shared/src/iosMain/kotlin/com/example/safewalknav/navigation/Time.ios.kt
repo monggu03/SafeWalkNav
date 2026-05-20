@@ -1,4 +1,4 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.platform
 
 import platform.Foundation.NSDate
 import platform.Foundation.timeIntervalSince1970

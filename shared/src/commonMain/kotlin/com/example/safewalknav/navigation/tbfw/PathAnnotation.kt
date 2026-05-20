@@ -21,6 +21,12 @@ enum class PathSegmentType {
     SLIGHT_TURN,
     TURN,
     SHARP_TURN,
+
+    /**
+     * TMap이 단일 LineString으로 묶어 보낸 segment 내부에 누적 곡률이 들어있는 경우.
+     * Stage A(waypoint 간 분석) 로는 안 잡히지만 segment.points 슬라이딩 윈도우에서 검출됨.
+     */
+    INTERNAL_CURVE,
 }
 
 /** 회전/곡선의 진행 방향. */

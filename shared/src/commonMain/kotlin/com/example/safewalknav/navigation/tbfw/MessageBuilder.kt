@@ -7,13 +7,12 @@ import com.example.safewalknav.navigation.tmap.Waypoint
  *
  * 우선순위 기반 메시지 빌더:
  *   1순위 — 종료/도착 메시지
- *   2순위 — 안전 경고 (Trust CRITICAL)
- *   3순위 — Trust LOW 보수적 안내
- *   4순위 — waypoint 통과 알림
- *   5순위 — 일반 거리 안내
+ *   2순위 — GPS 점프 안내 (JUMPED)
+ *   3순위 — waypoint 통과 알림
+ *   4순위 — 일반 거리 안내
  *
- * 보행 쏠림(좌우 보정) 안내는 현재 보류 — 팀 결정 후 추가.
- * 굽은 길 안내는 2차 구현으로 미룸.
+ * GPS 점프 안내 정책은 JumpGuidancePolicy 에서 결정한다.
+ * 본 빌더는 점프 레벨이 JUMPED 일 때 어떤 문구를 쓸지만 담당.
  *
  * 모든 함수는 순수 함수 — 외부 상태 의존 없음.
  */
@@ -22,7 +21,7 @@ object MessageBuilder {
     /**
      * 메인 진입점 — 상황에 따라 적절한 메시지 생성.
      *
-     * @param trustLevel 현재 신뢰도 카테고리
+     * @param jumpLevel 현재 GPS 점프 레벨
      * @param distance 현재 waypoint까지 거리 (m)
      * @param didPassWaypoint 이번 update에서 waypoint 통과 처리됐는지
      * @param isFinished 모든 waypoint 통과 완료 여부
@@ -30,7 +29,7 @@ object MessageBuilder {
      * @return TTS로 읽을 문장
      */
     fun build(
-        trustLevel: TrustLevel,
+        jumpLevel: GpsJumpLevel,
         distance: Float,
         didPassWaypoint: Boolean,
         isFinished: Boolean,
@@ -39,22 +38,17 @@ object MessageBuilder {
         // 1순위: 종료
         if (isFinished) return MSG_ARRIVED_DESTINATION
 
-        // 2순위: Trust CRITICAL — 위치를 거의 못 믿는 상태
-        if (trustLevel == TrustLevel.CRITICAL) {
-            return MSG_TRUST_CRITICAL
+        // 2순위: GPS 점프 — 거리 안내가 신뢰 어려우므로 별도 안내
+        if (jumpLevel == GpsJumpLevel.JUMPED) {
+            return MSG_GPS_DEGRADED
         }
 
-        // 3순위: Trust LOW — 거리 안내 대신 보수적 안내
-        if (trustLevel == TrustLevel.LOW) {
-            return MSG_TRUST_LOW
-        }
-
-        // 4순위: 방금 waypoint 통과
+        // 3순위: 방금 waypoint 통과
         if (didPassWaypoint) {
             return buildPassMessage(currentTarget)
         }
 
-        // 5순위: 일반 거리 안내
+        // 4순위: 일반 거리 안내
         return buildDistanceMessage(distance, currentTarget)
     }
 
@@ -128,6 +122,8 @@ object MessageBuilder {
                 "잠시 후 ${dir}으로 꺾어집니다."
             PathSegmentType.SHARP_TURN ->
                 "잠시 후 ${dir}으로 크게 꺾어집니다."
+            PathSegmentType.INTERNAL_CURVE ->
+                "앞쪽 도로가 ${dir}으로 휘어집니다. 인도를 따라가세요."
             PathSegmentType.STRAIGHT -> ""
         }
     }
@@ -157,6 +153,10 @@ object MessageBuilder {
 
     const val MSG_ARRIVED_DESTINATION = "목적지에 도착했습니다."
     const val MSG_PASSED_GENERIC = "중간 지점을 통과했습니다. 다음 지점으로 안내합니다."
-    const val MSG_TRUST_CRITICAL = "위치 정확도가 매우 낮습니다. 잠시 멈춰주세요."
-    const val MSG_TRUST_LOW = "위치 정확도가 낮습니다. 현재 방향을 유지하세요."
+
+    /**
+     * GPS 점프 상태 안내. 발표/인터뷰에서 합의된 문구로 변경 금지.
+     * "멈추세요" 같은 표현은 GPS 회복이 보행 중 일어남을 고려해 의도적으로 배제했다.
+     */
+    const val MSG_GPS_DEGRADED = "위치 안내가 잠시 어렵습니다. 평소처럼 보행하세요"
 }

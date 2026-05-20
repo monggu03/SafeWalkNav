@@ -21,8 +21,26 @@ struct MapView: View {
     let currentLocation: CLLocationCoordinate2D?
     /// 경로 좌표 배열 (NavigationManager에서 받음)
     let routeCoordinates: [CLLocationCoordinate2D]
+    /// waypoint 핀 (CROSSWALK/TURN/기타 색상 구분)
+    let waypointPins: [NavigationViewModel.WaypointPin]
+    /// RouteAnnotator annotation 마커 (CURVE/TURN 시각화)
+    let annotationMarkers: [NavigationViewModel.AnnotationMarker]
     /// 목적지 이름 (핀에 표시)
     let destinationName: String?
+
+    init(
+        currentLocation: CLLocationCoordinate2D?,
+        routeCoordinates: [CLLocationCoordinate2D],
+        waypointPins: [NavigationViewModel.WaypointPin] = [],
+        annotationMarkers: [NavigationViewModel.AnnotationMarker] = [],
+        destinationName: String?
+    ) {
+        self.currentLocation = currentLocation
+        self.routeCoordinates = routeCoordinates
+        self.waypointPins = waypointPins
+        self.annotationMarkers = annotationMarkers
+        self.destinationName = destinationName
+    }
 
     /// 지도 카메라 위치
     @State private var cameraPosition: MapCameraPosition = .automatic
@@ -52,7 +70,24 @@ struct MapView: View {
                     .stroke(.blue, lineWidth: 5)
             }
 
-            // 3. 목적지 핀
+            // 3. waypoint 핀 — pointType 별 색상.
+            //    CROSSWALK 노란색 / TURN 회색 / 기타 파란색.
+            ForEach(waypointPins) { pin in
+                Marker(pin.pointType, coordinate: pin.coordinate)
+                    .tint(colorForWaypoint(pin.pointType))
+            }
+
+            // 4. annotation 마커 — type 별 색상.
+            //    CURVE/SLIGHT_CURVE/INTERNAL_CURVE 보라색 / TURN 계열 빨간색.
+            ForEach(annotationMarkers) { ann in
+                Marker(
+                    "\(ann.type)\(ann.direction == "NONE" ? "" : "·\(ann.direction)")",
+                    coordinate: ann.coordinate
+                )
+                .tint(colorForAnnotation(ann.type))
+            }
+
+            // 5. 목적지 핀
             if let destName = destinationName,
                let lastCoord = routeCoordinates.last {
                 Marker(destName, coordinate: lastCoord)
@@ -68,6 +103,26 @@ struct MapView: View {
         }
         .onAppear {
             updateCamera()
+        }
+    }
+
+    // MARK: - 마커 색상
+
+    private func colorForWaypoint(_ pointType: String) -> Color {
+        switch pointType {
+        case "CROSSWALK":   return .yellow
+        case "TURN":        return .gray
+        case "DESTINATION": return .red
+        case "STAIRS":      return .orange
+        default:            return .blue
+        }
+    }
+
+    private func colorForAnnotation(_ type: String) -> Color {
+        switch type {
+        case "CURVE", "SLIGHT_CURVE", "INTERNAL_CURVE": return .purple
+        case "TURN", "SLIGHT_TURN", "SHARP_TURN":       return .pink
+        default:                                        return .gray
         }
     }
 
