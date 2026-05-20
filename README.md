@@ -12,7 +12,7 @@
 - **TBFW (Trust-Based Forward Waypoint)** — GPS 정확도·heading 차·속도를 합쳐 Trust Score를 산출하고, 신뢰도 등급(HIGH/MEDIUM/LOW/CRITICAL)에 따라 waypoint 통과 거리와 안내 강도를 차등 적용
 - **경로 사전 분석** — `RouteAnnotator`가 경로 전체를 곡선/회전/직진으로 사전 분류해 굽은 길을 미리 안내 (현재 iOS TBFW 데모 화면에 연결, 메인 안내 파이프라인 연동 예정)
 - **방향 안내** — Circular Kalman Filter 기반 heading 평활화(GPS accuracy 동적 가중), 시계 방향 안내("3시 방향"), 정지 시 자동 보정
-- **보행 쏠림 보정** — Cross-track error 감지 + 횡단보도 구간 임계값 강화(2m → 1m, bearing diff 15° → 10°)
+- **횡단보도 직진 보정** — 횡단보도 진입 50m 이내 ~ 통과 30m 이내 구간에서 cross-track error(≥1m) 또는 bearing 차이(≥10°) 감지 시 보정 안내
 - **횡단보도 신호** — 서울 T-data 신호제어기 API 연동, 잔여시간 쿨다운 캐싱(60초)
 - **음성 안내** — 한국어 STT(흔들기로 호출), TTS, 거리 기반 오디오 비콘, 입구 방향 스테레오 패닝
 - **신호등 색상 인식** — YOLOv8n(ped_green/ped_red) — *통합 진행 중*
