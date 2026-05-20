@@ -1253,8 +1253,10 @@ class NavigationManager(
         val bearingThreshold = if (onCrosswalk) 10f else 15f
         val crossTrackThreshold = if (onCrosswalk) 1.0f else 2f
 
-        // 점진적 곡선 대응: bearing 차이 + 측면 이탈(cross-track) 둘 다 판정
-        if (!stationary && now - lastCorrectionGuidanceTime >= cooldownMs) {
+        // 좌우 보정 안내는 횡단보도 구간에서만 동작.
+        // 일반 구간의 보행 쏠림은 굽은 길 사전 안내(RouteAnnotator)로 대체됨.
+        // bearing 검사 = 방향 이탈 선행 감지, cross-track 검사 = 위치 이탈 후행 감지.
+        if (onCrosswalk && !stationary && now - lastCorrectionGuidanceTime >= cooldownMs) {
             val diff = angleDiff(routeBearing, userBearing)
             val absDiff = abs(diff)
             val crossTrack = computeSignedCrossTrack(
@@ -1262,35 +1264,20 @@ class NavigationManager(
             )
             val absCross = abs(crossTrack)
 
-            // 1. bearing 기반 (큰 편차 우선) — 사용자가 향한 방향을 "틀어야" 하는 상황.
+            // 1. bearing 기반 — 횡단보도 임계값 10°
             if (absDiff >= bearingThreshold) {
                 lastCorrectionGuidanceTime = now
                 val side = if (diff > 0) "오른쪽" else "왼쪽"
-                val message = if (onCrosswalk) {
-                    // 횡단보도에서는 짧고 즉각적인 멘트로 — 직진 유지에 집중
-                    "횡단보도. 약간 ${side}으로"
-                } else when {
-                    // 90° 이상 큰 편차도 45° 분기와 동일 멘트로 안내 (별도 멘트 제거).
-                    absDiff >= 45f -> "${side}으로 방향을 틀어주세요"
-                    else -> "약간 ${side}으로 방향을 트세요"
-                }
-                speak(message, forceRepeat = true)
+                speak("횡단보도. 약간 ${side}으로", forceRepeat = true)
                 return
             }
 
-            // 2. cross-track 기반 (완만한 곡선에서 점진적 측면 드리프트 감지) — 사용자가 "위치를 옮겨야" 하는 상황.
+            // 2. cross-track 기반 — 횡단보도 임계값 1m
             // crossTrack > 0 → 사용자가 경로 왼쪽에 있음 → 오른쪽으로 가야 함
             if (absCross >= crossTrackThreshold) {
                 lastCorrectionGuidanceTime = now
                 val side = if (crossTrack > 0) "오른쪽" else "왼쪽"
-                val message = if (onCrosswalk) {
-                    "횡단보도. 약간 ${side}으로"
-                } else if (absCross >= 5f) {
-                    "${side}으로 이동하세요"
-                } else {
-                    "약간 ${side}으로 가세요"
-                }
-                speak(message, forceRepeat = true)
+                speak("횡단보도. 약간 ${side}으로", forceRepeat = true)
                 return
             }
         }
