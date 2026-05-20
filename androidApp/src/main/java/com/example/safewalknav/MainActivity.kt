@@ -349,10 +349,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     if (az < 0) az += 360f
                     val delta = ((az - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.15f * delta + 360f) % 360f
-                    navigationManager.updateCompassHeading(currentAzimuth, now)
+                    // PR-FIX: NavigationManager.updateCompassHeading 가 주석 처리됨 — 호출 disabled
+                    // navigationManager.updateCompassHeading(currentAzimuth, now)
                 }
                 // 현재 시스템 시간을 찍어서 NavigationManager에 전달
-                navigationManager.updateCompassHeading(currentAzimuth, now)
+                // PR-FIX: NavigationManager.updateCompassHeading 가 주석 처리됨 — 호출 disabled
+                // navigationManager.updateCompassHeading(currentAzimuth, now)
             }
         }
 
@@ -1018,9 +1020,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     val gpsBearing = location.bearing
                     val delta = ((gpsBearing - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.3f * delta + 360f) % 360f
-                    if (::navigationManager.isInitialized) {
-                        navigationManager.updateCompassHeading(currentAzimuth, System.currentTimeMillis())
-                    }
+                    // PR-FIX: NavigationManager.updateCompassHeading 가 주석 처리됨 — 호출 disabled
+                    // if (::navigationManager.isInitialized) {
+                    //     navigationManager.updateCompassHeading(currentAzimuth, System.currentTimeMillis())
+                    // }
                 }
 
                 navigationManager.updateLocation(location.toGpsLocation())
