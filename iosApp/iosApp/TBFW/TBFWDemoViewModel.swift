@@ -33,11 +33,8 @@ final class TBFWDemoViewModel: ObservableObject {
     /// 사전 분석된 경로 — TBFWDemoView 가 HeadingGuideView 로 첫 waypoint 를 넘길 때 참고.
     @Published private(set) var routeWaypoints: [Waypoint] = []
 
-    /// 현재 Trust Score (0~100)
-    @Published private(set) var trustScore: Int = 0
-
-    /// Trust 카테고리 (HIGH/MEDIUM/LOW/CRITICAL)
-    @Published private(set) var trustLevel: String = "-"
+    /// 현재 GPS 점프 레벨 (NORMAL/SUSPECT/JUMPED)
+    @Published private(set) var jumpLevel: String = "NORMAL"
 
     /// 현재 waypoint까지 거리 (m)
     @Published private(set) var distanceToWaypoint: Float = 0
@@ -177,18 +174,33 @@ final class TBFWDemoViewModel: ObservableObject {
             heading: heading
         )
 
+        // 현재 시각 (ms, epoch) — GPS 점프 감지에 필요.
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+
         // TBFW 호출
-        let result = navigator.update(userState: userState)
+        // 횡단보도 zone — 데모에서는 false. 통합 시 NavigationManager 에서 받아옴.
+        // TODO(post-jump-detection): isInCrosswalkZone 을 NavigationManager 와 연결.
+        let result = navigator.update(
+            userState: userState,
+            currentTimeMs: nowMs,
+            isInCrosswalkZone: false
+        )
 
         // 결과를 @Published에 반영
         self.message = result.message
-        self.trustScore = Int(result.trustScore)
-        self.trustLevel = "\(result.trustLevel)"
+        self.jumpLevel = "\(result.jumpLevel)"
         self.distanceToWaypoint = result.distanceToWaypoint
         self.headingDiff = result.headingDiff
         self.currentWaypointIndex = Int(result.currentWaypointIndex)
         self.didPassWaypoint = result.didPassWaypoint
         self.isFinished = result.isFinished
+
+        // GPS 점프 안내 정책 — ANNOUNCE_DEGRADED 면 점프 안내 발화.
+        // TODO(post-jump-detection): 짧은 진동 1회 추가 (vibrator 인프라 확인 후).
+        if result.guidanceAction == JumpGuidanceAction.announceDegraded {
+            tts?.speak(result.message)
+            print("[TBFW] ⚠️ GPS 점프 안내: \(result.message)")
+        }
 
         // 사전 안내 (annotation) — TrustBasedNavigator 가 한 번만 돌려준다.
         if let announcement = result.annotationAnnouncement,
@@ -202,7 +214,7 @@ final class TBFWDemoViewModel: ObservableObject {
         // 콘솔 로그 — 디버깅용
         print("""
             [TBFW] msg=\(result.message)
-                   trust=\(result.trustScore) (\(result.trustLevel))
+                   jump=\(result.jumpLevel)
                    dist=\(String(format: "%.1f", result.distanceToWaypoint))m
                    heading=\(String(format: "%.1f", result.headingDiff))°
                    idx=\(result.currentWaypointIndex)/\(totalWaypoints)
