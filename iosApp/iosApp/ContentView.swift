@@ -119,7 +119,9 @@ struct NavigationTab: View {
                         if showMap {
                             MapView(
                                 currentLocation: currentCLCoordinate,
-                                routeCoordinates: [],
+                                routeCoordinates: navVM.routeCoordinates,
+                                waypointPins: navVM.waypointPins,
+                                annotationMarkers: navVM.annotationMarkers,
                                 destinationName: navVM.guidanceMessage
                             )
                             .frame(height: 300)

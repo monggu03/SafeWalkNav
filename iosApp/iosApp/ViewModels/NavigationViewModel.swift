@@ -7,6 +7,7 @@
 
 import Foundation
 import Combine
+import CoreLocation
 import Speech
 import shared
 
@@ -35,6 +36,30 @@ final class NavigationViewModel: ObservableObject {
         }
     }
     @Published private(set) var isAtCrosswalk: Bool = false
+
+    // MARK: - 지도 시각화용 데이터
+
+    /// 지도 폴리라인용 좌표 배열
+    @Published private(set) var routeCoordinates: [CLLocationCoordinate2D] = []
+
+    /// 지도 waypoint 핀용 데이터
+    struct WaypointPin: Identifiable {
+        let id: Int
+        let coordinate: CLLocationCoordinate2D
+        let pointType: String
+        let description: String
+    }
+    @Published private(set) var waypointPins: [WaypointPin] = []
+
+    /// 지도 annotation 마커용 데이터 (RouteAnnotator 가 분류한 곡선/회전 지점)
+    struct AnnotationMarker: Identifiable {
+        let id: Int
+        let coordinate: CLLocationCoordinate2D
+        let type: String       // "SLIGHT_CURVE", "CURVE", ...
+        let direction: String  // "LEFT", "RIGHT", "NONE"
+        let totalAngle: Double
+    }
+    @Published private(set) var annotationMarkers: [AnnotationMarker] = []
 
     /// 음성 인식 진행 단계 — UI에서 상태 안내용
     @Published private(set) var voiceFlowStage: VoiceFlowStage = .idle
@@ -327,6 +352,9 @@ final class NavigationViewModel: ObservableObject {
                     self.isAtCrosswalk = newIsAtCrosswalk
                 }
 
+                // 7. 지도 시각화 갱신
+                self.refreshRouteVisualization()
+
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
         }
@@ -350,5 +378,57 @@ final class NavigationViewModel: ObservableObject {
             return false
         }
         return debug.contains("횡단보도=true")
+    }
+
+    // MARK: - 지도 시각화 갱신
+
+    /// NavigationManager.currentRoute + annotations 를 Swift 친화 형태로 변환.
+    /// 폴리라인 좌표, waypoint 핀, annotation 마커를 한꺼번에 갱신.
+    private func refreshRouteVisualization() {
+        guard let route = navigationManager.currentRoute else {
+            if !routeCoordinates.isEmpty { routeCoordinates = [] }
+            if !waypointPins.isEmpty { waypointPins = [] }
+            if !annotationMarkers.isEmpty { annotationMarkers = [] }
+            return
+        }
+
+        // 폴리라인
+        let coords: [CLLocationCoordinate2D] = route.routePoints.map {
+            CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
+        }
+        if coords.count != routeCoordinates.count {
+            routeCoordinates = coords
+        }
+
+        // waypoint 핀
+        let pins: [WaypointPin] = route.waypoints.enumerated().map { (i, wp) in
+            WaypointPin(
+                id: i,
+                coordinate: CLLocationCoordinate2D(latitude: wp.lat, longitude: wp.lon),
+                pointType: wp.pointType,
+                description: wp.description_
+            )
+        }
+        if pins.count != waypointPins.count {
+            waypointPins = pins
+        }
+
+        // annotation 마커
+        let anns = navigationManager.annotations.value as? [PathAnnotation] ?? []
+        let markers: [AnnotationMarker] = anns.compactMap { ann in
+            let startIdx = Int(ann.startWaypointIndex)
+            guard startIdx >= 0, startIdx < route.waypoints.count else { return nil }
+            let wp = route.waypoints[startIdx]
+            return AnnotationMarker(
+                id: startIdx,
+                coordinate: CLLocationCoordinate2D(latitude: wp.lat, longitude: wp.lon),
+                type: ann.type.name,
+                direction: ann.direction.name,
+                totalAngle: ann.totalAngle
+            )
+        }
+        if markers.count != annotationMarkers.count {
+            annotationMarkers = markers
+        }
     }
 }
