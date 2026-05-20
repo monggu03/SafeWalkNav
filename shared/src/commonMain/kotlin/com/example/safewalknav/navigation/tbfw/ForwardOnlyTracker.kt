@@ -1,7 +1,7 @@
 package com.example.safewalknav.navigation.tbfw
 
-import com.example.safewalknav.navigation.tmap.Waypoint
 import com.example.safewalknav.navigation.geo.distanceBetween
+import com.example.safewalknav.navigation.tmap.Waypoint
 import kotlin.math.abs
 
 /**
@@ -14,11 +14,11 @@ import kotlin.math.abs
  *      → GPS 흔들림으로 통과/미통과가 깜빡거리는 것 방지
  *
  * 통과 조건 (모두 만족해야 함):
- *   1. 거리 < 통과 거리 (Trust Level에 따라 8m 또는 12m)
- *   2. Trust Score > 통과 기준 점수 (기본 60)
+ *   1. 거리 < 통과 거리 (점프 레벨에 따라 8m 또는 12m)
+ *   2. GPS 점프 레벨 != JUMPED (JUMPED 동안은 통과 동결)
  *   3. heading 차이 절댓값 < 허용 범위 (기본 45도)
  *
- * Trust Score가 낮으면 통과 처리 보류 — GPS 튐으로 인한 잘못된 통과를 막는다.
+ * heading 은 점수에서 제외하지만, "큰 어긋남 게이트" 로는 유지한다.
  *
  * @param waypoints 따라갈 waypoint 리스트 (TMap에서 받은 경로)
  */
@@ -50,41 +50,34 @@ class ForwardOnlyTracker(
      * waypoint 통과 여부 판정 및 인덱스 갱신.
      *
      * @param distance 현재 위치에서 목표 waypoint까지 거리 (m)
-     * @param trustScore 현재 GPS 신뢰도 점수
-     * @param trustLevel 신뢰도 카테고리
+     * @param jumpLevel 현재 GPS 점프 레벨 (NORMAL/SUSPECT/JUMPED)
      * @param headingDiff 현재 heading - 목표 bearing (-180 ~ +180)
      * @param config threshold 설정
      * @return 이번 호출에서 waypoint를 통과 처리했으면 true
      */
     fun update(
         distance: Float,
-        trustScore: Int,
-        trustLevel: TrustLevel,
+        jumpLevel: GpsJumpLevel,
         headingDiff: Float,
         config: NavigatorConfig
     ): Boolean {
-        // 이미 끝났으면 더 할 일 없음
         if (isFinished) return false
 
-        // CRITICAL — Trust Score가 너무 낮으면 통과 처리 보류
-        // GPS 튐일 가능성이 높아서 잘못된 통과 판정을 막는다 (Forward-Only 동결)
-        if (trustLevel == TrustLevel.CRITICAL) return false
+        // JUMPED 상태에서는 통과 동결 — GPS 튐으로 인한 잘못된 통과를 막는다
+        if (jumpLevel == GpsJumpLevel.JUMPED) return false
 
-        // Trust Level에 따라 통과 거리 차등 적용
-        // HIGH: 8m, MEDIUM: 12m, LOW: 통과 보류
-        val passDistance = when (trustLevel) {
-            TrustLevel.HIGH -> config.passDistanceHigh
-            TrustLevel.MEDIUM -> config.passDistanceMedium
-            TrustLevel.LOW -> return false       // LOW에서는 통과 처리 안 함
-            TrustLevel.CRITICAL -> return false  // 위에서 이미 처리됐지만 명시
+        // 점프 레벨에 따라 통과 거리 차등 적용
+        val passDistance = when (jumpLevel) {
+            GpsJumpLevel.NORMAL  -> config.passDistanceHigh    // 8m
+            GpsJumpLevel.SUSPECT -> config.passDistanceMedium  // 12m
+            GpsJumpLevel.JUMPED  -> return false               // 위에서 이미 처리됐지만 명시
         }
 
-        // 통과 조건 3가지 모두 검증
-        val nearEnough = distance < passDistance
-        val trustEnough = trustScore > config.trustScoreForPass
+        // heading은 "큰 어긋남 게이트"로만 사용 (점수 X)
+        val nearEnough  = distance < passDistance
         val directionOk = abs(headingDiff) < config.headingPassTolerance
 
-        return if (nearEnough && trustEnough && directionOk) {
+        return if (nearEnough && directionOk) {
             // Forward-Only: 인덱스만 증가, 절대 감소 없음
             currentIndex += 1
             true
