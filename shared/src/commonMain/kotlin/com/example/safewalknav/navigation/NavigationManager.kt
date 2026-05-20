@@ -300,8 +300,9 @@ class NavigationManager(
         println("════════════════════════════════════════════════")
 
         // RouteAnnotator 사전 분석 — 실제 안내에 사용.
+        // annotateHybrid: waypoint 1차 + 직진 구간 내부 routePoints 곡률 보조 검사.
         val annotatedResult = runCatching {
-            RouteAnnotator(NavigatorConfig()).annotate(route.waypoints)
+            RouteAnnotator(NavigatorConfig()).annotateHybrid(route.waypoints, route.routePoints)
         }.onFailure { e ->
             println("[NavManager] RouteAnnotator 분석 실패: ${e.message}")
         }.getOrNull()

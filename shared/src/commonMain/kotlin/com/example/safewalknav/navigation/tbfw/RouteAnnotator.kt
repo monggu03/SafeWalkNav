@@ -1,5 +1,6 @@
 package com.example.safewalknav.navigation.tbfw
 
+import com.example.safewalknav.navigation.tmap.LatLng
 import com.example.safewalknav.navigation.tmap.RouteSegment
 import com.example.safewalknav.navigation.tmap.Waypoint
 import com.example.safewalknav.navigation.geo.bearing
@@ -124,6 +125,164 @@ class RouteAnnotator(
         annotations.sortBy { it.distanceFromStartM }
 
         return AnnotatedRoute(waypoints, annotations)
+    }
+
+    /**
+     * 하이브리드 분석 — waypoints 기반 분석 결과에 routePoints 기반 보조 결과를 합친다.
+     *
+     * 동작:
+     *   1. 기존 annotate(waypoints) 로 1차 결과 생성
+     *   2. annotation 이 없는 waypoint 구간(= "직진" 판정 구간) 추출
+     *   3. 그 구간 안에 속하는 routePoints 만 골라 누적 곡률 검사
+     *   4. 임계값 초과 시 추가 PathAnnotation 생성하여 1차 결과에 병합
+     *
+     * 보조 검사 임계값:
+     *   - 최소 구간 길이: minSegmentDistanceM * 5 (즉 15m). 너무 짧으면 노이즈 가능.
+     *   - 누적 각도: curveCumulativeThresholdDeg (30°) 그대로 사용
+     *   - 부호 일관성: curveSignConsistencyRatio (0.75) 그대로 사용
+     *
+     * @param waypoints TMap 응답의 waypoint 리스트
+     * @param routePoints TMap 응답의 폴리라인 좌표 (촘촘한 점들)
+     */
+    fun annotateHybrid(
+        waypoints: List<Waypoint>,
+        routePoints: List<LatLng>,
+    ): AnnotatedRoute {
+        // 1. 기존 waypoint 기반 분석
+        val primary = annotate(waypoints)
+        if (waypoints.size < 2 || routePoints.size < 3) return primary
+
+        // 2. annotation 이 없는 waypoint 구간 추출
+        //    각 waypoint 가 어느 annotation 에 포함되는지 표시
+        val coveredWaypointIndices = mutableSetOf<Int>()
+        for (ann in primary.annotations) {
+            for (i in ann.startWaypointIndex..ann.endWaypointIndex) {
+                coveredWaypointIndices.add(i)
+            }
+        }
+
+        // 3. 직진 구간(연속된 비-cover waypoint 들) 단위로 routePoints 검사
+        val supplementary = mutableListOf<PathAnnotation>()
+        val cumulativeDistances = computeCumulativeDistances(waypoints)
+        var i = 0
+        while (i < waypoints.size - 1) {
+            // 직진 구간 시작 찾기
+            if (i in coveredWaypointIndices) { i++; continue }
+
+            // 직진 구간 끝 찾기
+            var end = i
+            while (end + 1 < waypoints.size && (end + 1) !in coveredWaypointIndices) {
+                end++
+            }
+
+            // i ~ end 사이의 routePoints 만 추출해 검사
+            if (end > i) {
+                val curveAnn = detectCurveInRoutePoints(
+                    waypoints, routePoints, i, end, cumulativeDistances,
+                )
+                if (curveAnn != null) {
+                    supplementary.add(curveAnn)
+                }
+            }
+            i = end + 1
+        }
+
+        // 4. 1차 + 보조 결과 병합 (시간 순서 정렬)
+        val merged = (primary.annotations + supplementary)
+            .sortedBy { it.startWaypointIndex }
+        return AnnotatedRoute(waypoints, merged)
+    }
+
+    /**
+     * waypoint[startIdx] ~ waypoint[endIdx] 사이에 속한 routePoints 들을 모아
+     * 누적 곡률을 검사한다. 임계값 초과 시 PathAnnotation 반환.
+     */
+    private fun detectCurveInRoutePoints(
+        waypoints: List<Waypoint>,
+        routePoints: List<LatLng>,
+        startIdx: Int,
+        endIdx: Int,
+        cumulativeDistances: List<Double>,
+    ): PathAnnotation? {
+        val startWp = waypoints[startIdx]
+        val endWp = waypoints[endIdx]
+
+        // 이 구간 안에 들어가는 routePoints 추출
+        //   기준: 시작 waypoint 에 가장 가까운 routePoint 부터 끝 waypoint 에 가장 가까운 routePoint 까지
+        val startRpIdx = closestRoutePointIndex(routePoints, startWp.lat, startWp.lon)
+        val endRpIdx = closestRoutePointIndex(routePoints, endWp.lat, endWp.lon)
+        if (endRpIdx - startRpIdx < 2) return null
+
+        // 구간 길이 체크 (15m 이상만)
+        var segmentDist = 0.0
+        for (j in startRpIdx until endRpIdx) {
+            segmentDist += distanceBetween(
+                routePoints[j].lat, routePoints[j].lon,
+                routePoints[j + 1].lat, routePoints[j + 1].lon
+            ).toDouble()
+        }
+        if (segmentDist < config.minSegmentDistanceM * 5) return null
+
+        // routePoints 누적 곡률 계산
+        var cumulative = 0.0
+        var peak = 0.0
+        var sameSignCount = 0
+        var totalCount = 0
+        var sign = 0.0
+
+        for (j in startRpIdx until endRpIdx - 1) {
+            val a = routePoints[j]
+            val b = routePoints[j + 1]
+            val c = routePoints[j + 2]
+            val d1 = distanceBetween(a.lat, a.lon, b.lat, b.lon).toDouble()
+            val d2 = distanceBetween(b.lat, b.lon, c.lat, c.lon).toDouble()
+            if (d1 < config.minSegmentDistanceM || d2 < config.minSegmentDistanceM) continue
+
+            val b1 = bearing(a.lat, a.lon, b.lat, b.lon).toDouble()
+            val b2 = bearing(b.lat, b.lon, c.lat, c.lon).toDouble()
+            val delta = normalizeAngle(b2 - b1)
+
+            if (abs(delta) < config.noiseAngleThresholdDeg) continue
+
+            if (sign == 0.0) sign = if (delta >= 0) 1.0 else -1.0
+            val isSameSign = (delta >= 0 && sign > 0) || (delta < 0 && sign < 0)
+            cumulative += delta
+            if (abs(delta) > abs(peak)) peak = delta
+            totalCount++
+            if (isSameSign) sameSignCount++
+        }
+
+        if (totalCount == 0) return null
+        val ratio = sameSignCount.toDouble() / totalCount
+        if (ratio < config.curveSignConsistencyRatio) return null
+        if (abs(cumulative) < config.curveCumulativeThresholdDeg) return null
+
+        // 보조 annotation 생성 (CURVE 로 분류)
+        val partial = PathAnnotation(
+            startWaypointIndex = startIdx,
+            endWaypointIndex = endIdx,
+            type = if (abs(cumulative) < config.slightThresholdDeg + 5.0)
+                PathSegmentType.SLIGHT_CURVE else PathSegmentType.CURVE,
+            direction = if (cumulative >= 0) TurnDirection.RIGHT else TurnDirection.LEFT,
+            totalAngle = cumulative,
+            peakAngle = peak,
+            distanceFromStartM = cumulativeDistances.getOrElse(startIdx) { 0.0 },
+            announceMessage = "",
+        )
+        return partial.copy(announceMessage = MessageBuilder.buildAnnotationAnnounce(partial))
+    }
+
+    private fun closestRoutePointIndex(
+        routePoints: List<LatLng>,
+        lat: Double, lon: Double,
+    ): Int {
+        var minDist = Double.MAX_VALUE
+        var idx = 0
+        for ((i, p) in routePoints.withIndex()) {
+            val d = distanceBetween(p.lat, p.lon, lat, lon).toDouble()
+            if (d < minDist) { minDist = d; idx = i }
+        }
+        return idx
     }
 
     /** scanCurve 의 결과 묶음 — 어디까지 묶었는지 + 누적/peak/일관성. */
