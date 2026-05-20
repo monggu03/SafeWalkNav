@@ -108,11 +108,13 @@ class NavigationManager(
     // 이미 발화한 annotation 의 startWaypointIndex 집합. 중복 발화 방지.
     private val announcedAnnotationIds = mutableSetOf<Int>()
 
-    // 외부 노출은 별도 커밋. 본 커밋에서는 내부 누적만.
+    // 디버그용 — iOS 에서 관찰 가능하게 StateFlow 로 노출
     private val _annotations = MutableStateFlow<List<PathAnnotation>>(emptyList())
+    val annotations: StateFlow<List<PathAnnotation>> = _annotations.asStateFlow()
 
-    // 발화 로그 — 최근 20개만 유지. 외부 노출은 별도 커밋.
+    // 발화 로그 — 최근 20개만 유지
     private val _announcementLog = MutableStateFlow<List<String>>(emptyList())
+    val announcementLog: StateFlow<List<String>> = _announcementLog.asStateFlow()
 
     val lastError: String? get() = tMapApiClient.lastError
 
