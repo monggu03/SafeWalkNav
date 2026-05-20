@@ -14,6 +14,8 @@ import com.example.safewalknav.navigation.signal.TrafficSignalLocation
 import com.example.safewalknav.navigation.signal.TrafficSignalMatcher
 import com.example.safewalknav.navigation.signal.TrafficSignalRemainingTimeParser
 import com.example.safewalknav.navigation.tbfw.NavigatorConfig
+import com.example.safewalknav.navigation.tbfw.PathAnnotation
+import com.example.safewalknav.navigation.tbfw.PathSegmentType
 import com.example.safewalknav.navigation.tbfw.RouteAnnotationLogger
 import com.example.safewalknav.navigation.tbfw.RouteAnnotator
 import com.example.safewalknav.navigation.tmap.ArrivalState
@@ -99,6 +101,18 @@ class NavigationManager(
     // 목적지까지 실시간 거리 (오디오 비콘용)
     private val _distanceToDestination = MutableStateFlow(Float.MAX_VALUE)
     val distanceToDestination: StateFlow<Float> = _distanceToDestination
+
+    // RouteAnnotator 사전 분석 결과 — startNavigation() 에서 채움.
+    private var currentAnnotations: List<PathAnnotation> = emptyList()
+
+    // 이미 발화한 annotation 의 startWaypointIndex 집합. 중복 발화 방지.
+    private val announcedAnnotationIds = mutableSetOf<Int>()
+
+    // 외부 노출은 별도 커밋. 본 커밋에서는 내부 누적만.
+    private val _annotations = MutableStateFlow<List<PathAnnotation>>(emptyList())
+
+    // 발화 로그 — 최근 20개만 유지. 외부 노출은 별도 커밋.
+    private val _announcementLog = MutableStateFlow<List<String>>(emptyList())
 
     val lastError: String? get() = tMapApiClient.lastError
 
@@ -285,18 +299,29 @@ class NavigationManager(
         }
         println("════════════════════════════════════════════════")
 
-        // RouteAnnotator 사전 분석 결과 로그 — 임계값 튜닝/검증용.
-        // 실제 안내에는 아직 사용하지 않는다 (NavigationManager 는 자체 announceUpcomingCorner 사용).
-        // 지도와 비교해 분류가 맞는지 확인할 수 있게 사람이 읽기 좋은 포맷으로 찍는다.
-        runCatching {
-            val annotated = RouteAnnotator(NavigatorConfig()).annotate(route.waypoints)
-            RouteAnnotationLogger.log(
-                annotated = annotated,
-                routeName = "현재 위치 → ${endName}",
-                totalDistanceM = route.totalDistance,
-            )
+        // RouteAnnotator 사전 분석 — 실제 안내에 사용.
+        val annotatedResult = runCatching {
+            RouteAnnotator(NavigatorConfig()).annotate(route.waypoints)
         }.onFailure { e ->
-            println("[NavManager] RouteAnnotator 로그 실패: ${e.message}")
+            println("[NavManager] RouteAnnotator 분석 실패: ${e.message}")
+        }.getOrNull()
+
+        currentAnnotations = annotatedResult?.annotations ?: emptyList()
+        announcedAnnotationIds.clear()
+        _annotations.value = currentAnnotations
+        _announcementLog.value = emptyList()
+
+        // 사람이 읽기 좋은 포맷으로도 한 번 더 출력 — 임계값 튜닝/검증용.
+        annotatedResult?.let {
+            runCatching {
+                RouteAnnotationLogger.log(
+                    annotated = it,
+                    routeName = "현재 위치 → ${endName}",
+                    totalDistanceM = route.totalDistance,
+                )
+            }.onFailure { e ->
+                println("[NavManager] RouteAnnotator 로그 실패: ${e.message}")
+            }
         }
 
         cachedNearbyPOIs = emptyList()
@@ -402,6 +427,10 @@ class NavigationManager(
         arrivalInfoLoaded = false
         consecutiveDeviationCount = 0
         consecutiveRerouteCount = 0
+        currentAnnotations = emptyList()
+        announcedAnnotationIds.clear()
+        _annotations.value = emptyList()
+        _announcementLog.value = emptyList()
 
         // Heading Kalman 상태 리셋
         kalmanHeading.reset()
@@ -419,6 +448,9 @@ class NavigationManager(
         lastSpokenMessage = ""
         consecutiveDeviationCount = 0
         consecutiveRerouteCount = 0
+        currentAnnotations = emptyList()
+        announcedAnnotationIds.clear()
+        _annotations.value = emptyList()
 
         // Heading Kalman 상태 리셋
         kalmanHeading.reset()
@@ -561,9 +593,15 @@ class NavigationManager(
         // waypoint 안내
         updateWaypointGuidance(currentLat, currentLon, userBearing, speed)
 
-        // 폴리라인 기반 코너 선제 안내 (T-Map waypoint 누락 보완)
+        // 폴리라인 기반 코너 선제 안내 — RouteAnnotator 로 대체됨.
+        // 복구가 필요하면 아래 주석을 풀고 RouteAnnotator 발화 부분(checkAndAnnounceAnnotation)을 막을 것.
+        // if (_arrivalState.value == ArrivalState.FAR) {
+        //     announceUpcomingCorner(currentLat, currentLon, speed)
+        // }
+
+        // RouteAnnotator 사전 안내 발화
         if (_arrivalState.value == ArrivalState.FAR) {
-            announceUpcomingCorner(currentLat, currentLon, speed)
+            checkAndAnnounceAnnotation(currentLat, currentLon, route)
         }
 
         // 직진 구간 무음 방지 + 점진적 꺾임 보정 안내
@@ -1322,6 +1360,65 @@ class NavigationManager(
     // 같은 패키지(com.example.safewalknav.navigation)이므로 import 없이 자동 호출됨.
 
     /**
+     * RouteAnnotator 가 미리 분석한 annotation 을 사용자 위치 기반으로 발화한다.
+     *
+     * 발화 조건:
+     *   - annotation 시작 waypoint 까지 남은 거리가 announceDistance 이하
+     *   - 같은 annotation 은 한 번만 발화 (announcedAnnotationIds 로 중복 방지)
+     *   - announceMessage 가 비어있지 않음 (STRAIGHT/NONE 은 빈 문자열)
+     *
+     * announceDistance 는 annotation type 에 따라 다름:
+     *   SLIGHT_CURVE, CURVE, INTERNAL_CURVE → announceDistanceCurveM (15m)
+     *   SLIGHT_TURN, TURN                   → announceDistanceTurnM  (20m)
+     *   SHARP_TURN                          → announceDistanceSharpM (25m)
+     */
+    private fun checkAndAnnounceAnnotation(
+        currentLat: Double, currentLon: Double,
+        route: TMapRoute,
+    ) {
+        if (currentAnnotations.isEmpty()) return
+        val config = NavigatorConfig()
+
+        for (ann in currentAnnotations) {
+            // 이미 발화한 annotation 은 건너뜀
+            if (ann.startWaypointIndex in announcedAnnotationIds) continue
+            // 비어있는 메시지 건너뜀 (STRAIGHT 등)
+            if (ann.announceMessage.isBlank()) continue
+            // startWaypointIndex 가 이미 지나간 waypoint 면 건너뜀
+            if (ann.startWaypointIndex < currentWaypointIndex) {
+                announcedAnnotationIds.add(ann.startWaypointIndex)
+                continue
+            }
+
+            // 시작 waypoint 까지의 거리
+            val startWp = route.waypoints.getOrNull(ann.startWaypointIndex) ?: continue
+            val distToStart = distanceBetween(
+                currentLat, currentLon, startWp.lat, startWp.lon
+            )
+
+            // type 별 announceDistance 결정
+            val announceDist = when (ann.type) {
+                PathSegmentType.SLIGHT_CURVE,
+                PathSegmentType.CURVE,
+                PathSegmentType.INTERNAL_CURVE ->
+                    config.announceDistanceCurveM.toFloat()
+                PathSegmentType.SLIGHT_TURN, PathSegmentType.TURN ->
+                    config.announceDistanceTurnM.toFloat()
+                PathSegmentType.SHARP_TURN ->
+                    config.announceDistanceSharpM.toFloat()
+                PathSegmentType.STRAIGHT -> continue
+            }
+
+            // 거리 내 진입 시 발화
+            if (distToStart <= announceDist) {
+                speak(ann.announceMessage)
+                announcedAnnotationIds.add(ann.startWaypointIndex)
+                return  // 한 update 에 한 번만 발화
+            }
+        }
+    }
+
+    /**
      * 폴리라인 코너 선제 안내
      * T-Map waypoint이 없는 각도 변화(골목→인도 진입 등)를 routePoints 기하로 감지.
      * 15m 이내 앞에서 30° 이상 꺾이는 지점을 미리 안내.
@@ -1584,6 +1681,11 @@ class NavigationManager(
         if (!forceRepeat && message == lastSpokenMessage) return
         lastSpokenMessage = message
         _guidanceMessage.value = message
+
+        // 디버그 로그 — 외부 노출은 별도 커밋. 최근 20개만 유지.
+        val timestamp = currentTimeMillis()
+        val entry = "[${timestamp % 100_000}] $message"
+        _announcementLog.value = (_announcementLog.value + entry).takeLast(20)
     }
 
     // ========== CSV 로그 위임 ==========
