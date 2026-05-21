@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import Combine
 import shared
 
 struct HeadingGuideView: View {
@@ -17,17 +18,21 @@ struct HeadingGuideView: View {
     private let firstWaypoint: Waypoint
     /// state == .ready 도달 시 호출. 데모/실서비스 흐름에서 다음 단계로 넘어갈 때 사용.
     private let onReady: () -> Void
+    /// GPS 위치 업데이트 publisher (optional). 주어지면 사용자가 실제 걷기 시작했을 때 자동 dismiss.
+    private let locationPublisher: AnyPublisher<GpsLocation?, Never>?
 
     init(
         tts: TtsManager,
         currentLocation: GpsLocation,
         firstWaypoint: Waypoint,
         onReady: @escaping () -> Void = {},
+        locationPublisher: AnyPublisher<GpsLocation?, Never>? = nil,
     ) {
         _guide = StateObject(wrappedValue: HeadingGuide(tts: tts))
         self.currentLocation = currentLocation
         self.firstWaypoint = firstWaypoint
         self.onReady = onReady
+        self.locationPublisher = locationPublisher
     }
 
     var body: some View {
@@ -88,7 +93,15 @@ struct HeadingGuideView: View {
         }
         .navigationTitle("초기 방향 안내")
         .onAppear {
-            guide.start(currentLocation: currentLocation, firstWaypoint: firstWaypoint)
+            guide.start(
+                currentLocation: currentLocation,
+                firstWaypoint: firstWaypoint,
+                locationPublisher: locationPublisher,
+                onMovementDetected: {
+                    // 사용자가 실제로 걷기 시작 — 안내 종료 후 화면 dismiss.
+                    dismiss()
+                },
+            )
         }
         .onDisappear {
             guide.stop()

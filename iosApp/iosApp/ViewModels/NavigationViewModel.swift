@@ -7,6 +7,7 @@
 
 import Foundation
 import Combine
+import CoreLocation
 import Speech
 import shared
 
@@ -35,6 +36,43 @@ final class NavigationViewModel: ObservableObject {
         }
     }
     @Published private(set) var isAtCrosswalk: Bool = false
+
+    // MARK: - 지도 시각화용 데이터
+
+    /// 지도 폴리라인용 좌표 배열
+    @Published private(set) var routeCoordinates: [CLLocationCoordinate2D] = []
+
+    /// 지도 waypoint 핀용 데이터
+    struct WaypointPin: Identifiable {
+        let id: Int
+        let coordinate: CLLocationCoordinate2D
+        let pointType: String
+        let description: String
+    }
+    @Published private(set) var waypointPins: [WaypointPin] = []
+
+    /// 지도 annotation 마커용 데이터 (RouteAnnotator 가 분류한 곡선/회전 지점)
+    struct AnnotationMarker: Identifiable {
+        let id: Int
+        let coordinate: CLLocationCoordinate2D
+        let type: String       // "SLIGHT_CURVE", "CURVE", ...
+        let direction: String  // "LEFT", "RIGHT", "NONE"
+        let totalAngle: Double
+    }
+    @Published private(set) var annotationMarkers: [AnnotationMarker] = []
+
+    /// 디버그 패널 — 발화 로그 (최근 20개)
+    @Published private(set) var announcementLog: [String] = []
+
+    /// 디버그 패널 — 사용자가 다가가고 있는 미발화 annotation 정보
+    struct UpcomingAnnotation {
+        let type: String
+        let direction: String
+        let totalAngle: Double
+        let distanceM: Double
+        let message: String
+    }
+    @Published private(set) var upcomingAnnotation: UpcomingAnnotation?
 
     /// 음성 인식 진행 단계 — UI에서 상태 안내용
     @Published private(set) var voiceFlowStage: VoiceFlowStage = .idle
@@ -248,17 +286,6 @@ final class NavigationViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
-    /// HeadingProvider 의 drift 알림 — 직선 구간에서 base heading 대비 ±15° 이상 벗어나면 1회 발화.
-    /// option (b) 작업에서 보존: feature/walking-drift 의 쏠림 보정 핵심 동작.
-    private func handleDriftAlertIfNeeded() {
-        guard isNavigating else { return }
-        guard headingProvider.isDrifting else { return }
-
-        let direction = headingProvider.driftDegrees > 0 ? "오른쪽" : "왼쪽"
-        let absDeg = Int(abs(headingProvider.driftDegrees))
-        tts.speak("\(direction)으로 \(absDeg)도 벗어났습니다", priority: .high)
-    }
-
     private func handleRecognizedDestination(_ keyword: String) async {
         voiceFlowStage = .searching
         tts.speak("\(keyword)을(를) 검색합니다.", priority: .normal)
@@ -338,8 +365,10 @@ final class NavigationViewModel: ObservableObject {
                     self.isAtCrosswalk = newIsAtCrosswalk
                 }
 
-                // 7. drift 알림 (HeadingProvider 기반)
-                self.handleDriftAlertIfNeeded()
+                // 7. 지도 시각화 갱신
+                self.refreshRouteVisualization()
+                self.refreshAnnouncementLog()
+                self.refreshUpcomingAnnotation()
 
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
@@ -364,5 +393,117 @@ final class NavigationViewModel: ObservableObject {
             return false
         }
         return debug.contains("횡단보도=true")
+    }
+
+    // MARK: - 지도 시각화 갱신
+
+    /// NavigationManager.currentRoute + annotations 를 Swift 친화 형태로 변환.
+    /// 폴리라인 좌표, waypoint 핀, annotation 마커를 한꺼번에 갱신.
+    private func refreshRouteVisualization() {
+        guard let route = navigationManager.currentRoute else {
+            if !routeCoordinates.isEmpty { routeCoordinates = [] }
+            if !waypointPins.isEmpty { waypointPins = [] }
+            if !annotationMarkers.isEmpty { annotationMarkers = [] }
+            return
+        }
+
+        // 폴리라인
+        let coords: [CLLocationCoordinate2D] = route.routePoints.map {
+            CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon)
+        }
+        if coords.count != routeCoordinates.count {
+            routeCoordinates = coords
+        }
+
+        // waypoint 핀
+        let pins: [WaypointPin] = route.waypoints.enumerated().map { (i, wp) in
+            WaypointPin(
+                id: i,
+                coordinate: CLLocationCoordinate2D(latitude: wp.lat, longitude: wp.lon),
+                pointType: wp.pointType,
+                description: wp.description_
+            )
+        }
+        if pins.count != waypointPins.count {
+            waypointPins = pins
+        }
+
+        // annotation 마커
+        let anns = navigationManager.annotations.value as? [PathAnnotation] ?? []
+        let markers: [AnnotationMarker] = anns.compactMap { ann in
+            let startIdx = Int(ann.startWaypointIndex)
+            guard startIdx >= 0, startIdx < route.waypoints.count else { return nil }
+            let wp = route.waypoints[startIdx]
+            return AnnotationMarker(
+                id: startIdx,
+                coordinate: CLLocationCoordinate2D(latitude: wp.lat, longitude: wp.lon),
+                type: ann.type.name,
+                direction: ann.direction.name,
+                totalAngle: ann.totalAngle
+            )
+        }
+        if markers.count != annotationMarkers.count {
+            annotationMarkers = markers
+        }
+    }
+
+    /// 발화 로그 StateFlow → @Published 동기화.
+    private func refreshAnnouncementLog() {
+        let log = (navigationManager.announcementLog.value as? [String]) ?? []
+        if log.count != announcementLog.count {
+            announcementLog = log
+        }
+    }
+
+    /// 다가오는(아직 발화 안 된, 현재 waypoint 이후의) annotation 중 가장 가까운 것 1건.
+    private func refreshUpcomingAnnotation() {
+        guard let route = navigationManager.currentRoute,
+              let loc = locationTracker.currentLocation,
+              let anns = navigationManager.annotations.value as? [PathAnnotation],
+              !anns.isEmpty
+        else {
+            if upcomingAnnotation != nil { upcomingAnnotation = nil }
+            return
+        }
+
+        var best: (PathAnnotation, Double)? = nil
+        for ann in anns {
+            if ann.announceMessage.isEmpty { continue }
+            let startIdx = Int(ann.startWaypointIndex)
+            guard startIdx >= 0, startIdx < route.waypoints.count else { continue }
+            let wp = route.waypoints[startIdx]
+            let dist = haversineMeters(
+                loc.latitude, loc.longitude, wp.lat, wp.lon
+            )
+            if best == nil || dist < best!.1 {
+                best = (ann, dist)
+            }
+        }
+
+        if let (ann, dist) = best {
+            upcomingAnnotation = UpcomingAnnotation(
+                type: ann.type.name,
+                direction: ann.direction.name,
+                totalAngle: ann.totalAngle,
+                distanceM: dist,
+                message: ann.announceMessage
+            )
+        } else if upcomingAnnotation != nil {
+            upcomingAnnotation = nil
+        }
+    }
+
+    /// Haversine 거리 (m) — RouteAnnotator 와 같은 결과를 내야 할 만큼 정확하지 않아도 됨 (디버그 표시용).
+    private func haversineMeters(
+        _ lat1: Double, _ lon1: Double, _ lat2: Double, _ lon2: Double
+    ) -> Double {
+        let r = 6371000.0
+        let dLat = (lat2 - lat1) * .pi / 180.0
+        let dLon = (lon2 - lon1) * .pi / 180.0
+        let a = sin(dLat / 2) * sin(dLat / 2)
+              + cos(lat1 * .pi / 180.0) * cos(lat2 * .pi / 180.0)
+              * sin(dLon / 2) * sin(dLon / 2)
+        let c = 2 * atan2(sqrt(a), sqrt(1 - a))
+        return r * c
     }
 }

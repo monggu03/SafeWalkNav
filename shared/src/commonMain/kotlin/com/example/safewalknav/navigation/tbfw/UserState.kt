@@ -1,6 +1,6 @@
 package com.example.safewalknav.navigation.tbfw
 
-import com.example.safewalknav.navigation.GpsLocation
+import com.example.safewalknav.navigation.platform.GpsLocation
 
 /**
  * TBFW Navigator에 입력으로 들어가는 사용자 상태 묶음.

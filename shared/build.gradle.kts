@@ -1,12 +1,13 @@
 plugins {
     kotlin("multiplatform")
     id("com.android.library")
-    kotlin("plugin.serialization") version "1.9.22"   // 🆕
+    kotlin("plugin.serialization") version "1.9.22"
 }
 
 val ktorVersion = "2.3.7"
 val kotlinxSerializationVersion = "1.6.2"
 val coroutinesVersion = "1.7.3"
+val kotlinxDatetimeVersion = "0.5.0"   // 🆕
 
 val isRunningOnMac = System.getProperty("os.name").orEmpty().startsWith("Mac")
 
@@ -42,6 +43,9 @@ kotlin {
             // SignalApiClient 자동 JSON 파싱용
             implementation("io.ktor:ktor-client-content-negotiation:$ktorVersion")
             implementation("io.ktor:ktor-serialization-kotlinx-json:$ktorVersion")
+
+            // 🆕 TrafficLightCountdownService 쿨다운 시간 계산용
+            implementation("org.jetbrains.kotlinx:kotlinx-datetime:$kotlinxDatetimeVersion")
         }
         commonTest.dependencies {
             implementation(kotlin("test"))

@@ -11,55 +11,62 @@ package com.example.safewalknav.navigation.tbfw
  * 실측 후 특정 값만 바꿀 때:
  *   NavigatorConfig(passDistanceHigh = 6.0)
  *
- * @param gpsHighAccuracy 이 값(m) 이하이면 Trust HIGH 후보. 기본 10m.
- * @param gpsMediumAccuracy 이 값(m) 이하이면 Trust MEDIUM 후보. 기본 25m.
- *
- * @param trustScoreForPass waypoint 통과 처리에 필요한 최소 Trust Score. 기본 60.
- * @param trustScoreForLowWarning 이 값 미만이면 "위치 정확도 낮음" 경고. 기본 40.
- *
- * @param passDistanceHigh Trust HIGH일 때 waypoint 통과 거리 (m). 기본 8m.
- * @param passDistanceMedium Trust MEDIUM일 때 waypoint 통과 거리 (m). 기본 12m.
- *
+ * @param passDistanceHigh GPS 점프 NORMAL일 때 waypoint 통과 거리 (m). 기본 8m.
+ * @param passDistanceMedium GPS 점프 SUSPECT일 때 waypoint 통과 거리 (m). 기본 12m.
  * @param headingPassTolerance waypoint 통과 시 허용되는 heading 차이 (도). 기본 45도.
  *
- * @param scoreGpsHigh GPS accuracy HIGH일 때 부여 점수. 기본 40.
- * @param scoreGpsMedium GPS accuracy MEDIUM일 때 부여 점수. 기본 25.
- * @param scoreGpsLow GPS accuracy 50m 이하일 때 부여 점수. 기본 10.
+ * @param jumpSpeedSuspect 함의 속도 이상이면 SUSPECT 판정 (m/s). 기본 5.0.
+ * @param jumpSpeedCritical 함의 속도 이상이면 단발성도 JUMPED (m/s). 기본 10.0.
+ * @param suspectStreakForJump SUSPECT 연속 N회 이상이면 JUMPED 승격. 기본 2회.
  *
- * @param scoreHeadingClose heading 차이 15도 이내일 때 점수. 기본 30.
- * @param scoreHeadingMid heading 차이 35도 이내일 때 점수. 기본 20.
- * @param scoreHeadingFar heading 차이 60도 이내일 때 점수. 기본 10.
- *
- * @param scoreSpeedNormal 보행 속도 정상(0.3~2.0 m/s)일 때 점수. 기본 20.
- * @param scoreSpeedAbnormal 보행 속도 비정상일 때 점수. 기본 5.
+ * @param jumpSilentWindowMs JUMPED 진입 직후 침묵 구간 (ms). 기본 3000ms.
+ * @param jumpAnnounceMaxOnceMs JUMPED 안내 가능 한계 시각 (ms, 참고용). 기본 10000ms.
+ * @param jumpRecoveryAnnounceCooldownMs 점프 안내 간 최소 쿨다운 (ms). 기본 5000ms.
  */
 data class NavigatorConfig(
-    // GPS 신뢰도 구간
+    // ─── DEPRECATED (구 Trust Score 기반, 본 코드에서 더 이상 사용 안 함) ───
+    // 향후 어떤 모듈도 참조하지 않음이 확인되면 v2에서 삭제 예정.
+    @Deprecated("Trust Score 폐기됨. GPS 점프 감지로 대체. 참조 모듈 확인 후 제거 예정.")
     val gpsHighAccuracy: Double = 10.0,
+    @Deprecated("Trust Score 폐기됨. GPS 점프 감지로 대체. 참조 모듈 확인 후 제거 예정.")
     val gpsMediumAccuracy: Double = 25.0,
-
-    // Trust Score 통과 기준
+    @Deprecated("Trust Score 폐기됨. GPS 점프 감지로 대체. 참조 모듈 확인 후 제거 예정.")
     val trustScoreForPass: Int = 60,
+    @Deprecated("Trust Score 폐기됨. GPS 점프 감지로 대체. 참조 모듈 확인 후 제거 예정.")
     val trustScoreForLowWarning: Int = 40,
+    @Deprecated("Trust Score 폐기됨. GPS 점프 감지로 대체. 참조 모듈 확인 후 제거 예정.")
+    val scoreGpsHigh: Int = 40,
+    @Deprecated("Trust Score 폐기됨. GPS 점프 감지로 대체. 참조 모듈 확인 후 제거 예정.")
+    val scoreGpsMedium: Int = 25,
+    @Deprecated("Trust Score 폐기됨. GPS 점프 감지로 대체. 참조 모듈 확인 후 제거 예정.")
+    val scoreGpsLow: Int = 10,
+    @Deprecated("Trust Score 폐기됨. GPS 점프 감지로 대체. 참조 모듈 확인 후 제거 예정.")
+    val scoreHeadingClose: Int = 30,
+    @Deprecated("Trust Score 폐기됨. GPS 점프 감지로 대체. 참조 모듈 확인 후 제거 예정.")
+    val scoreHeadingMid: Int = 20,
+    @Deprecated("Trust Score 폐기됨. GPS 점프 감지로 대체. 참조 모듈 확인 후 제거 예정.")
+    val scoreHeadingFar: Int = 10,
+    @Deprecated("Trust Score 폐기됨. GPS 점프 감지로 대체. 참조 모듈 확인 후 제거 예정.")
+    val scoreSpeedNormal: Int = 20,
+    @Deprecated("Trust Score 폐기됨. GPS 점프 감지로 대체. 참조 모듈 확인 후 제거 예정.")
+    val scoreSpeedAbnormal: Int = 5,
 
-    // Waypoint 통과 거리 (신뢰도별 차등)
+    // ─── Waypoint 통과 거리 (점프 레벨별 차등) ───
     val passDistanceHigh: Double = 8.0,
     val passDistanceMedium: Double = 12.0,
 
-    // Heading 허용 범위
+    // ─── Heading 허용 범위 ───
     val headingPassTolerance: Double = 45.0,
 
-    // Trust Score 가중치
-    val scoreGpsHigh: Int = 40,
-    val scoreGpsMedium: Int = 25,
-    val scoreGpsLow: Int = 10,
+    // ─── GPS 점프 감지 (NEW) ───
+    val jumpSpeedSuspect: Double = 5.0,     // m/s. 이 이상이면 SUSPECT.
+    val jumpSpeedCritical: Double = 10.0,   // m/s. 이 이상이면 단발성도 JUMPED.
+    val suspectStreakForJump: Int = 2,      // SUSPECT 연속 N회 이상이면 JUMPED 승격.
 
-    val scoreHeadingClose: Int = 30,
-    val scoreHeadingMid: Int = 20,
-    val scoreHeadingFar: Int = 10,
-
-    val scoreSpeedNormal: Int = 20,
-    val scoreSpeedAbnormal: Int = 5,
+    // ─── GPS 점프 시 안내 정책 (NEW) ───
+    val jumpSilentWindowMs: Long = 3_000,                  // 0~3초: 안내 없음
+    val jumpAnnounceMaxOnceMs: Long = 10_000,              // 3~10초: 1회만 안내
+    val jumpRecoveryAnnounceCooldownMs: Long = 5_000,      // 복귀 후 다음 튐 안내까지 최소 간격
 
     // ─── 보행 쏠림 보정 (Path Annotation) ───
     // 경로 분석용 — RouteAnnotator가 waypoint 시퀀스를 곡선/회전으로 분류할 때 쓰는 임계값.

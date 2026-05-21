@@ -1,5 +1,7 @@
 package com.example.safewalknav.navigation
 
+import com.example.safewalknav.navigation.platform.Logger
+import com.example.safewalknav.navigation.walking.HeadingLogger
 import java.io.BufferedWriter
 import java.io.File
 import java.io.FileWriter
