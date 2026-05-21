@@ -189,15 +189,9 @@ struct NavigationStatusCard: View {
                     .cornerRadius(8)
             }
 
-            if deps.headingProvider.isDrifting {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
-                    let direction = deps.headingProvider.driftDegrees > 0 ? "오른쪽" : "왼쪽"
-                    Text("\(direction)으로 \(Int(abs(deps.headingProvider.driftDegrees)))° 벗어남")
-                        .foregroundColor(.orange)
-                }
-            }
+            // 2026-05-21 — drift 배너 비활성화. 시각장애 보행자에게 "오른쪽으로 N° 벗어남"
+            // 식 좌우 보정 안내는 체감이 어렵다. 굽은 길은 RouteAnnotator 사전 안내가 대체.
+            // headingProvider.isDrifting/driftDegrees 자체는 디버그 패널에서 그대로 참고 가능.
 
             if let err = navVM.errorMessage {
                 Text("⚠️ \(err)")

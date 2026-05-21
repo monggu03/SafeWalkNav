@@ -4,6 +4,7 @@ import com.example.safewalknav.navigation.tmap.LatLng
 import com.example.safewalknav.navigation.tmap.RouteSegment
 import com.example.safewalknav.navigation.tmap.Waypoint
 import com.example.safewalknav.navigation.geo.bearing
+import com.example.safewalknav.navigation.geo.computeCumulativeDistances
 import com.example.safewalknav.navigation.geo.distanceBetween
 import kotlin.math.abs
 
@@ -73,6 +74,10 @@ class RouteAnnotator(
                 when {
                     // 단일 회전 — peak 우선. 곡선 후보보다 먼저 검사.
                     abs(delta) >= config.turnPeakThresholdDeg -> {
+                        val dir = if (delta >= 0) "RIGHT" else "LEFT"
+                        println("[Annotator IN ] idx=$i prev=(${a.lat},${a.lon}) " +
+                                "curr=(${b.lat},${b.lon}) next=(${c.lat},${c.lon})")
+                        println("[Annotator TURN] idx=$i b1=$b1 b2=$b2 delta=$delta direction=$dir")
                         annotations.add(
                             buildTurnAnnotation(
                                 startIdx = i,
@@ -90,6 +95,11 @@ class RouteAnnotator(
                         val sigOk = curve.consistencyRatio >= config.curveSignConsistencyRatio
                         val cumOk = abs(curve.cumulative) >= config.curveCumulativeThresholdDeg
                         if (sigOk && cumOk) {
+                            val dir = if (curve.cumulative >= 0) "RIGHT" else "LEFT"
+                            println("[Annotator IN  ] idx=$i prev=(${a.lat},${a.lon}) " +
+                                    "curr=(${b.lat},${b.lon}) next=(${c.lat},${c.lon})")
+                            println("[Annotator CURVE] idx=$i b1=$b1 b2=$b2 delta=$delta " +
+                                    "cumulative=${curve.cumulative} endIdx=${curve.endIdx} direction=$dir")
                             annotations.add(
                                 buildCurveAnnotation(
                                     startIdx = i,
@@ -256,6 +266,11 @@ class RouteAnnotator(
         val ratio = sameSignCount.toDouble() / totalCount
         if (ratio < config.curveSignConsistencyRatio) return null
         if (abs(cumulative) < config.curveCumulativeThresholdDeg) return null
+
+        val dir = if (cumulative >= 0) "RIGHT" else "LEFT"
+        println("[Annotator RP-CURVE] startIdx=$startIdx endIdx=$endIdx " +
+                "startWp=(${startWp.lat},${startWp.lon}) endWp=(${endWp.lat},${endWp.lon}) " +
+                "cumulative=$cumulative peak=$peak direction=$dir")
 
         // 보조 annotation 생성 (CURVE 로 분류)
         val partial = PathAnnotation(
@@ -468,6 +483,10 @@ class RouteAnnotator(
         if (consistencyRatio < config.curveSignConsistencyRatio) return null
 
         val direction = if (cumulative >= 0) TurnDirection.RIGHT else TurnDirection.LEFT
+        println("[Annotator INT-CURVE] segWp=${segment.fromWaypointIndex}->${segment.toWaypointIndex} " +
+                "first=(${points.first().lat},${points.first().lon}) " +
+                "last=(${points.last().lat},${points.last().lon}) " +
+                "cumulative=$cumulative peak=$peak direction=${direction.name}")
         val partial = PathAnnotation(
             startWaypointIndex = segment.fromWaypointIndex,
             endWaypointIndex = segment.toWaypointIndex,
@@ -479,24 +498,6 @@ class RouteAnnotator(
             announceMessage = "",
         )
         return partial.copy(announceMessage = MessageBuilder.buildAnnotationAnnounce(partial))
-    }
-
-    /**
-     * waypoint[0]..waypoint[i] 까지의 누적 거리 (m).
-     * cumulative[0] = 0, cumulative[i] = sum(distance(j, j+1) for j in 0..i-1).
-     */
-    private fun computeCumulativeDistances(waypoints: List<Waypoint>): List<Double> {
-        if (waypoints.isEmpty()) return emptyList()
-        val out = ArrayList<Double>(waypoints.size)
-        out.add(0.0)
-        var acc = 0.0
-        for (i in 1 until waypoints.size) {
-            val a = waypoints[i - 1]
-            val b = waypoints[i]
-            acc += distanceBetween(a.lat, a.lon, b.lat, b.lon).toDouble()
-            out.add(acc)
-        }
-        return out
     }
 
     companion object {
