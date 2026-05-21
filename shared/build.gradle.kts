@@ -9,6 +9,8 @@ val kotlinxSerializationVersion = "1.6.2"
 val coroutinesVersion = "1.7.3"
 val kotlinxDatetimeVersion = "0.5.0"   // 🆕
 
+val isRunningOnMac = System.getProperty("os.name").orEmpty().startsWith("Mac")
+
 kotlin {
     androidTarget {
         compilations.all {
@@ -18,14 +20,17 @@ kotlin {
         }
     }
 
-    listOf(
-        iosX64(),
-        iosArm64(),
-        iosSimulatorArm64()
-    ).forEach { iosTarget ->
-        iosTarget.binaries.framework {
-            baseName = "shared"
-            isStatic = true
+    // iOS 타겟은 macOS에서만 빌드 가능 — Windows/Linux에서는 등록 자체를 건너뜀
+    if (isRunningOnMac) {
+        listOf(
+            iosX64(),
+            iosArm64(),
+            iosSimulatorArm64()
+        ).forEach { iosTarget ->
+            iosTarget.binaries.framework {
+                baseName = "shared"
+                isStatic = true
+            }
         }
     }
 
@@ -48,8 +53,10 @@ kotlin {
         androidMain.dependencies {
             implementation("io.ktor:ktor-client-okhttp:$ktorVersion")
         }
-        iosMain.dependencies {
-            implementation("io.ktor:ktor-client-darwin:$ktorVersion")
+        if (isRunningOnMac) {
+            iosMain.dependencies {
+                implementation("io.ktor:ktor-client-darwin:$ktorVersion")
+            }
         }
     }
 }

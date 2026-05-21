@@ -205,6 +205,9 @@ class NavigationManager(
     }
     */
 
+    fun updateCompassHeading(azimuth: Float, currentTime: Long) {
+        latestCompassHeading = azimuth
+    }
 
     // ========== 경로 탐색 ==========
 
