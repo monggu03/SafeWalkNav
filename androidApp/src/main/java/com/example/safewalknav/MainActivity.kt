@@ -82,9 +82,6 @@ import com.example.safewalknav.navigation.TrafficSignalLocation
 import com.example.safewalknav.traffic.TrafficSignalDatabase
 import com.example.safewalknav.traffic.TrafficSignalRepository
 import com.example.safewalknav.navigation.SeoulTrafficSignalLocationApiClient
-import com.example.safewalknav.traffic.TrafficSignalRemainingTimeParser
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 
 /**
@@ -189,6 +186,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         try {
             val dir = getExternalFilesDir("walk_logs")
             dir?.mkdirs()
+            @Suppress("SpellCheckingInspection")
             val ts = SimpleDateFormat("yyyyMMdd_HHmmss").format(Date())
             navLogFile = File(dir, "walk_$ts.log").apply {
                 writeText("=== SafeWalkNav 외출 로그 시작 ${Date()} ===\n")
@@ -318,6 +316,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      * 흔들기 리스너 — PR-UX1 에서 등록 보류 (실수 트리거 위험).
      * 코드는 보존 — 향후 NAVIGATING 중 음성 명령 트리거로 재도입 가능성.
      */
+    @Suppress("unused")
     private val shakeListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent?) {
             // intentionally unused — see onResume (registration disabled)
@@ -344,8 +343,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             if (hasAccel && hasMag) {
                 val now = System.currentTimeMillis()
                 val r = FloatArray(9)
-                val i = FloatArray(9)
-                if (SensorManager.getRotationMatrix(r, i, accelValues, magValues)) {
+                if (SensorManager.getRotationMatrix(r, null, accelValues, magValues)) {
                     val orient = FloatArray(3)
                     SensorManager.getOrientation(r, orient)
                     var az = Math.toDegrees(orient[0].toDouble()).toFloat()
@@ -354,8 +352,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     currentAzimuth = (currentAzimuth + 0.15f * delta + 360f) % 360f
                     navigationManager.updateCompassHeading(currentAzimuth, now)
                 }
-                // 현재 시스템 시간을 찍어서 NavigationManager에 전달
-                navigationManager.updateCompassHeading(currentAzimuth, now)
             }
         }
 
@@ -574,7 +570,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (!BuildConfig.DEBUG) return
         val talkback = if (isTalkBackEnabled()) "ON" else "OFF"
         val gps = if (gpsReady) "OK" else "?"
-        val last = if (lastSearchKeyword.isEmpty()) "-" else lastSearchKeyword
+        val last = lastSearchKeyword.ifEmpty { "-" }
         tvDebugStatus.text = "STATE=${appState.name} | GPS=$gps | TalkBack=$talkback | last=$last"
     }
 
@@ -672,7 +668,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
         try {
             sttLauncher.launch(intent)
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             Toast.makeText(this, "음성 인식을 사용할 수 없습니다", Toast.LENGTH_SHORT).show()
             showState(AppState.IDLE)
         }
@@ -806,12 +802,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         playToneError()
         if (sttFailureCount >= STT_FAILURE_LIMIT) {
             sttFailureCount = 0
-            val msg = "주변 1킬로미터 이내에 ${keyword} 검색 결과가 없습니다. 화면을 길게 눌러 다시 시도하세요."
+            val msg = "주변 1킬로미터 이내에 $keyword 검색 결과가 없습니다. 화면을 길게 눌러 다시 시도하세요."
             speakTTS(msg)
             showState(AppState.IDLE)
         } else {
             val msg = navigationManager.lastError
-                ?: "주변 1킬로미터 이내에 ${keyword} 검색 결과가 없습니다"
+                ?: "주변 1킬로미터 이내에 $keyword 검색 결과가 없습니다"
             speakAndListenIdle("$msg. 다른 목적지를 말씀해주세요.")
         }
     }
@@ -941,7 +937,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     /** 거리를 읽기 좋게 포맷 (1200m → "1.2킬로", 300m → "300미터") */
     private fun formatDistance(meters: Int): String {
         return if (meters >= 1000) {
-            "${String.format("%.1f", meters / 1000.0)}킬로"
+            "${"%.1f".format(meters / 1000.0)}킬로"
         } else {
             "${meters}미터"
         }
@@ -1008,11 +1004,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // ==================== GPS 위치 추적 ====================
 
     private fun startLocationTracking() {
-        val now = System.currentTimeMillis()
         trackingJob?.cancel()
         trackingJob = lifecycleScope.launch {
             locationTracker.getLocationUpdates(2000L).collectLatest { location ->
-                if (location.hasAccuracy() && location.accuracy > 25f) {
+                // 극단적 오염(터널 출구 GPS 점프 등)만 사전 차단 — 세밀한 gating은 KalmanHeading에 위임
+                if (location.hasAccuracy() && location.accuracy > 50f) {
                     return@collectLatest
                 }
 
@@ -1039,9 +1035,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                     tvDebugGuidance.text =
                         "${navigationManager.debugMessage.value}\n" +
-                                "GPS ${String.format("%.5f", location.latitude)}, ${
-                                    String.format("%.5f", location.longitude)
-                                } $accuracyText | dest=${dist.toInt()}m"
+                                "GPS ${"%.5f".format(location.latitude)}, ${"%.5f".format(location.longitude)}" +
+                                " $accuracyText | dest=${dist.toInt()}m"
                 }
             }
         }
@@ -1078,7 +1073,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             while (true) {
                 val dist = navigationManager.distanceToDestination.value
 
-                if (dist > 15f || dist == Float.MAX_VALUE) {
+                if (dist > 15f) {
                     delay(1000)
                     continue
                 }
@@ -1468,9 +1463,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         // 1차 필터: 너무 작은 박스 제외 (멀리 있는 noise / 빨간 점 noise 차단)
         // 신호등은 보통 화면 너비/높이의 6% 이상 차지. 그보다 작으면 noise 가능성 높음.
-        val MIN_BOX_DIMENSION = 0.06f
+        val minBoxDimension = 0.06f
         val validated = detections.filter { d ->
-            d.bbox.width >= MIN_BOX_DIMENSION && d.bbox.height >= MIN_BOX_DIMENSION
+            d.bbox.width >= minBoxDimension && d.bbox.height >= minBoxDimension
         }
         if (validated.isEmpty()) {
             // DEBUG: noise 무시했음을 표시
