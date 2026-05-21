@@ -20,9 +20,12 @@ import kotlin.math.sin
  *   - 정지(speed < stationarySpeed): STATIONARY_NOISE — GPS bearing은 잡음 그 자체이므로 사실상 무시
  *   - 그 외: max(MEAS_NOISE_FLOOR, accuracy * MEAS_NOISE_GAIN) — GPS 정확도 나쁘면 측정을 덜 믿음
  *
- * Accuracy Gating:
- *   accuracy가 MAX_ACCEPTABLE_ACCURACY 초과 시 측정 자체를 거부하고 이전 추정치를 유지한다.
- *   터널/지하/건물 협곡 등에서 GPS가 극단적으로 망가질 때 추정치 오염을 방지.
+ * Accuracy Gating (히스테리시스 포함):
+ *   accuracy가 MAX_ACCEPTABLE_ACCURACY(30m) 초과 시 측정을 거부한다.
+ *   단, 이 구간에서도 Predict 단계(uncertainty += PROCESS_NOISE)는 실행한다.
+ *   → GPS 복귀 시 uncertainty가 이미 커져 있어 새 측정값에 빠르게 수렴 가능.
+ *   히스테리시스: gating 진입 후에는 accuracy가 GATING_RECOVER_THRESHOLD(20m) 미만이 돼야
+ *   정상 수용 재개. 30m 선에서 진입/이탈이 반복되는 진동(chattering)을 방지.
  *
  * Kalman gain K = predicted_uncertainty / (predicted_uncertainty + measurement_noise)
  *   K → 1: 측정값 적극 수용. K → 0: 이전 추정값 유지.
@@ -42,6 +45,7 @@ class KalmanHeading(
     private var smoothedHeading = 0f
     private var initialized = false
     private var lastGain = 0.0
+    private var isGating = false
 
     /** 현재 필터링된 heading (0~360). 미초기화 상태면 -1 반환. */
     val current: Float get() = if (initialized) smoothedHeading else -1f
@@ -73,12 +77,19 @@ class KalmanHeading(
             return smoothedHeading
         }
 
-        // ⭐ ----- Accuracy Gating -----
-        // GPS accuracy가 너무 나쁘면 측정 자체를 거부 (터널, 지하, 빌딩 협곡 등)
-        // 추정치를 그대로 유지하여 오염 방지.
+        // ⭐ ----- Accuracy Gating (히스테리시스 포함) -----
         if (accuracy > MAX_ACCEPTABLE_ACCURACY) {
+            isGating = true
+            // 측정은 거부하지만 Predict는 실행 — GPS 복귀 후 빠른 수렴을 위해 uncertainty 성장 유지
+            uncertainty = (uncertainty + PROCESS_NOISE).coerceAtMost(INITIAL_UNCERTAINTY)
             return smoothedHeading
         }
+        // gating 중에는 GATING_RECOVER_THRESHOLD 미만이어야 수용 재개 (chattering 방지)
+        if (isGating && accuracy > GATING_RECOVER_THRESHOLD) {
+            uncertainty = (uncertainty + PROCESS_NOISE).coerceAtMost(INITIAL_UNCERTAINTY)
+            return smoothedHeading
+        }
+        isGating = false
 
         // ----- Predict 단계 -----
         // 보행자 운동 모델 없이 "방향이 그대로 유지된다"고 보고 process noise만큼 불확실성만 키움.
@@ -120,6 +131,7 @@ class KalmanHeading(
         smoothedHeading = 0f
         initialized = false
         lastGain = 0.0
+        isGating = false
     }
 
     private companion object {
@@ -128,6 +140,7 @@ class KalmanHeading(
         const val MEAS_NOISE_GAIN = 3.0
         const val MEAS_NOISE_FLOOR = 5.0
         const val STATIONARY_NOISE = 999.0
-        const val MAX_ACCEPTABLE_ACCURACY = 30f  // ⭐ GPS accuracy 임계값 (m). 초과 시 측정 거부.
+        const val MAX_ACCEPTABLE_ACCURACY = 30f   // gating 진입 임계값 (m)
+        const val GATING_RECOVER_THRESHOLD = 20f  // gating 해제 임계값 — 진입보다 낮아야 히스테리시스 효과
     }
 }
