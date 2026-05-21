@@ -187,7 +187,8 @@ final class NavigationViewModel: ObservableObject {
                 endLon: poi.lon,
                 endName: String(describing: poi.name),
                 frontLat: poi.frontLat,
-                frontLon: poi.frontLon
+                frontLon: poi.frontLon,
+                suppressInitialSummary: false
             )
 
             print("🟢 [START] 결과 — success=\(success.boolValue)")
