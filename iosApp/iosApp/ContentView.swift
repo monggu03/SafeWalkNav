@@ -95,6 +95,7 @@ struct NavigationTab: View {
 
     @State private var searchKeyword: String = ""
     @State private var showMap: Bool = false
+    @State private var showDebugPanel: Bool = false
 
     var body: some View {
         NavigationStack {
@@ -119,11 +120,24 @@ struct NavigationTab: View {
                         if showMap {
                             MapView(
                                 currentLocation: currentCLCoordinate,
-                                routeCoordinates: [],
+                                routeCoordinates: navVM.routeCoordinates,
+                                waypointPins: navVM.waypointPins,
+                                annotationMarkers: navVM.annotationMarkers,
                                 destinationName: navVM.guidanceMessage
                             )
                             .frame(height: 300)
                             .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+
+                        Button(showDebugPanel ? "디버그 패널 숨기기" : "디버그 패널 보기") {
+                            showDebugPanel.toggle()
+                        }
+                        .buttonStyle(.bordered)
+
+                        if showDebugPanel {
+                            DebugPanel()
+                                .environmentObject(navVM)
+                                .environmentObject(deps)
                         }
                     }
                 }

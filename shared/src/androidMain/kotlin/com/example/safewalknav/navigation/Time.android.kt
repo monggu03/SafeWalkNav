@@ -1,3 +1,3 @@
-package com.example.safewalknav.navigation
+package com.example.safewalknav.navigation.platform
 
 actual fun currentTimeMillis(): Long = System.currentTimeMillis()

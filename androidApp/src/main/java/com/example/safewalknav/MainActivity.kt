@@ -58,11 +58,11 @@ import java.util.Date
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import com.example.safewalknav.navigation.AndroidHeadingLogger
-import com.example.safewalknav.navigation.ArrivalState
+import com.example.safewalknav.navigation.tmap.ArrivalState
 import com.example.safewalknav.navigation.NavigationManager
-import com.example.safewalknav.navigation.POIResult
-import com.example.safewalknav.navigation.SignalApiClient
-import com.example.safewalknav.navigation.TMapApiClient
+import com.example.safewalknav.navigation.tmap.POIResult
+import com.example.safewalknav.navigation.signal.SignalApiClient
+import com.example.safewalknav.navigation.tmap.TMapApiClient
 import com.example.safewalknav.navigation.toGpsLocation
 import com.google.android.gms.common.api.ResolvableApiException
 import com.google.android.gms.location.LocationRequest
@@ -78,10 +78,10 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
-import com.example.safewalknav.navigation.TrafficSignalLocation
+import com.example.safewalknav.navigation.signal.TrafficSignalLocation
 import com.example.safewalknav.traffic.TrafficSignalDatabase
 import com.example.safewalknav.traffic.TrafficSignalRepository
-import com.example.safewalknav.navigation.SeoulTrafficSignalLocationApiClient
+import com.example.safewalknav.navigation.signal.SeoulTrafficSignalLocationApiClient
 
 
 /**
@@ -350,8 +350,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     if (az < 0) az += 360f
                     val delta = ((az - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.15f * delta + 360f) % 360f
-                    navigationManager.updateCompassHeading(currentAzimuth, now)
+                    // PR-FIX: NavigationManager.updateCompassHeading 가 주석 처리됨 — 호출 disabled
+                    // navigationManager.updateCompassHeading(currentAzimuth, now)
                 }
+
             }
         }
 
@@ -1017,9 +1019,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     val gpsBearing = location.bearing
                     val delta = ((gpsBearing - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.3f * delta + 360f) % 360f
-                    if (::navigationManager.isInitialized) {
-                        navigationManager.updateCompassHeading(currentAzimuth, System.currentTimeMillis())
-                    }
+                    // PR-FIX: NavigationManager.updateCompassHeading 가 주석 처리됨 — 호출 disabled
+                    // if (::navigationManager.isInitialized) {
+                    //     navigationManager.updateCompassHeading(currentAzimuth, System.currentTimeMillis())
+                    // }
                 }
 
                 navigationManager.updateLocation(location.toGpsLocation())

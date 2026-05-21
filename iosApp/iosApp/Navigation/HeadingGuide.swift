@@ -58,6 +58,25 @@ final class HeadingGuide: NSObject, ObservableObject {
     /// 메인 클래스가 @MainActor 라 delegate 메서드를 직접 못 받기 때문에 분리.
     private var headingDelegate: HeadingDelegate?
 
+    /// 출발 시 사용자 위치 — 이 점에서 멀어진 거리로 "움직였다" 를 판단.
+    private var startLat: Double = 0
+    private var startLon: Double = 0
+
+    /// GPS 움직임 감지 시 호출. nil 이면 자동 종료 안 함 (기존 동작).
+    private var movementCallback: (() -> Void)?
+
+    /// 외부에서 주입된 GPS 위치 publisher 구독.
+    private var locationCancellable: AnyCancellable?
+
+    /// 움직임 판정 임계값.
+    /// - speed: 0.5 m/s 이상이면 분명한 보행 → 즉시 종료.
+    /// - distance: 시작 지점에서 3m 이상 멀어지면 종료. (속도 미보고 기기 대비 안전망)
+    private let movementSpeedThreshold: Double = 0.5
+    private let movementDistanceThreshold: Double = 3.0
+
+    /// 이미 움직임 감지로 stop() 한 뒤 추가 GPS 가 들어와도 callback 중복 호출 안 하기 위함.
+    private var didDetectMovement: Bool = false
+
     // MARK: - Init
 
     init(tts: TtsManager, config: NavigatorConfig = NavigatorConfig.companion.defaults()) {
@@ -71,9 +90,17 @@ final class HeadingGuide: NSObject, ObservableObject {
     /// 방향 안내 시작.
     ///
     /// - Parameters:
-    ///   - currentLocation: 사용자의 현재 위치 (KMM GpsLocation)
+    ///   - currentLocation: 사용자의 현재 위치 (KMM GpsLocation). 움직임 감지의 기준점도 됨.
     ///   - firstWaypoint: 따라갈 경로의 첫 waypoint (이 방향이 목표)
-    func start(currentLocation: GpsLocation, firstWaypoint: Waypoint) {
+    ///   - locationPublisher: GPS 업데이트 publisher (optional). 주어지면 이 publisher 가 보내는
+    ///     위치를 모니터링해 사용자가 실제로 걷기 시작하면 자동으로 stop() + onMovementDetected 호출.
+    ///   - onMovementDetected: GPS 움직임 감지 시 호출 (optional). 호출자가 안내 화면을 dismiss 할 때 사용.
+    func start(
+        currentLocation: GpsLocation,
+        firstWaypoint: Waypoint,
+        locationPublisher: AnyPublisher<GpsLocation?, Never>? = nil,
+        onMovementDetected: (() -> Void)? = nil,
+    ) {
         // 1. 목표 bearing 계산 (KMM 의 top-level bearing 함수 사용)
         let bearing = BearingMathKt.bearing(
             lat1: currentLocation.latitude,
@@ -85,6 +112,12 @@ final class HeadingGuide: NSObject, ObservableObject {
         self.state = .waitingForFlatPose
         self.lastSpokenMessage = ""
         self.currentHeading = -1
+
+        // 움직임 감지 초기화.
+        self.startLat = currentLocation.latitude
+        self.startLon = currentLocation.longitude
+        self.movementCallback = onMovementDetected
+        self.didDetectMovement = false
 
         // 2. heading 시작 — trueHeading 이 필요하므로 GPS 도 같이 켜져 있어야 함.
         let delegate = HeadingDelegate { [weak self] heading in
@@ -108,6 +141,17 @@ final class HeadingGuide: NSObject, ObservableObject {
                 self?.handleMotion(motion)
             }
         }
+
+        // 4. GPS 위치 업데이트 구독 (움직임 자동 감지).
+        if let pub = locationPublisher {
+            locationCancellable = pub
+                .compactMap { $0 }
+                .sink { [weak self] loc in
+                    Task { @MainActor in
+                        self?.checkMovement(loc)
+                    }
+                }
+        }
     }
 
     /// 안내 중단 — heading/motion 업데이트 모두 끔.
@@ -115,6 +159,8 @@ final class HeadingGuide: NSObject, ObservableObject {
         locationManager.stopUpdatingHeading()
         motionManager.stopDeviceMotionUpdates()
         headingDelegate = nil
+        locationCancellable?.cancel()
+        locationCancellable = nil
     }
 
     // MARK: - Internal Handlers
@@ -168,6 +214,30 @@ final class HeadingGuide: NSObject, ObservableObject {
         lastSpokenMessage = msg
         currentMessage = msg
         tts.speak(msg)
+    }
+
+    /// 새 GPS 위치가 들어왔을 때 움직임 여부 판정. 임계 초과 시 stop + callback.
+    private func checkMovement(_ loc: GpsLocation) {
+        guard !didDetectMovement else { return }
+
+        // 속도 기반 (m/s) — 0.5 이상이면 분명한 보행. iOS 시뮬레이터 GPX 재생도 speed 가 채워짐.
+        let speed = Double(loc.speed)
+        let movedBySpeed = speed >= movementSpeedThreshold
+
+        // 거리 기반 — 시작 지점에서 멀어진 정도.
+        let distM = BearingMathKt.distanceBetween(
+            lat1: startLat, lon1: startLon,
+            lat2: loc.latitude, lon2: loc.longitude,
+        )
+        let movedByDistance = Double(distM) >= movementDistanceThreshold
+
+        guard movedBySpeed || movedByDistance else { return }
+
+        didDetectMovement = true
+        print("[HeadingGuide] 움직임 감지 — speed=\(speed) m/s, distFromStart=\(distM) m → 종료")
+        stop()
+        movementCallback?()
+        movementCallback = nil
     }
 }
 

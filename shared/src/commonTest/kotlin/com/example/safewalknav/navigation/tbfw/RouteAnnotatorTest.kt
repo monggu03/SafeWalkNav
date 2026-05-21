@@ -1,6 +1,7 @@
 package com.example.safewalknav.navigation.tbfw
 
-import com.example.safewalknav.navigation.Waypoint
+import com.example.safewalknav.navigation.tmap.LatLng
+import com.example.safewalknav.navigation.tmap.Waypoint
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -321,6 +322,106 @@ class RouteAnnotatorTest {
         assertTrue(
             ann.distanceFromStartM in 10.0..40.0,
             "distanceFromStartM ${ann.distanceFromStartM} expected ~15-30m",
+        )
+    }
+
+    // ─── 11. annotateHybrid (waypoint + routePoints 보조 검사) ───
+
+    /**
+     * routePoints 시퀀스 헬퍼 — moveByBearing 으로 LatLng 시퀀스 생성.
+     */
+    private fun makeRoutePoints(
+        steps: List<Pair<Double, Double>>,
+        startLat: Double = baseLat,
+        startLon: Double = baseLon,
+    ): List<LatLng> {
+        val out = mutableListOf<LatLng>()
+        var lat = startLat
+        var lon = startLon
+        out.add(LatLng(lat, lon))
+        for ((b, d) in steps) {
+            val (nLat, nLon) = moveByBearing(lat, lon, b, d)
+            lat = nLat
+            lon = nLon
+            out.add(LatLng(lat, lon))
+        }
+        return out
+    }
+
+    @Test
+    fun `annotateHybrid with straight waypoints but curved routePoints yields supplementary annotation`() {
+        // waypoints 만 보면 시작 → 끝 직진처럼 보이지만,
+        // 두 waypoint 사이의 routePoints 가 누적 곡률을 형성하는 경우.
+        // waypoint: 2개 (시작점, 끝점) — annotate(waypoints) 는 빈 결과
+        // routePoints: 같은 부호로 누적 곡선 (4 × +12° = +48°)
+        val routePoints = makeRoutePoints(listOf(
+            0.0 to 15.0,
+            12.0 to 15.0,
+            24.0 to 15.0,
+            36.0 to 15.0,
+            48.0 to 15.0,
+        ))
+        // waypoint 는 routePoints 의 시작점과 끝점만 사용
+        val waypoints = listOf(
+            Waypoint(routePoints.first().lat, routePoints.first().lon,
+                0, "start", 0, 0, "TURN"),
+            Waypoint(routePoints.last().lat, routePoints.last().lon,
+                0, "end", 0, 0, "TURN"),
+        )
+
+        val result = annotator.annotateHybrid(waypoints, routePoints)
+        assertTrue(
+            result.annotations.isNotEmpty(),
+            "expected supplementary curve annotation from routePoints, got 0",
+        )
+        val ann = result.annotations.first()
+        assertTrue(
+            ann.type == PathSegmentType.CURVE || ann.type == PathSegmentType.SLIGHT_CURVE,
+            "expected CURVE/SLIGHT_CURVE, got ${ann.type}",
+        )
+        assertEquals(TurnDirection.RIGHT, ann.direction)
+    }
+
+    @Test
+    fun `annotateHybrid with already covered segment does not duplicate`() {
+        // waypoint 기반에서 이미 회전이 잡힌 구간 — 보조 검사가 중복 annotation 을 만들지 않아야 함.
+        // 동쪽 → 남쪽 90° 회전 (waypoint 기반에서 SHARP_TURN 으로 잡힘)
+        val waypoints = makePath(listOf(
+            90.0 to 15.0,
+            90.0 to 15.0,
+            180.0 to 15.0,
+            180.0 to 15.0,
+        ))
+        // routePoints 는 waypoints 와 동일한 좌표 (보조 검사가 같은 구간 재검사)
+        val routePoints = waypoints.map { LatLng(it.lat, it.lon) }
+
+        val result = annotator.annotateHybrid(waypoints, routePoints)
+        // 회전 1개만 — 보조 곡선이 추가되지 않음.
+        assertEquals(1, result.annotations.size,
+            "expected only the primary turn annotation, got ${result.annotations}")
+        assertEquals(PathSegmentType.SHARP_TURN, result.annotations[0].type)
+    }
+
+    @Test
+    fun `annotateHybrid with too short segment skips supplementary`() {
+        // waypoint: 직진처럼 보이는 짧은 구간 (총 < 15m)
+        // routePoints: 곡률은 형성하지만 누적 길이가 minSegmentDistanceM * 5 = 15m 미만
+        val routePoints = makeRoutePoints(listOf(
+            0.0 to 4.0,
+            12.0 to 4.0,
+            24.0 to 4.0,    // 누적 12m < 15m
+        ))
+        val waypoints = listOf(
+            Waypoint(routePoints.first().lat, routePoints.first().lon,
+                0, "start", 0, 0, "TURN"),
+            Waypoint(routePoints.last().lat, routePoints.last().lon,
+                0, "end", 0, 0, "TURN"),
+        )
+
+        val result = annotator.annotateHybrid(waypoints, routePoints)
+        assertTrue(
+            result.annotations.isEmpty(),
+            "supplementary check should skip <15m segments, got: ${result.annotations}",
         )
     }
 }

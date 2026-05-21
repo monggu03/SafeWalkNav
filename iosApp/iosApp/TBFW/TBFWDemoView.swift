@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import Combine
 import shared
 
 struct TBFWDemoView: View {
@@ -52,36 +53,16 @@ struct TBFWDemoView: View {
                         }
                     }
 
-                    // ─── Trust Score ───
-                    GroupBox("🛡️ Trust Score") {
+                    // ─── GPS 상태 ───
+                    GroupBox("📡 GPS 상태") {
                         VStack(alignment: .leading, spacing: 6) {
                             HStack {
-                                Text("점수")
+                                Text("점프 감지")
                                 Spacer()
-                                Text("\(viewModel.trustScore) / 100")
+                                Text(viewModel.jumpLevel)
                                     .fontWeight(.bold)
-                                    .foregroundColor(trustColor)
+                                    .foregroundColor(jumpLevelColor)
                             }
-                            HStack {
-                                Text("카테고리")
-                                Spacer()
-                                Text(viewModel.trustLevel)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(trustColor)
-                            }
-                            // 시각적 바 표시
-                            GeometryReader { geo in
-                                ZStack(alignment: .leading) {
-                                    Rectangle()
-                                        .fill(Color.gray.opacity(0.2))
-                                    Rectangle()
-                                        .fill(trustColor)
-                                        .frame(width: geo.size.width * CGFloat(viewModel.trustScore) / 100)
-                                }
-                                .frame(height: 8)
-                                .clipShape(Capsule())
-                            }
-                            .frame(height: 8)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -216,6 +197,8 @@ struct TBFWDemoView: View {
                     showHeadingGuide = false
                     viewModel.start()
                 },
+                // GPS 움직임이 잡히면 HeadingGuideView 가 자동으로 dismiss 한다.
+                locationPublisher: deps.locationTracker.$currentLocation.eraseToAnyPublisher(),
             )
         } else {
             VStack {
@@ -226,14 +209,13 @@ struct TBFWDemoView: View {
         }
     }
 
-    /// Trust 카테고리에 따른 색상
-    private var trustColor: Color {
-        switch viewModel.trustLevel {
-        case "HIGH": return .green
-        case "MEDIUM": return .blue
-        case "LOW": return .orange
-        case "CRITICAL": return .red
-        default: return .gray
+    /// GPS 점프 레벨에 따른 색상
+    private var jumpLevelColor: Color {
+        switch viewModel.jumpLevel {
+        case "NORMAL":  return .green
+        case "SUSPECT": return .orange
+        case "JUMPED":  return .red
+        default:        return .gray
         }
     }
 }

@@ -1,7 +1,7 @@
 package com.example.safewalknav.navigation.tbfw
 
-import com.example.safewalknav.navigation.GpsLocation
-import com.example.safewalknav.navigation.Waypoint
+import com.example.safewalknav.navigation.platform.GpsLocation
+import com.example.safewalknav.navigation.tmap.Waypoint
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -16,8 +16,12 @@ import kotlin.test.assertTrue
  *   - 사용자는 항상 waypoint 약간 이전(서쪽)에 배치하여 동쪽으로 진행하는 시나리오 구성
  *
  * Waypoint 간격:
- *   - 경도 0.00015 차이 ≈ 13m (HIGH 통과 거리 8m + 여유)
+ *   - 경도 0.00015 차이 ≈ 13m (NORMAL 통과 거리 8m + 여유)
  *   - 너무 가까우면 W1 통과 시점에 W2까지 거리도 통과 거리 안에 들어가버림
+ *
+ * 시간 모델:
+ *   - 본 테스트는 navigator.update(state, t) 의 t 를 직접 제공해 점프 감지를 결정한다.
+ *   - 인접 update 간 시간 간격을 충분히(>=1초) 두면 NORMAL 보행으로 간주된다.
  */
 class TrustBasedNavigatorTest {
 
@@ -96,7 +100,7 @@ class TrustBasedNavigatorTest {
         // W1 약 20m 서쪽 — 아직 통과 거리 밖
         val state = stateBefore(targetLon = 126.97840, offsetMeters = 20.0)
 
-        val result = navigator.update(state)
+        val result = navigator.update(state, currentTimeMs = 1_000)
 
         assertEquals(0, result.currentWaypointIndex)
         assertFalse(result.isFinished)
@@ -110,7 +114,7 @@ class TrustBasedNavigatorTest {
             heading = 90f
         )
 
-        val result = navigator.update(state)
+        val result = navigator.update(state, currentTimeMs = 1_000)
 
         assertTrue(result.isFinished)
         assertEquals(MessageBuilder.MSG_ARRIVED_DESTINATION, result.message)
@@ -119,25 +123,27 @@ class TrustBasedNavigatorTest {
     // ─── 정상 보행 시나리오 ───
 
     @Test
-    fun `정상 GPS와 정방향 보행이면 HIGH 신뢰도가 나온다`() {
+    fun `정상 GPS와 정방향 보행이면 NORMAL 점프 레벨이 나온다`() {
         val navigator = TrustBasedNavigator(makeStraightRoute())
-        // W1 약 20m 서쪽에서 동쪽으로 보행
         val state = stateBefore(targetLon = 126.97840, offsetMeters = 20.0)
 
-        val result = navigator.update(state)
+        val result = navigator.update(state, currentTimeMs = 1_000)
 
-        assertEquals(TrustLevel.HIGH, result.trustLevel)
-        assertTrue(result.trustScore >= 80, "점수: ${result.trustScore}")
+        assertEquals(GpsJumpLevel.NORMAL, result.jumpLevel)
     }
 
     @Test
-    fun `정상 보행 중에는 안전 경고가 안 뜬다`() {
+    fun `정상 보행 중에는 GPS 점프 안내가 안 뜬다`() {
         val navigator = TrustBasedNavigator(makeStraightRoute())
         val state = stateBefore(targetLon = 126.97840, offsetMeters = 20.0)
 
-        val result = navigator.update(state)
+        val result = navigator.update(state, currentTimeMs = 1_000)
 
-        assertFalse(result.message.contains("정확도가"), "안전 경고 메시지: ${result.message}")
+        assertFalse(
+            result.message.contains("위치 안내가 잠시 어렵습니다"),
+            "GPS 점프 안내 메시지가 떴음: ${result.message}",
+        )
+        assertEquals(JumpGuidanceAction.SILENT, result.guidanceAction)
     }
 
     // ─── Waypoint 통과 시나리오 ───
@@ -148,12 +154,12 @@ class TrustBasedNavigatorTest {
         // W1 약 3m 서쪽 (8m 통과 거리 안)
         val state = stateBefore(targetLon = 126.97840, offsetMeters = 3.0)
 
-        val result = navigator.update(state)
+        val result = navigator.update(state, currentTimeMs = 1_000)
 
         assertTrue(
             result.didPassWaypoint,
             "통과 처리 안 됨. 거리: ${result.distanceToWaypoint}, " +
-            "trustLevel: ${result.trustLevel}, headingDiff: ${result.headingDiff}"
+            "jumpLevel: ${result.jumpLevel}, headingDiff: ${result.headingDiff}"
         )
         assertEquals(1, result.currentWaypointIndex)
     }
@@ -163,105 +169,111 @@ class TrustBasedNavigatorTest {
         val navigator = TrustBasedNavigator(makeStraightRoute())
 
         // 1차 update — W1 통과 (W1 약 3m 서쪽)
-        val first = navigator.update(stateBefore(targetLon = 126.97840, offsetMeters = 3.0))
+        val first = navigator.update(
+            stateBefore(targetLon = 126.97840, offsetMeters = 3.0),
+            currentTimeMs = 1_000,
+        )
         assertTrue(first.didPassWaypoint, "1차에서 W1 통과 실패")
 
-        // 2차 update — W1과 W2 사이 (W2 약 7m 서쪽)
-        val result = navigator.update(stateBefore(targetLon = 126.97855, offsetMeters = 10.0))
+        // 2차 update — W1과 W2 사이 (W2 약 10m 서쪽). 6초 뒤로 진행해 정상 보행 가정.
+        val result = navigator.update(
+            stateBefore(targetLon = 126.97855, offsetMeters = 10.0),
+            currentTimeMs = 7_000,
+        )
 
         assertEquals(1, result.currentWaypointIndex, "여전히 W2(인덱스 1)가 목표여야 함")
         assertFalse(result.isFinished)
     }
 
-    // ─── GPS 튐 시나리오 (Forward-Only 핵심) ───
+    // ─── GPS 튐 시나리오 (Forward-Only + 점프 감지 핵심) ───
 
     @Test
-    fun `W1 통과 후 GPS가 W1 뒤로 튀어도 인덱스는 감소하지 않는다`() {
+    fun `W1 통과 후 GPS가 1초 만에 큰 거리로 튀면 JUMPED 가 되고 인덱스는 감소하지 않는다`() {
         val navigator = TrustBasedNavigator(makeStraightRoute())
 
         // 1단계: W1 통과
-        val pass = navigator.update(stateBefore(targetLon = 126.97840, offsetMeters = 3.0))
+        val pass = navigator.update(
+            stateBefore(targetLon = 126.97840, offsetMeters = 3.0),
+            currentTimeMs = 1_000,
+        )
         assertTrue(pass.didPassWaypoint, "1단계에서 W1 통과 실패")
         assertEquals(1, pass.currentWaypointIndex)
 
-        // 2단계: GPS가 갑자기 W1보다 훨씬 서쪽으로 튐 (accuracy도 나빠짐)
-        val jumped = navigator.update(UserState(
-            location = goodGps(
-                lat = 37.5666,
-                lon = 126.97820,           // W1보다 약 18m 서쪽
-                accuracy = 35f             // 부정확
+        // 2단계: 1초 만에 W1 보다 약 20m 서쪽으로 GPS 튐 — 약 ~23 m/s → JUMPED
+        val jumped = navigator.update(
+            UserState(
+                location = goodGps(
+                    lat = 37.5666,
+                    lon = 126.97820,  // W1 보다 약 18m 서쪽 (사용자 직전 위치보다 ~21m 떨어짐)
+                ),
+                heading = 90f
             ),
-            heading = 90f
-        ))
+            currentTimeMs = 2_000,
+        )
 
-        // Forward-Only: 인덱스 1 유지, 절대 0으로 안 돌아감
+        // 점프 감지 + Forward-Only — 인덱스 유지
+        assertEquals(GpsJumpLevel.JUMPED, jumped.jumpLevel)
         assertEquals(1, jumped.currentWaypointIndex, "Forward-Only가 깨졌음")
     }
 
-    // ─── Trust LOW 시나리오 ───
-
     @Test
-    fun `GPS accuracy가 매우 나쁘면 Trust가 LOW 또는 CRITICAL이다`() {
+    fun `JUMPED 가 3초 이상 지속되면 안내 정책이 ANNOUNCE_DEGRADED 를 돌려준다`() {
         val navigator = TrustBasedNavigator(makeStraightRoute())
-        val state = UserState(
-            location = goodGps(
-                lat = 37.5666, lon = 126.97835,
-                accuracy = 60f    // 매우 부정확
+
+        // 첫 update — NORMAL 시작점
+        navigator.update(
+            stateBefore(targetLon = 126.97840, offsetMeters = 20.0),
+            currentTimeMs = 1_000,
+        )
+        // 1초 뒤 큰 점프 — JUMPED 진입
+        navigator.update(
+            UserState(
+                location = goodGps(lat = 37.5666, lon = 126.97900),  // 약 60m 동쪽
+                heading = 90f,
             ),
-            heading = 90f
+            currentTimeMs = 2_000,
         )
-
-        val result = navigator.update(state)
-
-        assertTrue(
-            result.trustLevel == TrustLevel.LOW || result.trustLevel == TrustLevel.CRITICAL,
-            "Trust Level: ${result.trustLevel}, score: ${result.trustScore}"
+        // 또 1초 뒤 — duration = 1s (silent window 안)
+        val silent = navigator.update(
+            UserState(
+                location = goodGps(lat = 37.5666, lon = 126.97960),
+                heading = 90f,
+            ),
+            currentTimeMs = 3_000,
         )
+        assertEquals(JumpGuidanceAction.SILENT, silent.guidanceAction)
+
+        // 3초 더 경과해 silent window 초과 → ANNOUNCE_DEGRADED
+        val announced = navigator.update(
+            UserState(
+                location = goodGps(lat = 37.5666, lon = 126.98050),
+                heading = 90f,
+            ),
+            currentTimeMs = 6_000,
+        )
+        assertEquals(GpsJumpLevel.JUMPED, announced.jumpLevel)
+        assertEquals(JumpGuidanceAction.ANNOUNCE_DEGRADED, announced.guidanceAction)
+        assertEquals(MessageBuilder.MSG_GPS_DEGRADED, announced.message)
     }
 
     @Test
-    fun `Trust LOW면 W1 코앞이어도 통과 처리 안 된다`() {
+    fun `JUMPED 동안은 waypoint 통과 처리 안 한다`() {
         val navigator = TrustBasedNavigator(makeStraightRoute())
-        // W1 3m 서쪽 + 정방향이지만 GPS accuracy가 나쁨
-        val state = UserState(
-            location = goodGps(
-                lat = 37.5666,
-                lon = 126.97840 - 3.0 * 0.00001137,
-                accuracy = 60f                     // 부정확 → LOW
-            ),
-            heading = 90f                          // 정방향
+
+        // 첫 update — 멀리서 시작
+        navigator.update(
+            stateBefore(targetLon = 126.97840, offsetMeters = 100.0),
+            currentTimeMs = 1_000,
+        )
+        // 1초 만에 W1 코앞으로 점프 — JUMPED
+        val result = navigator.update(
+            stateBefore(targetLon = 126.97840, offsetMeters = 1.0),
+            currentTimeMs = 2_000,
         )
 
-        val result = navigator.update(state)
-
-        // Trust LOW/CRITICAL이면 통과 처리 안 함 (Forward-Only 동결)
-        if (result.trustLevel == TrustLevel.LOW ||
-            result.trustLevel == TrustLevel.CRITICAL) {
-            assertFalse(result.didPassWaypoint, "Trust 낮은데 통과 처리됨")
-            assertEquals(0, result.currentWaypointIndex)
-        }
-    }
-
-    @Test
-    fun `Trust LOW면 거리 안내 대신 보수적 안내가 나온다`() {
-        val navigator = TrustBasedNavigator(makeStraightRoute())
-        val state = UserState(
-            location = goodGps(
-                lat = 37.5666, lon = 126.9783,
-                speed = 0.05f,           // 거의 정지
-                accuracy = 40f           // 부정확
-            ),
-            heading = 180f               // 잘못된 방향 (남쪽)
-        )
-
-        val result = navigator.update(state)
-
-        // Trust LOW/CRITICAL이면 일반 거리 안내가 아닌 안전 메시지
-        if (result.trustLevel == TrustLevel.LOW) {
-            assertEquals(MessageBuilder.MSG_TRUST_LOW, result.message)
-        } else if (result.trustLevel == TrustLevel.CRITICAL) {
-            assertEquals(MessageBuilder.MSG_TRUST_CRITICAL, result.message)
-        }
+        assertEquals(GpsJumpLevel.JUMPED, result.jumpLevel)
+        assertFalse(result.didPassWaypoint, "JUMPED인데 통과 처리됨")
+        assertEquals(0, result.currentWaypointIndex)
     }
 
     // ─── 종료 시나리오 ───
@@ -271,15 +283,24 @@ class TrustBasedNavigatorTest {
         val navigator = TrustBasedNavigator(makeStraightRoute())
 
         // W1 통과 (W1 3m 서쪽)
-        val r1 = navigator.update(stateBefore(targetLon = 126.97840, offsetMeters = 3.0))
+        val r1 = navigator.update(
+            stateBefore(targetLon = 126.97840, offsetMeters = 3.0),
+            currentTimeMs = 1_000,
+        )
         assertTrue(r1.didPassWaypoint, "W1 통과 실패")
 
-        // W2 통과 (W2 3m 서쪽)
-        val r2 = navigator.update(stateBefore(targetLon = 126.97855, offsetMeters = 3.0))
+        // W2 통과 (W2 3m 서쪽), 충분한 시간 간격
+        val r2 = navigator.update(
+            stateBefore(targetLon = 126.97855, offsetMeters = 3.0),
+            currentTimeMs = 11_000,
+        )
         assertTrue(r2.didPassWaypoint, "W2 통과 실패")
 
         // W3 통과 (W3 3m 서쪽)
-        val r3 = navigator.update(stateBefore(targetLon = 126.97870, offsetMeters = 3.0))
+        val r3 = navigator.update(
+            stateBefore(targetLon = 126.97870, offsetMeters = 3.0),
+            currentTimeMs = 21_000,
+        )
 
         assertTrue(
             r3.isFinished || r3.didPassWaypoint,
@@ -292,47 +313,30 @@ class TrustBasedNavigatorTest {
         val navigator = TrustBasedNavigator(makeStraightRoute())
 
         // 3개 다 통과
-        navigator.update(stateBefore(targetLon = 126.97840, offsetMeters = 3.0))
-        navigator.update(stateBefore(targetLon = 126.97855, offsetMeters = 3.0))
-        navigator.update(stateBefore(targetLon = 126.97870, offsetMeters = 3.0))
+        navigator.update(
+            stateBefore(targetLon = 126.97840, offsetMeters = 3.0),
+            currentTimeMs = 1_000,
+        )
+        navigator.update(
+            stateBefore(targetLon = 126.97855, offsetMeters = 3.0),
+            currentTimeMs = 11_000,
+        )
+        navigator.update(
+            stateBefore(targetLon = 126.97870, offsetMeters = 3.0),
+            currentTimeMs = 21_000,
+        )
 
         // 그 후 추가 호출 (전혀 다른 위치)
-        val result = navigator.update(UserState(
-            location = goodGps(37.5666, 126.9790),
-            heading = 90f
-        ))
+        val result = navigator.update(
+            UserState(
+                location = goodGps(37.5666, 126.9790),
+                heading = 90f
+            ),
+            currentTimeMs = 31_000,
+        )
 
         assertTrue(result.isFinished)
         assertEquals(MessageBuilder.MSG_ARRIVED_DESTINATION, result.message)
-    }
-
-    // ─── hasAccuracy=false 처리 ───
-
-    @Test
-    fun `hasAccuracy=false면 보수적으로 처리되어 통과가 어려워진다`() {
-        val navigator = TrustBasedNavigator(makeStraightRoute())
-
-        // accuracy 정보 없는 상태로 W1 근처
-        val noAccuracyState = UserState(
-            location = GpsLocation(
-                latitude = 37.5666,
-                longitude = 126.97840 - 3.0 * 0.00001137,  // W1 3m 서쪽
-                speed = 1.2f,
-                bearing = 90f,
-                accuracy = 0f,           // 0이지만 hasAccuracy=false
-                hasAccuracy = false      // ★
-            ),
-            heading = 90f
-        )
-
-        val result = navigator.update(noAccuracyState)
-
-        // accuracy=0이어도 hasAccuracy=false면 50f로 처리되어 점수가 낮아짐
-        // → Trust가 HIGH로 안 나와야 함
-        assertTrue(
-            result.trustLevel != TrustLevel.HIGH,
-            "hasAccuracy=false인데 HIGH로 분류됨. 점수: ${result.trustScore}"
-        )
     }
 
     // ─── heading null 처리 ───
@@ -349,13 +353,45 @@ class TrustBasedNavigatorTest {
             heading = null                  // heading 미제공
         )
 
-        val result = navigator.update(state)
+        val result = navigator.update(state, currentTimeMs = 1_000)
 
-        // GPS bearing이 정방향이므로 점수가 정상 나와야 함
+        // GPS bearing이 정방향이므로 headingDiff 가 작게 나와야 한다.
         assertTrue(
-            result.trustScore >= 60,
-            "heading null인데 점수 낮음. 점수: ${result.trustScore}"
+            kotlin.math.abs(result.headingDiff) < 15f,
+            "heading null인데 headingDiff 큼: ${result.headingDiff}",
         )
+    }
+
+    // ─── 횡단보도 zone 안에서는 점프 안내 안 함 ───
+
+    @Test
+    fun `횡단보도 zone 안에서는 JUMPED여도 안내 정책이 SILENT다`() {
+        val navigator = TrustBasedNavigator(makeStraightRoute())
+
+        navigator.update(
+            stateBefore(targetLon = 126.97840, offsetMeters = 20.0),
+            currentTimeMs = 1_000,
+            isInCrosswalkZone = true,
+        )
+        navigator.update(
+            UserState(
+                location = goodGps(lat = 37.5666, lon = 126.97900),
+                heading = 90f,
+            ),
+            currentTimeMs = 2_000,
+            isInCrosswalkZone = true,
+        )
+        // 3초 이상 경과해도 SILENT 여야 함
+        val result = navigator.update(
+            UserState(
+                location = goodGps(lat = 37.5666, lon = 126.98000),
+                heading = 90f,
+            ),
+            currentTimeMs = 6_000,
+            isInCrosswalkZone = true,
+        )
+
+        assertEquals(JumpGuidanceAction.SILENT, result.guidanceAction)
     }
 
     // ─── NavigationResult 일관성 ───
@@ -365,11 +401,10 @@ class TrustBasedNavigatorTest {
         val navigator = TrustBasedNavigator(makeStraightRoute())
         val state = stateBefore(targetLon = 126.97840, offsetMeters = 20.0)
 
-        val result = navigator.update(state)
+        val result = navigator.update(state, currentTimeMs = 1_000)
 
         // 검증: 모든 필드가 합리적 범위
         assertTrue(result.message.isNotEmpty(), "메시지 비어있음")
-        assertTrue(result.trustScore in 0..100, "점수 범위 벗어남: ${result.trustScore}")
         assertTrue(result.distanceToWaypoint >= 0f, "거리가 음수: ${result.distanceToWaypoint}")
         assertTrue(
             result.headingDiff in -180f..180f,
@@ -388,7 +423,7 @@ class TrustBasedNavigatorTest {
         val navigator = TrustBasedNavigator(makeStraightRoute())
         val state = stateBefore(targetLon = 126.97840, offsetMeters = 5.0)
 
-        val result = navigator.update(state)
+        val result = navigator.update(state, currentTimeMs = 1_000)
 
         assertEquals(null, result.annotationAnnouncement)
     }
@@ -420,7 +455,7 @@ class TrustBasedNavigatorTest {
         // 사용자는 W1 5m 서쪽 — userCum ≈ -5m → gap = 0 - (-5) = 5m, 트리거 안.
         val state = stateBefore(targetLon = 126.97840, offsetMeters = 5.0)
 
-        val result = navigator.update(state)
+        val result = navigator.update(state, currentTimeMs = 1_000)
 
         assertTrue(
             result.annotationAnnouncement?.isNotBlank() == true,
@@ -446,8 +481,8 @@ class TrustBasedNavigatorTest {
         )
         val state = stateBefore(targetLon = 126.97840, offsetMeters = 5.0)
 
-        val first = navigator.update(state)
-        val second = navigator.update(state)
+        val first = navigator.update(state, currentTimeMs = 1_000)
+        val second = navigator.update(state, currentTimeMs = 2_000)
 
         assertEquals("테스트 안내", first.annotationAnnouncement)
         assertEquals(null, second.annotationAnnouncement)

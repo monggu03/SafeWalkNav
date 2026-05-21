@@ -1,7 +1,7 @@
 package com.example.safewalknav.traffic
 
-import com.example.safewalknav.navigation.SeoulTrafficSignalLocationApiClient
-import com.example.safewalknav.navigation.TrafficSignalLocation
+import com.example.safewalknav.navigation.signal.SeoulTrafficSignalLocationApiClient
+import com.example.safewalknav.navigation.signal.TrafficSignalLocation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
