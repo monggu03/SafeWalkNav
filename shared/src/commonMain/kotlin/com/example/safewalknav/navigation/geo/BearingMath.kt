@@ -1,5 +1,6 @@
 package com.example.safewalknav.navigation.geo
 
+import com.example.safewalknav.navigation.tmap.Waypoint
 import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -65,4 +66,25 @@ fun distanceBetween(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Flo
     val a = sinDPhi * sinDPhi + cos(phi1) * cos(phi2) * sinDLambda * sinDLambda
     val c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a))
     return (earthRadius * c).toFloat()
+}
+
+/**
+ * waypoint[0]..waypoint[i] 까지의 누적 거리 (m).
+ * cumulative[0] = 0, cumulative[i] = sum(distance(j, j+1) for j in 0..i-1).
+ *
+ * RouteAnnotator 가 annotation 의 `distanceFromStartM` 을 채우는 데 쓰고,
+ * NavigationManager 는 사용자 진행 거리(userCumulativeDistance) 계산에 쓴다.
+ */
+fun computeCumulativeDistances(waypoints: List<Waypoint>): List<Double> {
+    if (waypoints.isEmpty()) return emptyList()
+    val out = ArrayList<Double>(waypoints.size)
+    out.add(0.0)
+    var acc = 0.0
+    for (i in 1 until waypoints.size) {
+        val a = waypoints[i - 1]
+        val b = waypoints[i]
+        acc += distanceBetween(a.lat, a.lon, b.lat, b.lon).toDouble()
+        out.add(acc)
+    }
+    return out
 }
