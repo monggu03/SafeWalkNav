@@ -15,9 +15,9 @@ import com.example.safewalknav.navigation.signal.TrafficSignalMatcher
 import com.example.safewalknav.navigation.signal.TrafficSignalRemainingTimeParser
 import com.example.safewalknav.navigation.tbfw.NavigatorConfig
 import com.example.safewalknav.navigation.tbfw.PathAnnotation
-import com.example.safewalknav.navigation.tbfw.PathSegmentType
 import com.example.safewalknav.navigation.tbfw.RouteAnnotationLogger
 import com.example.safewalknav.navigation.tbfw.RouteAnnotator
+import com.example.safewalknav.navigation.tbfw.selectAnnouncementCandidate
 import com.example.safewalknav.navigation.tmap.ArrivalState
 import com.example.safewalknav.navigation.tmap.POIResult
 import com.example.safewalknav.navigation.tmap.RiskLevel
@@ -1396,13 +1396,12 @@ class NavigationManager(
         }
 
         val userCum = userCumulativeDistance(currentLat, currentLon, route)
-        val candidate = pathAnnotations.firstOrNull { ann ->
-            if (ann.startWaypointIndex in announcedAnnotationIds) return@firstOrNull false
-            if (ann.announceMessage.isBlank()) return@firstOrNull false
-            val triggerDist = announceDistanceFor(ann.type)
-            val gap = ann.distanceFromStartM - userCum
-            gap in 0.0..triggerDist
-        } ?: return
+        val candidate = selectAnnouncementCandidate(
+            annotations = pathAnnotations,
+            userCumulativeDistance = userCum,
+            announcedIds = announcedAnnotationIds,
+            config = navigatorConfig,
+        ) ?: return
 
         announcedAnnotationIds.add(candidate.startWaypointIndex)
         speak(candidate.announceMessage)
@@ -1425,12 +1424,6 @@ class NavigationManager(
         val wp = route.waypoints.getOrNull(idx) ?: return cumulativeDistances[idx]
         val remaining = distanceBetween(currentLat, currentLon, wp.lat, wp.lon).toDouble()
         return (cumulativeDistances[idx] - remaining).coerceAtLeast(0.0)
-    }
-
-    private fun announceDistanceFor(type: PathSegmentType): Double = when (type) {
-        PathSegmentType.SHARP_TURN -> navigatorConfig.announceDistanceSharpM
-        PathSegmentType.TURN, PathSegmentType.SLIGHT_TURN -> navigatorConfig.announceDistanceTurnM
-        else -> navigatorConfig.announceDistanceCurveM
     }
 
     // 2026-05-21 — RouteAnnotator 의 사전 분석 결과(announceUpcomingAnnotation) 로 대체됨.
