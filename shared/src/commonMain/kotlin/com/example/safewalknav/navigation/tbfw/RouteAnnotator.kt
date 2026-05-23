@@ -500,6 +500,75 @@ class RouteAnnotator(
         return partial.copy(announceMessage = MessageBuilder.buildAnnotationAnnounce(partial))
     }
 
+    /**
+     * 곡선/회전 annotation 구간에 가상 waypoint 를 삽입한 확장 리스트를 반환한다.
+     *
+     * 동작:
+     *   - 원본 waypoints 사이에서 startWaypointIndex..endWaypointIndex 가 곡선 구간이면
+     *     각 인접 쌍 사이에 [NavigatorConfig.virtualWaypointSpacingM] 간격으로 보간점 삽입
+     *   - 삽입된 점은 [Waypoint.isVirtual] = true 로 표시
+     *   - 원본 waypoint 는 모두 그대로 보존
+     *
+     * 대상 타입: CURVE / SLIGHT_CURVE / INTERNAL_CURVE.
+     * TURN 류는 한 지점에서 급격히 꺾이므로 보간 의미가 없어 제외.
+     */
+    fun expandWithVirtualWaypoints(annotated: AnnotatedRoute): List<Waypoint> {
+        val original = annotated.waypoints
+        if (original.isEmpty()) return emptyList()
+
+        val curveRanges: List<IntRange> = annotated.annotations
+            .filter {
+                it.type == PathSegmentType.CURVE
+                        || it.type == PathSegmentType.SLIGHT_CURVE
+                        || it.type == PathSegmentType.INTERNAL_CURVE
+            }
+            .map { it.startWaypointIndex..it.endWaypointIndex }
+
+        val expanded = mutableListOf<Waypoint>()
+        for (i in original.indices) {
+            expanded.add(original[i])
+            if (i + 1 < original.size && isInCurveRange(i, curveRanges)) {
+                val virtuals = generateVirtualPoints(
+                    start = original[i],
+                    end = original[i + 1],
+                    spacingM = config.virtualWaypointSpacingM,
+                )
+                expanded.addAll(virtuals)
+            }
+        }
+        return expanded
+    }
+
+    private fun isInCurveRange(idx: Int, ranges: List<IntRange>): Boolean =
+        ranges.any { idx in it }
+
+    private fun generateVirtualPoints(
+        start: Waypoint,
+        end: Waypoint,
+        spacingM: Double,
+    ): List<Waypoint> {
+        val distM = distanceBetween(start.lat, start.lon, end.lat, end.lon).toDouble()
+        if (distM <= spacingM) return emptyList()
+        val numPoints = (distM / spacingM).toInt()
+        val out = mutableListOf<Waypoint>()
+        for (k in 1 until numPoints) {
+            val t = k * spacingM / distM
+            out.add(
+                Waypoint(
+                    lat = start.lat + (end.lat - start.lat) * t,
+                    lon = start.lon + (end.lon - start.lon) * t,
+                    turnType = 0,
+                    description = "virtual",
+                    distance = 0,
+                    roadType = start.roadType,
+                    pointType = "VIRTUAL_CURVE",
+                    isVirtual = true,
+                )
+            )
+        }
+        return out
+    }
+
     companion object {
         /**
          * 각도 차이를 -180 ~ +180 범위로 정규화.

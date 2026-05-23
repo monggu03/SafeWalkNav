@@ -1,6 +1,5 @@
 package com.example.safewalknav.navigation.tbfw
 
-import com.example.safewalknav.navigation.tmap.Waypoint
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -8,232 +7,87 @@ import kotlin.test.assertTrue
 /**
  * MessageBuilder 단위 테스트.
  *
- * 검증 항목:
- *   1. 메시지 우선순위 (isFinished > JUMPED > 통과 > 일반)
- *   2. 점프 레벨별 메시지 (JUMPED만 별도, NORMAL/SUSPECT는 일반 흐름)
- *   3. Waypoint pointType별 분기 (CROSSWALK, DESTINATION, 기타)
- *   4. 거리 구간별 메시지 (3m / 10m / 그 외)
+ * 2026-05-23 — TrustBasedNavigator 폐기 후 남은 메서드만 검증.
+ *   - buildAnnotationAnnounce
+ *   - buildInitialHeadingMessage
+ *   - buildFlatPosePromptMessage
  */
 class MessageBuilderTest {
 
-    /** 테스트용 Waypoint 헬퍼 (pointType만 다르게) */
-    private fun waypointOf(pointType: String): Waypoint = Waypoint(
-        lat = 37.5, lon = 127.0,
-        turnType = 0, description = "test",
-        distance = 0, roadType = 0, pointType = pointType
+    private fun ann(
+        type: PathSegmentType,
+        direction: TurnDirection,
+    ): PathAnnotation = PathAnnotation(
+        startWaypointIndex = 0,
+        endWaypointIndex = 1,
+        type = type,
+        direction = direction,
+        totalAngle = 0.0,
+        peakAngle = 0.0,
+        distanceFromStartM = 0.0,
+        announceMessage = "",
     )
 
-    // ─── 우선순위 1: 종료 ───
+    // ─── buildAnnotationAnnounce ───
 
     @Test
-    fun `isFinished true면 도착 메시지가 최우선이다`() {
-        // 다른 조건이 어떻든 isFinished가 true면 도착 메시지
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.JUMPED,    // JUMPED 여도
-            distance = 100f,                     // 멀어도
-            didPassWaypoint = false,
-            isFinished = true,
-            currentTarget = null
+    fun `STRAIGHT 면 빈 문자열을 돌려준다`() {
+        val msg = MessageBuilder.buildAnnotationAnnounce(
+            ann(PathSegmentType.STRAIGHT, TurnDirection.LEFT),
         )
-        assertEquals(MessageBuilder.MSG_ARRIVED_DESTINATION, msg)
-    }
-
-    // ─── 우선순위 2: GPS 점프 (JUMPED) ───
-
-    @Test
-    fun `JUMPED 면 GPS 점프 안내 메시지다`() {
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.JUMPED,
-            distance = 5f,
-            didPassWaypoint = false,
-            isFinished = false,
-            currentTarget = waypointOf("TURN")
-        )
-        assertEquals(MessageBuilder.MSG_GPS_DEGRADED, msg)
+        assertEquals("", msg)
     }
 
     @Test
-    fun `JUMPED 면 통과 처리 여부 무시하고 GPS 점프 안내다`() {
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.JUMPED,
-            distance = 5f,
-            didPassWaypoint = true,              // 통과했다 해도
-            isFinished = false,
-            currentTarget = waypointOf("TURN")
+    fun `direction이 NONE 이면 빈 문자열을 돌려준다`() {
+        val msg = MessageBuilder.buildAnnotationAnnounce(
+            ann(PathSegmentType.CURVE, TurnDirection.NONE),
         )
-        assertEquals(MessageBuilder.MSG_GPS_DEGRADED, msg)
+        assertEquals("", msg)
     }
 
     @Test
-    fun `JUMPED 안내 메시지에 멈춤 표현이 들어있지 않다`() {
-        // "멈추세요" 안내 절대 금지 — GPS 회복은 보행 중 일어남.
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.JUMPED,
-            distance = 5f,
-            didPassWaypoint = false,
-            isFinished = false,
-            currentTarget = waypointOf("TURN"),
+    fun `CURVE LEFT 면 왼쪽 곡선 안내가 나온다`() {
+        val msg = MessageBuilder.buildAnnotationAnnounce(
+            ann(PathSegmentType.CURVE, TurnDirection.LEFT),
         )
-        assertTrue(!msg.contains("멈"), "멈춤 안내가 들어있다: $msg")
-    }
-
-    // ─── 우선순위 3: waypoint 통과 ───
-
-    @Test
-    fun `통과 처리됐고 일반 타입이면 기본 통과 메시지다`() {
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.NORMAL,
-            distance = 5f,
-            didPassWaypoint = true,
-            isFinished = false,
-            currentTarget = waypointOf("TURN")
-        )
-        assertEquals(MessageBuilder.MSG_PASSED_GENERIC, msg)
+        assertTrue(msg.contains("왼쪽"), "왼쪽 안내 빠짐: $msg")
+        assertTrue(msg.contains("휘어집"), "곡선 표현 빠짐: $msg")
     }
 
     @Test
-    fun `통과 처리됐고 다음 목표가 CROSSWALK면 횡단보도 안내가 들어간다`() {
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.NORMAL,
-            distance = 5f,
-            didPassWaypoint = true,
-            isFinished = false,
-            currentTarget = waypointOf("CROSSWALK")
+    fun `SHARP_TURN RIGHT 면 오른쪽 급회전 안내가 나온다`() {
+        val msg = MessageBuilder.buildAnnotationAnnounce(
+            ann(PathSegmentType.SHARP_TURN, TurnDirection.RIGHT),
         )
-        assertTrue(msg.contains("횡단보도"), "CROSSWALK 안내가 빠짐: $msg")
+        assertTrue(msg.contains("오른쪽"), "오른쪽 안내 빠짐: $msg")
+        assertTrue(msg.contains("크게"), "급회전 표현 빠짐: $msg")
+    }
+
+    // ─── buildInitialHeadingMessage ───
+
+    @Test
+    fun `허용 오차 이내면 정면 직진 안내다`() {
+        val msg = MessageBuilder.buildInitialHeadingMessage(diffDeg = 5.0, tolerance = 15.0)
+        assertTrue(msg.contains("정면"))
+        assertTrue(msg.contains("직진"))
     }
 
     @Test
-    fun `통과 처리됐고 다음 목표가 DESTINATION이면 도착 임박 메시지다`() {
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.NORMAL,
-            distance = 5f,
-            didPassWaypoint = true,
-            isFinished = false,
-            currentTarget = waypointOf("DESTINATION")
-        )
-        assertTrue(msg.contains("도착"), "도착 안내가 빠짐: $msg")
+    fun `양수 diff 면 오른쪽 회전 안내다`() {
+        val msg = MessageBuilder.buildInitialHeadingMessage(diffDeg = 30.0, tolerance = 15.0)
+        assertTrue(msg.contains("오른쪽"), "오른쪽 안내 빠짐: $msg")
     }
 
     @Test
-    fun `통과 처리됐는데 currentTarget이 null이면 기본 통과 메시지다`() {
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.NORMAL,
-            distance = 5f,
-            didPassWaypoint = true,
-            isFinished = false,
-            currentTarget = null
-        )
-        assertEquals(MessageBuilder.MSG_PASSED_GENERIC, msg)
-    }
-
-    // ─── 우선순위 4: 일반 거리 안내 (3m 미만) ───
-
-    @Test
-    fun `매우 가까운 거리에서 DESTINATION이면 도착 메시지다`() {
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.NORMAL,
-            distance = 2f,                       // 3m 미만
-            didPassWaypoint = false,
-            isFinished = false,
-            currentTarget = waypointOf("DESTINATION")
-        )
-        assertEquals(MessageBuilder.MSG_ARRIVED_DESTINATION, msg)
+    fun `음수 diff 면 왼쪽 회전 안내다`() {
+        val msg = MessageBuilder.buildInitialHeadingMessage(diffDeg = -30.0, tolerance = 15.0)
+        assertTrue(msg.contains("왼쪽"), "왼쪽 안내 빠짐: $msg")
     }
 
     @Test
-    fun `매우 가까운 거리에서 CROSSWALK면 횡단보도 앞 안내다`() {
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.NORMAL,
-            distance = 2f,
-            didPassWaypoint = false,
-            isFinished = false,
-            currentTarget = waypointOf("CROSSWALK")
-        )
-        assertTrue(msg.contains("횡단보도"), "메시지: $msg")
-        assertTrue(msg.contains("신호"), "신호 확인 안내가 빠짐: $msg")
-    }
-
-    @Test
-    fun `매우 가까운 거리에서 일반 타입이면 곧 도착 안내다`() {
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.NORMAL,
-            distance = 2f,
-            didPassWaypoint = false,
-            isFinished = false,
-            currentTarget = waypointOf("TURN")
-        )
-        assertEquals("곧 다음 지점입니다.", msg)
-    }
-
-    // ─── 우선순위 4: 일반 거리 안내 (3~10m) ───
-
-    @Test
-    fun `가까운 거리에서 CROSSWALK면 거리와 함께 횡단보도 안내다`() {
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.NORMAL,
-            distance = 7f,                      // 3~10m
-            didPassWaypoint = false,
-            isFinished = false,
-            currentTarget = waypointOf("CROSSWALK")
-        )
-        assertTrue(msg.contains("7"), "거리 숫자 빠짐: $msg")
-        assertTrue(msg.contains("횡단보도"), "횡단보도 안내 빠짐: $msg")
-    }
-
-    @Test
-    fun `가까운 거리에서 DESTINATION이면 거리와 함께 목적지 안내다`() {
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.NORMAL,
-            distance = 7f,
-            didPassWaypoint = false,
-            isFinished = false,
-            currentTarget = waypointOf("DESTINATION")
-        )
-        assertTrue(msg.contains("7"))
-        assertTrue(msg.contains("목적지"))
-    }
-
-    // ─── 우선순위 4: 일반 거리 안내 (10m 이상) ───
-
-    @Test
-    fun `먼 거리면 일반 거리 안내다`() {
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.NORMAL,
-            distance = 50f,
-            didPassWaypoint = false,
-            isFinished = false,
-            currentTarget = waypointOf("CROSSWALK")
-        )
-        // 10m 이상에서는 pointType과 무관하게 일반 안내
-        assertEquals("50미터 앞으로 이동하세요.", msg)
-    }
-
-    @Test
-    fun `거리는 정수로 변환된다`() {
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.NORMAL,
-            distance = 23.7f,                   // 소수점 있어도
-            didPassWaypoint = false,
-            isFinished = false,
-            currentTarget = waypointOf("TURN")
-        )
-        assertTrue(msg.contains("23"), "정수 변환 실패: $msg")
-        assertTrue(!msg.contains("23.7"), "소수점이 그대로 노출됨: $msg")
-    }
-
-    // ─── SUSPECT 처리 ───
-
-    @Test
-    fun `SUSPECT도 일반 안내가 정상 작동한다`() {
-        // SUSPECT 는 별도 분기 없이 일반 흐름을 따라야 함
-        val msg = MessageBuilder.build(
-            jumpLevel = GpsJumpLevel.SUSPECT,
-            distance = 30f,
-            didPassWaypoint = false,
-            isFinished = false,
-            currentTarget = waypointOf("TURN")
-        )
-        assertEquals("30미터 앞으로 이동하세요.", msg)
+    fun `절대값이 135도 이상이면 뒤로 돌아 안내다`() {
+        val msg = MessageBuilder.buildInitialHeadingMessage(diffDeg = 170.0, tolerance = 15.0)
+        assertEquals("뒤로 돌아주세요.", msg)
     }
 }

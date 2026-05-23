@@ -424,4 +424,92 @@ class RouteAnnotatorTest {
             "supplementary check should skip <15m segments, got: ${result.annotations}",
         )
     }
+
+    // ─── 9. expandWithVirtualWaypoints ───
+
+    @Test
+    fun `직선 구간 only 면 가상 waypoint 가 추가되지 않는다`() {
+        // 100m 직진 — 곡선 annotation 없음
+        val waypoints = makePath(listOf(
+            0.0 to 25.0,
+            0.0 to 25.0,
+            0.0 to 25.0,
+            0.0 to 25.0,
+        ))
+        val annotated = annotator.annotate(waypoints)
+        assertTrue(annotated.annotations.isEmpty(), "직진인데 annotation 이 생김")
+
+        val expanded = annotator.expandWithVirtualWaypoints(annotated)
+        assertEquals(waypoints.size, expanded.size, "직진 구간엔 가상 점 추가 금지")
+        assertTrue(expanded.none { it.isVirtual })
+    }
+
+    @Test
+    fun `곡선 구간엔 약 5m 간격으로 가상 waypoint 가 삽입된다`() {
+        // 한 인접 쌍이 25m 인 곡선 → 가상 4개 (5, 10, 15, 20m 위치) 삽입 기대.
+        // 곡선 검출 자체는 누적 90° 우향 곡선으로 구성.
+        val waypoints = makePath(listOf(
+            0.0 to 25.0,
+            15.0 to 25.0,
+            30.0 to 25.0,
+            45.0 to 25.0,
+            60.0 to 25.0,
+        ))
+        val annotated = annotator.annotate(waypoints)
+        // 곡선이 잡혔는지 — sanity check
+        assertTrue(
+            annotated.annotations.any {
+                it.type == PathSegmentType.CURVE || it.type == PathSegmentType.SLIGHT_CURVE
+            },
+            "곡선 annotation 이 안 잡힘: ${annotated.annotations}",
+        )
+
+        val expanded = annotator.expandWithVirtualWaypoints(annotated)
+        val virtualCount = expanded.count { it.isVirtual }
+        assertTrue(virtualCount > 0, "곡선 구간에 가상 waypoint 가 하나도 안 들어감")
+        assertTrue(
+            expanded.size > waypoints.size,
+            "expanded(${expanded.size}) 가 원본(${waypoints.size}) 보다 크지 않음",
+        )
+    }
+
+    @Test
+    fun `5m 미만의 짧은 인접 쌍엔 가상 waypoint 가 추가되지 않는다`() {
+        // 모든 인접 거리 3m, 누적 곡률 충분히 큼.
+        // 곡선으로 판정되더라도 generateVirtualPoints 가 distM <= spacing 으로 빈 리스트 반환.
+        val waypoints = makePath(listOf(
+            0.0 to 3.0,
+            10.0 to 3.0,
+            20.0 to 3.0,
+            30.0 to 3.0,
+        ))
+        val annotated = annotator.annotate(waypoints)
+        val expanded = annotator.expandWithVirtualWaypoints(annotated)
+        // 결과적으로 가상 waypoint 가 0개여야 함 (구간 길이가 spacing 보다 작음)
+        assertEquals(0, expanded.count { it.isVirtual })
+    }
+
+    @Test
+    fun `원본 waypoint 는 expanded 결과에 모두 보존된다`() {
+        val waypoints = makePath(listOf(
+            0.0 to 20.0,
+            15.0 to 20.0,
+            30.0 to 20.0,
+            45.0 to 20.0,
+        ))
+        val annotated = annotator.annotate(waypoints)
+        val expanded = annotator.expandWithVirtualWaypoints(annotated)
+
+        for (orig in waypoints) {
+            val found = expanded.any { it.lat == orig.lat && it.lon == orig.lon && !it.isVirtual }
+            assertTrue(found, "원본 waypoint 가 expanded 결과에서 사라짐: $orig")
+        }
+    }
+
+    @Test
+    fun `빈 입력은 빈 리스트를 돌려준다`() {
+        val annotated = annotator.annotate(emptyList())
+        val expanded = annotator.expandWithVirtualWaypoints(annotated)
+        assertTrue(expanded.isEmpty())
+    }
 }
