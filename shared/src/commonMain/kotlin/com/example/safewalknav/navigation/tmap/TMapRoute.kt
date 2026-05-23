@@ -39,7 +39,10 @@ data class Waypoint(
     val description: String,       // 안내 문구 ("우회전", "횡단보도 건넘" 등)
     val distance: Int,             // 다음 포인트까지 누적 거리 (m, properties.totalDistance)
     val roadType: Int,             // ⚠️ Point 엔 roadType 없음 — 항상 0. RouteSegment.roadType 사용.
-    val pointType: String          // "TURN", "CROSSWALK", "DESTINATION" 등
+    val pointType: String,         // "TURN", "CROSSWALK", "DESTINATION" 등
+    // RouteAnnotator.expandWithVirtualWaypoints 가 곡선 구간에 5m 간격으로 삽입한 점.
+    // NavigationManager 는 통과 시점에 음성 대신 스테레오 비프 안내로 분기한다.
+    val isVirtual: Boolean = false,
 )
 
 /**
