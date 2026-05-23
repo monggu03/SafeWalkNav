@@ -13,10 +13,18 @@ import kotlin.math.min
 /**
  * 보행자 신호등 색깔 검출기.
  *
- * 모델: YOLOv8n, 자체 학습 (Roboflow cible/pedestrian-traffic-light-3p4dd, 939장)
- *   - mAP50 = 0.938
- *   - 빨강 ↔ 초록 오분류 0% (안전 핵심)
+ * 모델: Hybrid v2.1 (YOLOv11n backbone + P2 head 확장), 자체 학습, float16 양자화
+ *   - 데이터셋: Roboflow pedestrian-traffic-light--1 (train 822 / val 78 / test 39 = 939장)
+ *   - mAP50 = 0.9476  (5종 비교 실험 중 ★ 채택 모델)
+ *   - 빨강 ↔ 초록 오분류 0건 (안전 핵심)
  *   - 클래스: 0=red_pedestrian (정지), 1=green_pedestrian (보행)
+ *   - 파일 크기: 5.57 MB (float16, float32 대비 절반)
+ *
+ * 아키텍처 핵심:
+ *   - Ultralytics 가 제공하지 않는 yolo11-p2.yaml 을 자체 설계
+ *   - YOLOv11 backbone + YOLOv8-P2 head 패턴 결합, 레이어 인덱스 +1 재매핑, C2f → C3k2 치환
+ *   - 사전학습 가중치 88% 전이 성공 → 939장의 적은 데이터로도 안정 수렴
+ *   - P2 head 추가로 anchor 수 8,400 → 34,000 으로 확장 (160² + 80² + 40² + 20²)
  *
  * 입력: Bitmap (어떤 크기든 OK — 내부에서 640x640 으로 리사이즈)
  * 출력: List<TrafficLightDetection> (NMS 적용 후, confidence threshold 통과한 것만)
@@ -34,7 +42,7 @@ class TrafficLightDetector(context: Context) {
     /**
      * Confidence threshold — 이 값 이상의 점수만 유효 검출로 인정.
      * 0.7 로 비교적 엄격하게 — 시각장애인 안전 시나리오에선 false positive 가 false negative 보다 더 치명적.
-     * 학습 시 mAP50 0.938, 진짜 신호등은 0.7+ 로 잡힘. 0.5~0.7 대는 noise 가능성 높아 제외.
+     * 학습 시 mAP50 0.9476, 진짜 신호등은 0.7+ 로 잡힘. 0.5~0.7 대는 noise 가능성 높아 제외.
      */
     var confidenceThreshold: Float = 0.7f
 
@@ -42,17 +50,23 @@ class TrafficLightDetector(context: Context) {
     var iouThreshold: Float = 0.45f
 
     init {
-        // CPU 추론 (4 threads). GPU delegate 는 tensorflow-lite-gpu-delegate-plugin 의존성이
-        // tflite 2.14 와 API 호환 안 돼서 PR-1 에서 제거됨. 직접 GpuDelegate() 호출 시
-        // NoClassDefFoundError (GpuDelegateFactory$Options) 발생 → CPU 만 사용.
-        // YOLOv8n 모델이 작아 (약 6 MB) CPU + 4 threads 로도 5~10ms 추론, 모바일에 충분.
-        val options = Interpreter.Options()
-        options.setNumThreads(4)
+        // CPU 추론 (4 threads) + NNAPI delegate (가능하면) fallback CPU.
+        // GPU delegate 는 tensorflow-lite-gpu-delegate-plugin 의존성이 tflite 2.14 와 API 호환 안 돼서
+        // 제거됐고, 직접 GpuDelegate() 호출 시 NoClassDefFoundError 발생.
+        // 대신 NNAPI (Android 8.1+) 를 우선 사용 — 디바이스 NPU/DSP/GPU 를 자동 활용해 추론 가속.
+        // float16 양자화 모델 (5.6 MB) 이라 NNAPI 와 궁합 좋음 — float32 대비 1.5~2배 추론 가속 기대.
+        val options = Interpreter.Options().apply {
+            setNumThreads(4)
+            // useNNAPI 는 deprecated 됐지만 NnApiDelegate 가 일부 디바이스에서 crash 유발하므로
+            // 안전한 형태로 옵션만 켜둠. 실패 시 자동 CPU fallback.
+            @Suppress("DEPRECATION")
+            setUseNNAPI(true)
+        }
 
         val modelBuffer = FileUtil.loadMappedFile(context, MODEL_FILENAME)
         interpreter = Interpreter(modelBuffer, options)
 
-        Log.d(TAG, "Model loaded: $MODEL_FILENAME (CPU, 4 threads)")
+        Log.d(TAG, "Model loaded: $MODEL_FILENAME (NNAPI on, 4 threads CPU fallback)")
         Log.d(TAG, "Input shape: ${interpreter.getInputTensor(0).shape().toList()}")
         Log.d(TAG, "Output shape: ${interpreter.getOutputTensor(0).shape().toList()}")
     }
@@ -64,7 +78,8 @@ class TrafficLightDetector(context: Context) {
     fun detect(bitmap: Bitmap): List<TrafficLightDetection> {
         val input = preprocess(bitmap)
 
-        // YOLOv8 출력 shape: [1, 4 + numClasses, numAnchors] = [1, 6, 8400]
+        // YOLO 출력 shape: [1, 4 + numClasses, numAnchors] = [1, 6, 34000]
+        // P2 head 포함 anchor 수: 160² + 80² + 40² + 20² = 25600 + 6400 + 1600 + 400 = 34000.
         // [0..3] = bbox (cx, cy, w, h, 입력 크기 단위), [4..5] = class scores
         val output = Array(1) { Array(NUM_OUTPUT_CHANNELS) { FloatArray(NUM_ANCHORS) } }
         interpreter.run(input, output)
@@ -97,9 +112,9 @@ class TrafficLightDetector(context: Context) {
     }
 
     /**
-     * YOLOv8 raw output → 필터링/NMS 거친 최종 검출 리스트.
+     * YOLO raw output → 필터링/NMS 거친 최종 검출 리스트.
      *
-     * 입력 형태: [6][8400]
+     * 입력 형태: [6][34000]  (Hybrid v2.1, P2 head 포함)
      *   - output[0..3][i] = anchor i 의 bbox (cx, cy, w, h, 단위는 INPUT_SIZE 기준)
      *   - output[4..5][i] = anchor i 의 class score (sigmoid 적용된 값)
      */
@@ -170,12 +185,18 @@ class TrafficLightDetector(context: Context) {
 
     companion object {
         private const val TAG = "TrafficLightDetector"
-        private const val MODEL_FILENAME = "pedestrian_tl.tflite"
+
+        // Hybrid v2.1 (YOLOv11n + P2 head, float16 양자화), mAP50 0.9476, 939장 학습.
+        // 이전 YOLOv8n 모델 (pedestrian_tl.tflite, mAP 0.938) 은 APK 용량 절감 위해 제거됨.
+        // 재현 필요 시 models/best.pt 에서 재export 또는 Colab 학습 결과에서 복구.
+        private const val MODEL_FILENAME = "safewalknav_tl.tflite"
 
         private const val INPUT_SIZE = 640
         private const val NUM_CLASSES = 2
         private const val NUM_OUTPUT_CHANNELS = 4 + NUM_CLASSES   // 6
-        private const val NUM_ANCHORS = 8400                      // 80*80 + 40*40 + 20*20
+        // P2 head 포함 anchor 수: 160² + 80² + 40² + 20² = 25,600 + 6,400 + 1,600 + 400 = 34,000.
+        // P2 head 가 없던 이전 모델 (8,400 anchors) 과 다름 — 모델 교체 시 반드시 같이 갱신할 것.
+        private const val NUM_ANCHORS = 34000
 
         // data.yaml 의 names 와 정확히 일치 (학습 시점 클래스 매핑)
         private val CLASS_NAMES = listOf("red_pedestrian", "green_pedestrian")
