@@ -9,7 +9,8 @@ data class SignalRemainingInfo(
     val direction: String,
     val stateName: String,
     val isWalkGreen: Boolean,
-    val remainingSeconds: Int?
+    val remainingSeconds: Int?,
+    val remainingRaw: Int? = null
 )
 
 object TrafficSignalRemainingTimeParser {
@@ -33,10 +34,12 @@ object TrafficSignalRemainingTimeParser {
                     ?.content
                     ?.takeIf { it.isNotBlank() }
 
-                val remainingSeconds = obj["${dir}PdsgRmdrCs"]
+                val remainingRaw = obj["${dir}PdsgRmdrCs"]
                     ?.jsonPrimitive
                     ?.content
                     ?.toIntOrNull()
+
+                val remainingSeconds = remainingRaw
                     ?.let { it / 10 }
 
                 if (stateName == null && remainingSeconds == null) {
@@ -48,7 +51,8 @@ object TrafficSignalRemainingTimeParser {
                         isWalkGreen =
                             stateName?.contains("녹색") == true ||
                                     stateName?.contains("Green", ignoreCase = true) == true,
-                        remainingSeconds = remainingSeconds
+                        remainingSeconds = remainingSeconds,
+                        remainingRaw = remainingRaw
                     )
                 }
             }
