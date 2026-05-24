@@ -9,6 +9,7 @@ import com.example.safewalknav.navigation.geo.getClockDirection
 import com.example.safewalknav.navigation.platform.GpsLocation
 import com.example.safewalknav.navigation.platform.currentTimeMillis
 import com.example.safewalknav.navigation.signal.SignalApiClient
+import com.example.safewalknav.navigation.signal.SignalRemainingInfo
 import com.example.safewalknav.navigation.signal.TrafficIntersectionParser
 import com.example.safewalknav.navigation.signal.TrafficSignalLocation
 import com.example.safewalknav.navigation.signal.TrafficSignalMatcher
@@ -26,8 +27,10 @@ import com.example.safewalknav.navigation.tmap.TMapApiClient
 import com.example.safewalknav.navigation.tmap.TMapRoute
 import com.example.safewalknav.navigation.tmap.Waypoint
 import com.example.safewalknav.navigation.walking.HeadingLogger
+import com.example.safewalknav.navigation.walking.LeanStatus
 import com.example.safewalknav.navigation.walking.NoopHeadingLogger
 import com.example.safewalknav.navigation.walking.WalkingDiagnostic
+import com.example.safewalknav.navigation.walking.findCrosswalkZoneInfo
 import com.example.safewalknav.navigation.walking.isCrosswalkWaypoint
 import com.example.safewalknav.navigation.walking.isOnCrosswalkSegment
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -168,7 +171,8 @@ class NavigationManager(
      */
     private var leanAccumulator = 0 // 쏠림 누적 카운트
 
-    /*fun updateCompassHeading(azimuth: Float, currentTime: Long) {
+    fun updateCompassHeading(azimuth: Float, currentTime: Long) {
+        latestCompassHeading = azimuth
         _compassHeading.value = azimuth
 
         if (_isNavigating.value) {
@@ -202,11 +206,6 @@ class NavigationManager(
                 }
             }
         }
-    }
-    */
-
-    fun updateCompassHeading(azimuth: Float, currentTime: Long) {
-        latestCompassHeading = azimuth
     }
 
     // ========== 경로 탐색 ==========
@@ -523,12 +522,13 @@ class NavigationManager(
         val currentWp = route.waypoints.getOrNull(currentWaypointIndex)
 
         // 현재 위치가 횡단보도인지 판정
-        val isInCrossWalkZone = isOnCrosswalkSegment(
+        val crosswalkZoneInfo = findCrosswalkZoneInfo(
             currentLat,
             currentLon,
             route.waypoints,
             currentWaypointIndex
         )
+        val isInCrossWalkZone = crosswalkZoneInfo.isInZone
         // 외부 (안드 ML 검출 게이팅 등) 가 collect 할 수 있게 state flow 갱신
         _isInCrosswalkZone.value = isInCrossWalkZone
 
@@ -551,6 +551,9 @@ class NavigationManager(
         _debugMessage.value =
             "횡단보도=$isInCrossWalkZone\n" +
                     "idx=$currentWaypointIndex/${route.waypoints.size}\n" +
+                    "crosswalkState=${crosswalkZoneInfo.state}\n" +
+                    "crosswalkIdx=${crosswalkZoneInfo.crosswalkIndex ?: -1}\n" +
+                    "crosswalkDist=${crosswalkZoneInfo.distanceMeters?.toInt() ?: -1}m\n" +
                     "wp=${currentWp?.pointType}\n" +
                     "seg='${currentSegment?.name}' road=${currentSegment?.roadType} " +
                     "risk=${currentSegment?.riskLevel}\n" +
@@ -569,7 +572,7 @@ class NavigationManager(
                 currentLat = currentLat,
                 currentLon = currentLon,
                 signals = trafficSignals,
-                radiusMeters = 30f
+                radiusMeters = 80f
             )
 
             if (nearestSignal != null) {
@@ -779,15 +782,107 @@ class NavigationManager(
 
         val parsedSignals = remainJson?.let {
             TrafficSignalRemainingTimeParser.parse(it)
+
         } ?: emptyList()
+
+        val routeBearing = computeRouteBearingAhead(15f)
+
+        val selectedSignal = if (routeBearing != null) {
+            selectSignalForRouteDirection(
+                routeBearing = routeBearing,
+                signals = parsedSignals
+            )
+        } else {
+            parsedSignals.firstOrNull {
+                it.remainingSeconds != null
+            }
+        }
+        val allPedestrianSignals = buildPedestrianSignalDebug(parsedSignals)
 
         _debugMessage.value =
             "교차로 매칭 성공\n" +
                     "itstId=${nearestIntersection.itstId}\n" +
                     "name=${nearestIntersection.itstNm}\n" +
+                    "routeBearing=${routeBearing?.toInt() ?: -1}\n" +
+                    "targetDirection=${routeBearing?.let { bearingToSignalDirection(it) } ?: "없음"}\n" +
+                    "selectedDirection=${selectedSignal?.direction ?: "없음"}\n" +
+                    "보행신호=${selectedSignal?.stateName ?: "없음"}\n" +
+                    "raw=${selectedSignal?.remainingRaw ?: -1}\n" +
+                    "남은시간=${selectedSignal?.remainingSeconds ?: -1}초\n" +
                     "parsedSignals=${parsedSignals.size}\n" +
-                    "잔여시간 API 응답=${if (remainJson != null && !remainJson.startsWith("ERROR")) "성공" else "실패"}\n" +
-                    "rawLength=${remainJson?.length ?: 0}"
+                    "allPdsg=$allPedestrianSignals"
+    }
+
+    private fun buildPedestrianSignalDebug(
+        signals: List<SignalRemainingInfo>
+    ): String {
+        val byDirection = signals.associateBy { it.direction }
+        return listOf("nt", "ne", "et", "se", "st", "sw", "wt", "nw")
+            .joinToString(" | ") { direction ->
+                val signal = byDirection[direction]
+                if (signal == null) {
+                    "$direction=-"
+                } else {
+                    val raw = signal.remainingRaw?.toString() ?: "-"
+                    val seconds = signal.remainingSeconds?.toString() ?: "-"
+                    "$direction=${signal.stateName},raw=$raw,sec=$seconds"
+                }
+            }
+    }
+
+    private fun selectSignalForRouteDirection(
+        routeBearing: Float,
+        signals: List<SignalRemainingInfo>
+    ): SignalRemainingInfo? {
+        val targetDirection = bearingToSignalDirection(routeBearing)
+
+        val exact = signals.firstOrNull { signal ->
+            signal.direction == targetDirection
+        }
+
+        if (exact != null) {
+            return exact
+        }
+
+        val fallbackDirections = adjacentSignalDirections(targetDirection)
+
+        return fallbackDirections
+            .asSequence()
+            .mapNotNull { fallbackDirection ->
+                signals.firstOrNull { signal ->
+                    signal.direction == fallbackDirection
+                }
+            }
+            .firstOrNull()
+    }
+
+    private fun bearingToSignalDirection(bearing: Float): String {
+        val normalized = ((bearing % 360f) + 360f) % 360f
+
+        return when {
+            normalized >= 337.5f || normalized < 22.5f -> "nt"
+            normalized < 67.5f -> "ne"
+            normalized < 112.5f -> "et"
+            normalized < 157.5f -> "se"
+            normalized < 202.5f -> "st"
+            normalized < 247.5f -> "sw"
+            normalized < 292.5f -> "wt"
+            else -> "nw"
+        }
+    }
+
+    private fun adjacentSignalDirections(directionCode: String): List<String> {
+        return when (directionCode) {
+            "nt" -> listOf("nw", "ne")
+            "ne" -> listOf("nt", "et")
+            "et" -> listOf("ne", "se")
+            "se" -> listOf("et", "st")
+            "st" -> listOf("se", "sw")
+            "sw" -> listOf("st", "wt")
+            "wt" -> listOf("sw", "nw")
+            "nw" -> listOf("wt", "nt")
+            else -> emptyList()
+        }
     }
 
     /**
