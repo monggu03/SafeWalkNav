@@ -22,6 +22,10 @@ final class AppDependencies: ObservableObject {
     let stt: SttManager
     let trafficLightDetector: TrafficLightDetector
 
+    // KMP SpatialBeeper 에 iOS AVAudioEngine 재생을 주입하는 어댑터.
+    // strong ref 로 보관해야 클로저(iosImpl) 가 유효하다.
+    private let spatialBeeperImpl: SpatialBeeperImpl
+
     // MARK: - KMM Managers
     let navigationManager: NavigationManager
 
@@ -73,6 +77,9 @@ final class AppDependencies: ObservableObject {
         self.stt = stt
         self.navigationViewModel = navigationViewModel
         self.trafficLightDetector = TrafficLightDetector(tts: tts)
+        // SpatialBeeper 콜백 주입 — NavigationManager.handleVirtualWaypointPassed 가
+        // 호출되는 순간 AVAudioEngine 으로 비프가 재생되게 한다.
+        self.spatialBeeperImpl = SpatialBeeperImpl(kmpBeeper: navigationManager.spatialBeeper)
 
         // 5. 신호제어기 위치 데이터 로드 (Android MainActivity 의 loadTrafficSignalLocations 와 동일)
         //    - 캐시가 있으면 즉시 사용, 없으면 Seoul Open API 에서 받아 캐시 후 사용.
