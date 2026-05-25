@@ -1405,13 +1405,37 @@ class NavigationManager(
         }
 
         val message = if (currentSegment != null) {
-            val rounded = roundDistanceForTts(distToNext.toInt())
+            // ─── Distance anchors ────────────────────────────────────────────
+            // 안전성 직결: anchor 의미와 메시지 문구가 일치해야 한다.
+            //
+            // - waypoint anchor (distForWaypointAnchor):
+            //     다음 waypoint 까지의 직선거리. "이 구간 N미터 더 이동" /
+            //     "N미터 직진" 같은 segment-progress 메시지에 사용.
+            //     idx advance 가 정체되면 부정확할 수 있으나, segment-progress
+            //     의미에서는 사용자에게 "현재 향하는 다음 지점까지의 거리" 로
+            //     해석되어 의미 모순은 없다.
+            //
+            // - destination anchor (distForDestinationAnchor):
+            //     GPS 실측 직선거리 (함수 인자 distToDestination). "도착지까지
+            //     약 N미터" 같이 destination 의미를 직접 발화하는 메시지에 필수.
+            //     idx 정체와 무관하게 GPS 실측이라 안전.
+            //
+            // 과거 버그 (2026-05-25 실외 테스트):
+            //     "도착지" 분기가 distForWaypointAnchor 를 쓰는 바람에 idx 가
+            //     가상 waypoint 에 정체될 때 "도착지까지 25→70m" 식으로 거리가
+            //     역전 증가, 사용자가 도착지에서 멀어진다고 들리는 위험 발생.
+            // ────────────────────────────────────────────────────────────────
+            val distForWaypointAnchor = roundDistanceForTts(distToNext.toInt())
+            val distForDestinationAnchor = roundDistanceForTts(distToDestination.toInt())
             when {
-                currentSegment.name == "출발지" -> "약 ${rounded}미터 더 이동하세요"
-                currentSegment.name == "도착지" -> "도착지까지 약 ${rounded}미터"
-                currentSegment.name == "보행자도로" -> "약 ${rounded}미터 직진"
-                currentSegment.name.isBlank() -> "약 ${rounded}미터 직진"
-                else -> "${currentSegment.name} 방향 약 ${rounded}미터 직진"
+                // anchor: waypoint  — "이 구간 N미터 더 이동"
+                currentSegment.name == "출발지" -> "약 ${distForWaypointAnchor}미터 더 이동하세요"
+                // anchor: destination — 문구가 "도착지까지" 이므로 GPS 실측 사용 (★ 안전 직결)
+                currentSegment.name == "도착지" -> "도착지까지 약 ${distForDestinationAnchor}미터"
+                // anchor: waypoint — "이 도로 N미터 직진"
+                currentSegment.name == "보행자도로" -> "약 ${distForWaypointAnchor}미터 직진"
+                currentSegment.name.isBlank() -> "약 ${distForWaypointAnchor}미터 직진"
+                else -> "${currentSegment.name} 방향 약 ${distForWaypointAnchor}미터 직진"
             }
         } else {
             // segment 정보 없으면 거리만 안내 (백업)
