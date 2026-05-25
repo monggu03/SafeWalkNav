@@ -427,6 +427,15 @@ class RouteAnnotatorTest {
 
     // ─── 9. expandWithVirtualWaypoints ───
 
+    /**
+     * 테스트용 routePoints 빌더 — waypoint 좌표를 그대로 LatLng 로 변환.
+     * 즉 polyline 이 waypoint 직선과 일치하는 경우 (실제 TMap 응답에서 곡선 LineString 이
+     * waypoint 사이를 지나가는 단순 케이스). 새 polyline-based generator 가 이 입력에서는
+     * 옛 직선 lerp 와 동등한 결과를 내야 한다.
+     */
+    private fun toRoutePoints(waypoints: List<Waypoint>): List<LatLng> =
+        waypoints.map { LatLng(it.lat, it.lon) }
+
     @Test
     fun `직선 구간 only 면 가상 waypoint 가 추가되지 않는다`() {
         // 100m 직진 — 곡선 annotation 없음
@@ -439,14 +448,14 @@ class RouteAnnotatorTest {
         val annotated = annotator.annotate(waypoints)
         assertTrue(annotated.annotations.isEmpty(), "직진인데 annotation 이 생김")
 
-        val expanded = annotator.expandWithVirtualWaypoints(annotated)
+        val expanded = annotator.expandWithVirtualWaypoints(annotated, toRoutePoints(waypoints))
         assertEquals(waypoints.size, expanded.size, "직진 구간엔 가상 점 추가 금지")
         assertTrue(expanded.none { it.isVirtual })
     }
 
     @Test
     fun `곡선 구간엔 약 5m 간격으로 가상 waypoint 가 삽입된다`() {
-        // 한 인접 쌍이 25m 인 곡선 → 가상 4개 (5, 10, 15, 20m 위치) 삽입 기대.
+        // 한 인접 쌍이 25m 인 곡선 → 가상점이 polyline 위로 5m 간격으로 깔림.
         // 곡선 검출 자체는 누적 90° 우향 곡선으로 구성.
         val waypoints = makePath(listOf(
             0.0 to 25.0,
@@ -464,19 +473,30 @@ class RouteAnnotatorTest {
             "곡선 annotation 이 안 잡힘: ${annotated.annotations}",
         )
 
-        val expanded = annotator.expandWithVirtualWaypoints(annotated)
+        val expanded = annotator.expandWithVirtualWaypoints(annotated, toRoutePoints(waypoints))
         val virtualCount = expanded.count { it.isVirtual }
         assertTrue(virtualCount > 0, "곡선 구간에 가상 waypoint 가 하나도 안 들어감")
         assertTrue(
             expanded.size > waypoints.size,
             "expanded(${expanded.size}) 가 원본(${waypoints.size}) 보다 크지 않음",
         )
+        // polyline-based generator 는 가상점마다 sourceRoutePointIdx 를 채워야 함.
+        val virtuals = expanded.filter { it.isVirtual }
+        assertTrue(
+            virtuals.all { it.sourceRoutePointIdx >= 0 },
+            "가상점에 sourceRoutePointIdx 가 안 채워짐: $virtuals",
+        )
+        assertTrue(
+            virtuals.all { it.bearingToNext != null },
+            "가상점에 bearingToNext 가 안 채워짐: $virtuals",
+        )
     }
 
     @Test
-    fun `5m 미만의 짧은 인접 쌍엔 가상 waypoint 가 추가되지 않는다`() {
-        // 모든 인접 거리 3m, 누적 곡률 충분히 큼.
-        // 곡선으로 판정되더라도 generateVirtualPoints 가 distM <= spacing 으로 빈 리스트 반환.
+    fun `polyline 총 길이가 spacing 미만이면 가상 waypoint 가 추가되지 않는다`() {
+        // 인접 쌍이 모두 3m → polyline 슬라이스 누적 길이도 3m 수준.
+        // nextTarget=5m 가 한 번도 만족되지 않아 가상점 0개.
+        // (기존 직선 lerp 시절의 "5m 미만 인접 쌍 → 0개" 의 polyline 버전.)
         val waypoints = makePath(listOf(
             0.0 to 3.0,
             10.0 to 3.0,
@@ -484,8 +504,7 @@ class RouteAnnotatorTest {
             30.0 to 3.0,
         ))
         val annotated = annotator.annotate(waypoints)
-        val expanded = annotator.expandWithVirtualWaypoints(annotated)
-        // 결과적으로 가상 waypoint 가 0개여야 함 (구간 길이가 spacing 보다 작음)
+        val expanded = annotator.expandWithVirtualWaypoints(annotated, toRoutePoints(waypoints))
         assertEquals(0, expanded.count { it.isVirtual })
     }
 
@@ -498,7 +517,7 @@ class RouteAnnotatorTest {
             45.0 to 20.0,
         ))
         val annotated = annotator.annotate(waypoints)
-        val expanded = annotator.expandWithVirtualWaypoints(annotated)
+        val expanded = annotator.expandWithVirtualWaypoints(annotated, toRoutePoints(waypoints))
 
         for (orig in waypoints) {
             val found = expanded.any { it.lat == orig.lat && it.lon == orig.lon && !it.isVirtual }
@@ -509,7 +528,7 @@ class RouteAnnotatorTest {
     @Test
     fun `빈 입력은 빈 리스트를 돌려준다`() {
         val annotated = annotator.annotate(emptyList())
-        val expanded = annotator.expandWithVirtualWaypoints(annotated)
+        val expanded = annotator.expandWithVirtualWaypoints(annotated, emptyList())
         assertTrue(expanded.isEmpty())
     }
 }

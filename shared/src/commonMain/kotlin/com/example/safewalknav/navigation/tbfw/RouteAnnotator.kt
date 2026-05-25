@@ -501,72 +501,133 @@ class RouteAnnotator(
     }
 
     /**
-     * 곡선/회전 annotation 구간에 가상 waypoint 를 삽입한 확장 리스트를 반환한다.
+     * 곡선 annotation 구간에 가상 waypoint 를 삽입한 확장 리스트를 반환한다.
      *
-     * 동작:
+     * 동작 (2026-05-25 변경):
      *   - 원본 waypoints 사이에서 startWaypointIndex..endWaypointIndex 가 곡선 구간이면
-     *     각 인접 쌍 사이에 [NavigatorConfig.virtualWaypointSpacingM] 간격으로 보간점 삽입
-     *   - 삽입된 점은 [Waypoint.isVirtual] = true 로 표시
+     *     해당 waypoint 쌍에 대응하는 **polyline (routePoints) 위**에
+     *     [NavigatorConfig.virtualWaypointSpacingM] 누적 거리마다 가상점을 찍는다.
+     *   - 직선 lerp 이 아니라 polyline 을 따라가므로 가상점이 실제 도로 위에 정확히 놓인다.
+     *   - 각 가상점은 `sourceRoutePointIdx` / `bearingToNext` / `curveDirection` 메타데이터 보유
      *   - 원본 waypoint 는 모두 그대로 보존
      *
      * 대상 타입: CURVE / SLIGHT_CURVE / INTERNAL_CURVE.
      * TURN 류는 한 지점에서 급격히 꺾이므로 보간 의미가 없어 제외.
+     *
+     * @param routePoints TMap 응답의 폴리라인 좌표. 비어 있으면 가상점이 한 개도 생성되지 않는다.
      */
-    fun expandWithVirtualWaypoints(annotated: AnnotatedRoute): List<Waypoint> {
+    fun expandWithVirtualWaypoints(
+        annotated: AnnotatedRoute,
+        routePoints: List<LatLng>,
+    ): List<Waypoint> {
         val original = annotated.waypoints
         if (original.isEmpty()) return emptyList()
 
-        val curveRanges: List<IntRange> = annotated.annotations
+        // annotation 에서 curve 구간만 추출 (direction 도 같이 보존)
+        data class CurveSpan(val range: IntRange, val direction: String?)
+        val curveSpans: List<CurveSpan> = annotated.annotations
             .filter {
                 it.type == PathSegmentType.CURVE
                         || it.type == PathSegmentType.SLIGHT_CURVE
                         || it.type == PathSegmentType.INTERNAL_CURVE
             }
-            .map { it.startWaypointIndex..it.endWaypointIndex }
+            .map {
+                val dir = if (it.direction == TurnDirection.NONE) null else it.direction.name
+                CurveSpan(it.startWaypointIndex..it.endWaypointIndex, dir)
+            }
 
         val expanded = mutableListOf<Waypoint>()
         for (i in original.indices) {
             expanded.add(original[i])
-            if (i + 1 < original.size && isInCurveRange(i, curveRanges)) {
-                val virtuals = generateVirtualPoints(
-                    start = original[i],
-                    end = original[i + 1],
-                    spacingM = config.virtualWaypointSpacingM,
-                )
-                expanded.addAll(virtuals)
+            if (i + 1 < original.size) {
+                val curve = curveSpans.firstOrNull { i in it.range }
+                if (curve != null) {
+                    val virtuals = generateVirtualPointsAlongPolyline(
+                        start = original[i],
+                        end = original[i + 1],
+                        routePoints = routePoints,
+                        spacingM = config.virtualWaypointSpacingM,
+                        curveDirection = curve.direction,
+                    )
+                    expanded.addAll(virtuals)
+                }
             }
         }
         return expanded
     }
 
-    private fun isInCurveRange(idx: Int, ranges: List<IntRange>): Boolean =
-        ranges.any { idx in it }
-
-    private fun generateVirtualPoints(
+    /**
+     * start ↔ end 사이에 해당하는 polyline 슬라이스 위에 누적 거리 spacing 간격으로 가상점을 찍는다.
+     *
+     * 알고리즘:
+     *   1. start / end 가 routePoints 의 어느 인덱스에 가장 가까운지 closestRoutePointIndex 로 찾는다.
+     *   2. P[startIdx] → P[startIdx+1] → ... → P[endIdx] 순회하며 segment 길이를 누적한다.
+     *   3. `nextTarget` (= 5m, 10m, 15m, ...) 이 현재까지 누적된 거리에 들어오면
+     *      해당 segment 안에서의 보간 비율 t 를 풀어 가상점 좌표를 계산한다.
+     *   4. 한 segment 안에 여러 spacing 배수가 들어가는 경우 모두 찍는다.
+     *
+     * 메타데이터:
+     *   - `sourceRoutePointIdx = i` (가상점이 놓인 segment 의 시작 인덱스)
+     *   - `bearingToNext` = 같은 segment 의 진행 방위각 (한 segment 안의 점들은 같은 값)
+     *   - `curveDirection` = annotation 의 direction 그대로 전파
+     */
+    private fun generateVirtualPointsAlongPolyline(
         start: Waypoint,
         end: Waypoint,
+        routePoints: List<LatLng>,
         spacingM: Double,
+        curveDirection: String?,
     ): List<Waypoint> {
-        val distM = distanceBetween(start.lat, start.lon, end.lat, end.lon).toDouble()
-        if (distM <= spacingM) return emptyList()
-        val numPoints = (distM / spacingM).toInt()
-        val out = mutableListOf<Waypoint>()
-        for (k in 1 until numPoints) {
-            val t = k * spacingM / distM
-            out.add(
-                Waypoint(
-                    lat = start.lat + (end.lat - start.lat) * t,
-                    lon = start.lon + (end.lon - start.lon) * t,
-                    turnType = 0,
-                    description = "virtual",
-                    distance = 0,
-                    roadType = start.roadType,
-                    pointType = "VIRTUAL_CURVE",
-                    isVirtual = true,
+        if (routePoints.size < 2) return emptyList()
+
+        val startIdx = closestRoutePointIndex(routePoints, start.lat, start.lon)
+        val endIdx = closestRoutePointIndex(routePoints, end.lat, end.lon)
+        if (endIdx <= startIdx) return emptyList()
+
+        val virtuals = mutableListOf<Waypoint>()
+        var accumulated = 0.0
+        var nextTarget = spacingM
+
+        for (i in startIdx until endIdx) {
+            val p1 = routePoints[i]
+            val p2 = routePoints[i + 1]
+            val segDist = distanceBetween(p1.lat, p1.lon, p2.lat, p2.lon).toDouble()
+            if (segDist == 0.0) continue
+
+            val segBearing = bearing(p1.lat, p1.lon, p2.lat, p2.lon).toDouble()
+
+            while (nextTarget <= accumulated + segDist) {
+                val t = (nextTarget - accumulated) / segDist
+                val vLat = p1.lat + (p2.lat - p1.lat) * t
+                val vLon = p1.lon + (p2.lon - p1.lon) * t
+
+                virtuals.add(
+                    Waypoint(
+                        lat = vLat,
+                        lon = vLon,
+                        turnType = 0,
+                        description = "virtual",
+                        distance = 0,
+                        roadType = start.roadType,
+                        pointType = "VIRTUAL_CURVE",
+                        isVirtual = true,
+                        sourceRoutePointIdx = i,
+                        curveDirection = curveDirection,
+                        bearingToNext = segBearing,
+                    )
                 )
-            )
+                nextTarget += spacingM
+            }
+            accumulated += segDist
         }
-        return out
+
+        println("[VirtualGen] curve(${start.lat},${start.lon})→(${end.lat},${end.lon})")
+        println("[VirtualGen]   polyline range: $startIdx → $endIdx, generated ${virtuals.size}점")
+        virtuals.forEachIndexed { idx, v ->
+            println("[VirtualGen]   [$idx] (${v.lat}, ${v.lon}) sourceRP=${v.sourceRoutePointIdx} bearing=${v.bearingToNext}")
+        }
+
+        return virtuals
     }
 
     companion object {

@@ -43,6 +43,11 @@ data class Waypoint(
     // RouteAnnotator.expandWithVirtualWaypoints 가 곡선 구간에 5m 간격으로 삽입한 점.
     // NavigationManager 는 통과 시점에 음성 대신 스테레오 비프 안내로 분기한다.
     val isVirtual: Boolean = false,
+    // 가상 waypoint 전용 — 이 점이 polyline 위 어느 segment 시작 인덱스에 놓였는지.
+    // syncWaypointIndexForwardOnly 가 findClosestRoutePointIndex 대신 직접 사용.
+    val sourceRoutePointIdx: Int = -1,
+    val curveDirection: String? = null,    // "LEFT" | "RIGHT" | null (NONE 곡선/원본은 null)
+    val bearingToNext: Double? = null,     // 이 가상점에서 다음 polyline 점으로의 방위각 (0~360°)
 )
 
 /**

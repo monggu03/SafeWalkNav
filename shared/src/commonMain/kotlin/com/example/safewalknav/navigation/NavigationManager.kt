@@ -370,7 +370,10 @@ class NavigationManager(
         // 곡선 구간에 가상 waypoint(5m 간격) 삽입 — 통과 시점에 비프로 방향 안내.
         // 가상 점은 routePoints 가 아닌 waypoints 에만 들어가므로 폴리라인 그리기엔 영향 없음.
         currentRoute = if (annotatedResult != null) {
-            val expandedWaypoints = annotator.expandWithVirtualWaypoints(annotatedResult)
+            val expandedWaypoints = annotator.expandWithVirtualWaypoints(
+                annotatedResult,
+                route.routePoints,
+            )
             val virtualCount = expandedWaypoints.count { it.isVirtual }
             println("[NavManager] 가상 waypoint 삽입 — 원본 ${route.waypoints.size}개 → 확장 ${expandedWaypoints.size}개 (가상 ${virtualCount}개)")
             route.copy(waypoints = expandedWaypoints)
@@ -1139,17 +1142,27 @@ class NavigationManager(
                 currentLat, currentLon, wp.lat, wp.lon
             )
             val passThreshold = if (wp.isVirtual) 7f else 10f
-            if (distToWp > passThreshold) break
+            if (distToWp > passThreshold) {
+                println("[POLL-DBG] idx=$currentWaypointIndex 거리 초과: distToWp=$distToWp threshold=$passThreshold isVirtual=${wp.isVirtual}")
+                break
+            }
 
-            // 경로상 통과 확인: waypoint에 가장 가까운 routePoint 인덱스가
+            // 경로상 통과 확인: waypoint 에 대응하는 routePoint 인덱스가
             // 현재 routePoint 진행 인덱스보다 뒤에 있는지 확인.
-            // 가상 waypoint 는 폴리라인 위의 보간점이라 closest routePoint 가 잘 잡힌다.
-            val wpRouteIdx = findClosestRoutePointIndex(route, wp.lat, wp.lon)
+            //   - 가상 waypoint 는 polyline 위에 sampling 되므로 sourceRoutePointIdx 를 직접 사용
+            //     (findClosestRoutePointIndex 호출 자체가 불필요)
+            //   - 원본 waypoint 는 기존처럼 가장 가까운 routePoint 를 탐색
+            val wpRouteIdx = if (wp.isVirtual && wp.sourceRoutePointIdx >= 0) {
+                wp.sourceRoutePointIdx
+            } else {
+                findClosestRoutePointIndex(route, wp.lat, wp.lon)
+            }
             if (wpRouteIdx <= currentRoutePointIndex + 2) {
                 // 경로상 이미 지나갔거나 거의 같은 위치 → 전진
                 if (wp.isVirtual) lastVirtualPassedThisTick = wp
                 currentWaypointIndex++
             } else {
+                println("[POLL-DBG] idx=$currentWaypointIndex routePoint 미통과: wpRouteIdx=$wpRouteIdx currentRP=$currentRoutePointIndex")
                 break  // 아직 경로상 도달 안 함
             }
         }
