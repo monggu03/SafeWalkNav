@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="SafeWalkNav AccuracyGating Test" xmlns="http://www.topografix.com/GPX/1/1">
+  <!--
+    accuracy_gating_test.gpx — Accuracy Gating 3-Phase 검증 시나리오
+
+    검증 항목:
+      1. GPS 흐름    updateLocation 로그가 1~2초마다 찍힘 (멈추면 GPX 재생 이상)
+      2. Kalman 동작 gain 값이 0.3~0.7 사이 변동 (0 또는 1 고정이면 입력 이상)
+      3. Accuracy gating Phase-B에서 smoothedHeading 변화 없음 (출렁이면 gating 미동작)
+
+    경로: 서울 시청 주변 직선 동진 (37.5666, 126.9782 → 126.9800)
+    속도: 약 1m/s (보행), 2초 간격 trkpt
+
+    hdop → accuracy 환산 (참고, 기기마다 다름):
+      hdop 1.0  → ~5m   (좋음)
+      hdop 3.0  → ~15m  (양호)
+      hdop 6.5  → ~30m  (임계, gating 진입 경계)
+      hdop 8.0  → ~40m  (gating 진입)
+      hdop 20.0 → ~100m (터널/지하, 완전 gating)
+
+    Phase-A (t=00s~28s): 정상 GPS — gain 0.3~0.7, smoothedHeading 추종 확인
+    Phase-B (t=30s~60s): 터널/지하 진입 시뮬레이션 (hdop 20) — smoothedHeading 동결 확인
+    Phase-C (t=62s~76s): GPS 회복 중간값 (hdop 4, ~20m) — 히스테리시스 구간
+    Phase-D (t=78s~100s): 완전 회복 (hdop 1.2) — gain 0.3~0.7 재개 확인
+
+    Android 에뮬레이터 사용 시:
+      Extended Controls → Location → Load GPX/KML 에서 이 파일 선택
+      Speed: 1.0, 재생 시작 후 accuracy를 각 Phase에 맞게 수동 조정
+      Phase-A: accuracy 8m, Phase-B: accuracy 100m, Phase-C: accuracy 20m, Phase-D: accuracy 8m
+
+    iOS 시뮬레이터 사용 시:
+      Features → Location → Custom Location 또는 이 GPX 파일을 scheme에 연결
+  -->
+  <trk>
+    <name>AccuracyGating Test — Seoul City Hall</name>
+    <desc>3-Phase gating 검증: Phase-A(정상) → Phase-B(터널/100m) → Phase-C(히스테리시스/20m) → Phase-D(회복)</desc>
+    <trkseg>
+
+      <!-- ===== Phase-A: 정상 GPS (hdop ~1.2, accuracy ~8m) ===== -->
+      <!-- 기대 동작: Kalman gain 0.3~0.7, smoothedHeading이 rawBearing 추종 -->
+      <trkpt lat="37.566600" lon="126.978200"><time>2026-05-20T09:00:00Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978218"><time>2026-05-20T09:00:02Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978236"><time>2026-05-20T09:00:04Z</time><hdop>1.1</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978254"><time>2026-05-20T09:00:06Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978272"><time>2026-05-20T09:00:08Z</time><hdop>1.3</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978290"><time>2026-05-20T09:00:10Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978308"><time>2026-05-20T09:00:12Z</time><hdop>1.1</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978326"><time>2026-05-20T09:00:14Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978344"><time>2026-05-20T09:00:16Z</time><hdop>1.3</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978362"><time>2026-05-20T09:00:18Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978380"><time>2026-05-20T09:00:20Z</time><hdop>1.1</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978398"><time>2026-05-20T09:00:22Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978416"><time>2026-05-20T09:00:24Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978434"><time>2026-05-20T09:00:26Z</time><hdop>1.3</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978452"><time>2026-05-20T09:00:28Z</time><hdop>1.2</hdop></trkpt>
+
+      <!-- ===== Phase-B: 터널/지하 진입 (hdop 20.0, accuracy ~100m) ===== -->
+      <!-- 기대 동작: Kalman gating 발동, smoothedHeading 동결, uncertainty는 PROCESS_NOISE씩 증가 -->
+      <!-- 비정상: accuracy 100m인데도 smoothedHeading이 출렁이면 gating 미동작 -->
+      <trkpt lat="37.566600" lon="126.978470"><time>2026-05-20T09:00:30Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978488"><time>2026-05-20T09:00:32Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978506"><time>2026-05-20T09:00:34Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978524"><time>2026-05-20T09:00:36Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978542"><time>2026-05-20T09:00:38Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978560"><time>2026-05-20T09:00:40Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978578"><time>2026-05-20T09:00:42Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978596"><time>2026-05-20T09:00:44Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978614"><time>2026-05-20T09:00:46Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978632"><time>2026-05-20T09:00:48Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978650"><time>2026-05-20T09:00:50Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978668"><time>2026-05-20T09:00:52Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978686"><time>2026-05-20T09:00:54Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978704"><time>2026-05-20T09:00:56Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978722"><time>2026-05-20T09:00:58Z</time><hdop>20.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978740"><time>2026-05-20T09:01:00Z</time><hdop>20.0</hdop></trkpt>
+
+      <!-- ===== Phase-C: GPS 회복 중간 (hdop 4.0, accuracy ~20m, 히스테리시스 구간) ===== -->
+      <!-- accuracy ~20m → MAX(30m) 이하이지만 RECOVER_THRESHOLD(20m) 경계 -->
+      <!-- 기대 동작: 히스테리시스로 인해 여전히 gating 상태 유지 (smoothedHeading 동결) -->
+      <!-- → accuracy가 20m 미만이 돼야 비로소 gating 해제 -->
+      <trkpt lat="37.566600" lon="126.978758"><time>2026-05-20T09:01:02Z</time><hdop>4.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978776"><time>2026-05-20T09:01:04Z</time><hdop>4.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978794"><time>2026-05-20T09:01:06Z</time><hdop>4.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978812"><time>2026-05-20T09:01:08Z</time><hdop>4.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978830"><time>2026-05-20T09:01:10Z</time><hdop>4.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978848"><time>2026-05-20T09:01:12Z</time><hdop>4.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978866"><time>2026-05-20T09:01:14Z</time><hdop>4.0</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978884"><time>2026-05-20T09:01:16Z</time><hdop>4.0</hdop></trkpt>
+
+      <!-- ===== Phase-D: GPS 완전 회복 (hdop 1.2, accuracy ~8m) ===== -->
+      <!-- 기대 동작: gating 해제, Kalman gain 0.3~0.7 재개, smoothedHeading 추종 재시작 -->
+      <!-- Phase-B 동안 uncertainty가 커졌으므로 Phase-A 초반보다 gain이 높아 빠르게 수렴 -->
+      <trkpt lat="37.566600" lon="126.978902"><time>2026-05-20T09:01:18Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978920"><time>2026-05-20T09:01:20Z</time><hdop>1.1</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978938"><time>2026-05-20T09:01:22Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978956"><time>2026-05-20T09:01:24Z</time><hdop>1.3</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978974"><time>2026-05-20T09:01:26Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.978992"><time>2026-05-20T09:01:28Z</time><hdop>1.1</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.979010"><time>2026-05-20T09:01:30Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.979028"><time>2026-05-20T09:01:32Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.979046"><time>2026-05-20T09:01:34Z</time><hdop>1.3</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.979064"><time>2026-05-20T09:01:36Z</time><hdop>1.2</hdop></trkpt>
+      <trkpt lat="37.566600" lon="126.979082"><time>2026-05-20T09:01:38Z</time><hdop>1.1</hdop></trkpt>
+
+    </trkseg>
+  </trk>
+</gpx>
