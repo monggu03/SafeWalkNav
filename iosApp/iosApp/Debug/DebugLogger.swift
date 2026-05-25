@@ -61,6 +61,11 @@ final class DebugLogger: ObservableObject {        // ⭐ ObservableObject 채�
     }
 
     private func append(_ entry: LogEntry) {
+        // 파일 로그가 활성 상태일 때 같은 줄을 디스크에도 떨궤준다.
+        // (start/close 는 NavigationViewModel 에서 안내 lifecycle 에 맞춰 호출)
+        let fileLine = entry.tag.isEmpty ? entry.message : "[\(entry.tag)] \(entry.message)"
+        NavLogFile.shared.append(fileLine)
+
         DispatchQueue.main.async {
             self.entries.append(entry)
             if self.entries.count > self.maxCount {

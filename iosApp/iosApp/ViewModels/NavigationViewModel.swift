@@ -184,6 +184,10 @@ final class NavigationViewModel: ObservableObject {
             return
         }
 
+        // 외출 단위 파일 로그 시작 (Android MainActivity.startNavLog 와 동일 포맷).
+        // 안내 종료/도착 시 close() — startNavigation 이 success=false 로 끝나도 stopNavigation 으로 정리됨.
+        NavLogFile.shared.start()
+
         print("🟢 [START] 안내 시작 호출 — \(poi.name)")
 
         do {
@@ -248,6 +252,8 @@ final class NavigationViewModel: ObservableObject {
         navigationManager.stopNavigation()
         headingProvider.clearBaseHeading()
         tts.stop()
+
+        NavLogFile.shared.close()
     }
 
     // MARK: - Voice Destination Input
@@ -366,6 +372,9 @@ final class NavigationViewModel: ObservableObject {
                 if let newArrivalState = self.navigationManager.arrivalState.value as? ArrivalState,
                    newArrivalState != self.arrivalState {
                     self.arrivalState = newArrivalState
+                    if newArrivalState == .arrived {
+                        NavLogFile.shared.close()
+                    }
                 }
 
                 // 3. 내비 활성 여부
