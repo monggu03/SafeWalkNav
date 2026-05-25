@@ -100,6 +100,13 @@ final class NavigationViewModel: ObservableObject {
     // 디버깅: polling 카운터 (로그 무한 출력 방지)
     private var pollCount: Int = 0
 
+    // 안내 시작 직후 자동 온보딩 시퀀스 진행 중인지.
+    // true 동안에는 polling 의 guidanceMessage 발화를 보류해 멘트 겹침을 방지한다.
+    private var isOnboarding: Bool = false
+
+    // 활성 Coordinator 보관 — strong 참조가 사라지지 않게 ViewModel 이 들고 있는다.
+    private var onboardingCoordinator: AutoOnboardingCoordinator?
+
     // MARK: - Init
     init(
         tts: TtsManager,
@@ -177,6 +184,10 @@ final class NavigationViewModel: ObservableObject {
             return
         }
 
+        // 외출 단위 파일 로그 시작 (Android MainActivity.startNavLog 와 동일 포맷).
+        // 안내 종료/도착 시 close() — startNavigation 이 success=false 로 끝나도 stopNavigation 으로 정리됨.
+        NavLogFile.shared.start()
+
         print("🟢 [START] 안내 시작 호출 — \(poi.name)")
 
         do {
@@ -187,13 +198,15 @@ final class NavigationViewModel: ObservableObject {
                 endLon: poi.lon,
                 endName: String(describing: poi.name),
                 frontLat: poi.frontLat,
-                frontLon: poi.frontLon
+                frontLon: poi.frontLon,
+                suppressInitialSummary: true   // 요약 발화는 AutoOnboardingCoordinator 가 담당
             )
 
             print("🟢 [START] 결과 — success=\(success.boolValue)")
 
             if success.boolValue {
                 headingProvider.setBaseHeading()
+                await runAutoOnboarding()
             } else {
                 self.errorMessage = (navigationManager.lastError as String?) ?? "경로를 찾을 수 없습니다"
             }
@@ -202,10 +215,45 @@ final class NavigationViewModel: ObservableObject {
         }
     }
 
+    /// 안내 시작 직후 자동 실행되는 온보딩 시퀀스.
+    /// 경로 요약 → 평평 자세 → 회전 → 정면 일치 1초 유지 → 본격 안내.
+    /// 진행 동안 isOnboarding = true 로 두어 polling 의 guidanceMessage 발화는 보류된다.
+    private func runAutoOnboarding() async {
+        guard let route = navigationManager.currentRoute,
+              let firstWp = route.waypoints.first,
+              let currentLoc = locationTracker.currentLocation else {
+            return
+        }
+
+        let summary = navigationManager.buildInitialSummary()
+        let coordinator = AutoOnboardingCoordinator(tts: self.tts)
+        self.onboardingCoordinator = coordinator
+        self.isOnboarding = true
+
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            coordinator.start(
+                summary: summary,
+                currentLocation: currentLoc,
+                firstWaypoint: firstWp,
+                onCompleted: { continuation.resume() }
+            )
+        }
+
+        self.isOnboarding = false
+        self.onboardingCoordinator = nil
+    }
+
     func stopNavigation() {
+        // 온보딩 도중 종료 누르면 coordinator 도 즉시 정리.
+        onboardingCoordinator?.stop()
+        onboardingCoordinator = nil
+        isOnboarding = false
+
         navigationManager.stopNavigation()
         headingProvider.clearBaseHeading()
         tts.stop()
+
+        NavLogFile.shared.close()
     }
 
     // MARK: - Voice Destination Input
@@ -300,7 +348,8 @@ final class NavigationViewModel: ObservableObject {
 
         voiceFlowStage = .startingNavigation
         let name = String(describing: best.name)
-        tts.speak("\(name)으로 안내를 시작합니다.", priority: .high)
+        // "안내를 시작합니다" 는 AutoOnboardingCoordinator 가 요약 멘트에 포함하므로 여기선 검색 결과 안내만.
+        tts.speak("\(name)으로 경로를 탐색합니다.", priority: .high)
 
         await startNavigation(to: best)
         voiceFlowStage = .idle
@@ -323,6 +372,9 @@ final class NavigationViewModel: ObservableObject {
                 if let newArrivalState = self.navigationManager.arrivalState.value as? ArrivalState,
                    newArrivalState != self.arrivalState {
                     self.arrivalState = newArrivalState
+                    if newArrivalState == .arrived {
+                        NavLogFile.shared.close()
+                    }
                 }
 
                 // 3. 내비 활성 여부
@@ -381,6 +433,11 @@ final class NavigationViewModel: ObservableObject {
         guard !message.isEmpty else { return }
         guard message != lastSpokenGuidance else { return }
         lastSpokenGuidance = message
+
+        // 온보딩 진행 중에는 coordinator 가 발화 흐름을 잡고 있으므로 보류.
+        // (요약 자체는 suppressInitialSummary=true 로 NavigationManager 가 emit 하지 않지만,
+        //  updateWaypointGuidance/도착 알림 등은 그대로 발생할 수 있다.)
+        guard !isOnboarding else { return }
 
         let priority: TtsManager.Priority = (arrivalState == .arrived) ? .high : .normal
         tts.speak(message, priority: priority)

@@ -1,8 +1,11 @@
 package com.example.safewalknav.navigation
 
+import com.example.safewalknav.audio.BeepTone
+import com.example.safewalknav.audio.SpatialBeeper
 import com.example.safewalknav.navigation.geo.KalmanHeading
 import com.example.safewalknav.navigation.geo.angleDiff
 import com.example.safewalknav.navigation.geo.bearing
+import com.example.safewalknav.navigation.geo.computeCumulativeDistances
 import com.example.safewalknav.navigation.geo.computeSignedCrossTrack
 import com.example.safewalknav.navigation.geo.distanceBetween
 import com.example.safewalknav.navigation.geo.getClockDirection
@@ -16,10 +19,11 @@ import com.example.safewalknav.navigation.signal.TrafficSignalMatcher
 import com.example.safewalknav.navigation.signal.TrafficSignalRemainingTimeParser
 import com.example.safewalknav.navigation.tbfw.NavigatorConfig
 import com.example.safewalknav.navigation.tbfw.PathAnnotation
-import com.example.safewalknav.navigation.tbfw.PathSegmentType
 import com.example.safewalknav.navigation.tbfw.RouteAnnotationLogger
 import com.example.safewalknav.navigation.tbfw.RouteAnnotator
+import com.example.safewalknav.navigation.tbfw.selectAnnouncementCandidate
 import com.example.safewalknav.navigation.tmap.ArrivalState
+import com.example.safewalknav.navigation.tmap.LatLng
 import com.example.safewalknav.navigation.tmap.POIResult
 import com.example.safewalknav.navigation.tmap.RiskLevel
 import com.example.safewalknav.navigation.tmap.RouteSegment
@@ -106,10 +110,32 @@ class NavigationManager(
     val distanceToDestination: StateFlow<Float> = _distanceToDestination
 
     // RouteAnnotator 사전 분석 결과 — startNavigation() 에서 채움.
-    private var currentAnnotations: List<PathAnnotation> = emptyList()
+    private var pathAnnotations: List<PathAnnotation> = emptyList()
+
+    // waypoint 별 누적 거리 (m). pathAnnotations 와 동시에 채워진다.
+    // 사용자 진행 거리 vs annotation 거리 비교로 사전 안내 시점을 잡는 데 사용.
+    private var cumulativeDistances: List<Double> = emptyList()
 
     // 이미 발화한 annotation 의 startWaypointIndex 집합. 중복 발화 방지.
     private val announcedAnnotationIds = mutableSetOf<Int>()
+
+    // RouteAnnotator/announceDistance 등 TBFW 튜닝 상수 묶음 — 매번 생성하지 않고 인스턴스 보관.
+    private val navigatorConfig = NavigatorConfig()
+
+    /**
+     * 가상 waypoint 통과 시 스테레오 비프 안내를 담당.
+     *
+     * 플랫폼별 동작:
+     *   - iOS: 생성만 해두고 Swift SpatialBeeperImpl 가 iosImpl 콜백을 채워야 실제 소리가 남.
+     *     (AppDependencies 가 책임)
+     *   - Android: actual 자체가 AudioTrack 으로 사인파를 합성하므로 즉시 작동.
+     *
+     * 외부에서 콜백을 주입해야 하는 iOS 를 위해 public 으로 노출한다.
+     */
+    val spatialBeeper: SpatialBeeper = SpatialBeeper()
+
+    // 가상 waypoint 통과 카운터 — "잘 가고 있을 때" 무음 vs 가벼운 확인음 토글에 사용.
+    private var virtualPassCount = 0
 
     // 디버그용 — iOS 에서 관찰 가능하게 StateFlow 로 노출
     private val _annotations = MutableStateFlow<List<PathAnnotation>>(emptyList())
@@ -128,8 +154,6 @@ class NavigationManager(
     private var lastPreAnnouncedIndex = -1
     private var consecutiveRerouteCount = 0  // 연속 재탐색 횟수 (쿨다운 점진 증가)
     private var lastStraightGuidanceTime = 0L // 직진 안내 전용 타이머 (provideDirectionalGuidance 의 straight 분기)
-    private var lastCorrectionGuidanceTime = 0L // bearing/cross-track 보정 안내 전용 타이머 (직진 안내와 쿨다운 분리)
-    private var lastCornerAnnouncedIdx = -1   // 폴리라인 코너 중복 안내 방지
     private var lastRoadType = -1 // 이전 구간 도로 유형 (전환 안내용)
     // 횡단보도 진입 시점에 "X시 방향으로 횡단보도를 건너세요" 1회 안내용 상태.
     // 시각장애인이 어느 방향에 횡단보도가 있는지 모르므로 zone 진입 transition 에서 발화.
@@ -238,7 +262,10 @@ class NavigationManager(
         endLat: Double, endLon: Double,
         endName: String,
         frontLat: Double? = null,
-        frontLon: Double? = null
+        frontLon: Double? = null,
+        // iOS AutoOnboardingCoordinator 같은 외부가 요약 멘트를 직접 발화할 때 true.
+        // 본 매니저는 _guidanceMessage 갱신을 건너뛰어 중복 발화를 막는다.
+        suppressInitialSummary: Boolean = false,
     ): Boolean {
         destinationLat = endLat
         destinationLon = endLon
@@ -305,15 +332,59 @@ class NavigationManager(
 
         // RouteAnnotator 사전 분석 — 실제 안내에 사용.
         // annotateHybrid: waypoint 1차 + 직진 구간 내부 routePoints 곡률 보조 검사.
+        println("──────────── waypoint dump (Annotator 입력 검증) ────────────")
+        println("[Waypoints] count=${route.waypoints.size}")
+        if (route.waypoints.isNotEmpty()) {
+            val first = route.waypoints.first()
+            val last = route.waypoints.last()
+            println("[Waypoints] first=(${first.lat},${first.lon}) desc='${first.description}' " +
+                    "pointType=${first.pointType} turnType=${first.turnType}")
+            println("[Waypoints] last=(${last.lat},${last.lon}) desc='${last.description}' " +
+                    "pointType=${last.pointType} turnType=${last.turnType}")
+        }
+        route.waypoints.forEachIndexed { idx, wp ->
+            if (idx < 5 || idx >= route.waypoints.size - 2) {
+                println("[Waypoints] [$idx] lat=${wp.lat} lon=${wp.lon} " +
+                        "turnType=${wp.turnType} pointType=${wp.pointType} desc='${wp.description}'")
+            }
+        }
+        println("[Waypoints] routePoints.size=${route.routePoints.size}")
+        if (route.routePoints.isNotEmpty()) {
+            val rpFirst = route.routePoints.first()
+            val rpLast = route.routePoints.last()
+            println("[Waypoints] routePoints first=(${rpFirst.lat},${rpFirst.lon}) " +
+                    "last=(${rpLast.lat},${rpLast.lon})")
+        }
+        println("══════════════════════════════════════════════════════════════")
+
+        val annotator = RouteAnnotator(navigatorConfig)
         val annotatedResult = runCatching {
-            RouteAnnotator(NavigatorConfig()).annotateHybrid(route.waypoints, route.routePoints)
+            annotator.annotateHybrid(route.waypoints, route.routePoints)
         }.onFailure { e ->
             println("[NavManager] RouteAnnotator 분석 실패: ${e.message}")
         }.getOrNull()
 
-        currentAnnotations = annotatedResult?.annotations ?: emptyList()
+        pathAnnotations = annotatedResult?.annotations ?: emptyList()
+
+        // 곡선 구간에 가상 waypoint(5m 간격) 삽입 — 통과 시점에 비프로 방향 안내.
+        // 가상 점은 routePoints 가 아닌 waypoints 에만 들어가므로 폴리라인 그리기엔 영향 없음.
+        currentRoute = if (annotatedResult != null) {
+            val expandedWaypoints = annotator.expandWithVirtualWaypoints(
+                annotatedResult,
+                route.routePoints,
+            )
+            val virtualCount = expandedWaypoints.count { it.isVirtual }
+            println("[NavManager] 가상 waypoint 삽입 — 원본 ${route.waypoints.size}개 → 확장 ${expandedWaypoints.size}개 (가상 ${virtualCount}개)")
+            route.copy(waypoints = expandedWaypoints)
+        } else {
+            route
+        }
+
+        // 누적 거리 / annotation 발화 추적은 확장된 waypoint 리스트 기준으로 다시 계산.
+        cumulativeDistances = computeCumulativeDistances(currentRoute!!.waypoints)
         announcedAnnotationIds.clear()
-        _annotations.value = currentAnnotations
+        virtualPassCount = 0
+        _annotations.value = pathAnnotations
         _announcementLog.value = emptyList()
 
         // 사람이 읽기 좋은 포맷으로도 한 번 더 출력 — 임계값 튜닝/검증용.
@@ -333,7 +404,6 @@ class NavigationManager(
         cachedAddress = null
         arrivalInfoLoaded = false
         consecutiveDeviationCount = 0
-        lastCornerAnnouncedIdx = -1
         lastRoadType = if (route.waypoints.isNotEmpty()) route.waypoints[0].roadType else -1
 
         // Heading Kalman 상태 리셋
@@ -342,15 +412,29 @@ class NavigationManager(
         // CSV 로그 시작 (logDirectory 미지정이면 no-op)
         openLogWriter()
 
-        val totalMin = route.totalTime / 60
-        val totalM = route.totalDistance
-        _guidanceMessage.value = buildString {
-            append("${endName}까지 ${totalM}미터, 약 ${totalMin}분 소요됩니다.")
-            if (crosswalkCount > 0) append(" 횡단보도 ${crosswalkCount}개.")
-            append(" 안내를 시작합니다.")
+        if (!suppressInitialSummary) {
+            _guidanceMessage.value = buildInitialSummary()
         }
 
         return true
+    }
+
+    /**
+     * 출발 시 안내 멘트 — "○○까지 N미터, 약 N분 소요됩니다. 횡단보도 K개. 안내를 시작합니다."
+     *
+     * iOS AutoOnboardingCoordinator 처럼 외부에서 직접 발화하고 싶을 때 호출한다.
+     * 경로가 없으면 빈 문자열.
+     */
+    fun buildInitialSummary(): String {
+        val route = currentRoute ?: return ""
+        val totalMin = route.totalTime / 60
+        val totalM = route.totalDistance
+        val crosswalkCount = route.waypoints.count { isCrosswalkWaypoint(it) }
+        return buildString {
+            append("${destinationName}까지 ${totalM}미터, 약 ${totalMin}분 소요됩니다.")
+            if (crosswalkCount > 0) append(" 횡단보도 ${crosswalkCount}개.")
+            append(" 안내를 시작합니다.")
+        }
     }
 
     private fun emitGuidance(message: String) {
@@ -422,8 +506,6 @@ class NavigationManager(
         lastRerouteTime = 0L
         lastPreAnnouncedIndex = -1
         lastStraightGuidanceTime = 0L
-        lastCorrectionGuidanceTime = 0L
-        lastCornerAnnouncedIdx = -1
         lastRoadType = -1
         wasInCrosswalkZone = false
         lastCrosswalkAnnouncedWpIdx = -1
@@ -432,8 +514,11 @@ class NavigationManager(
         arrivalInfoLoaded = false
         consecutiveDeviationCount = 0
         consecutiveRerouteCount = 0
-        currentAnnotations = emptyList()
+        pathAnnotations = emptyList()
+        cumulativeDistances = emptyList()
         announcedAnnotationIds.clear()
+        virtualPassCount = 0
+        spatialBeeper.stop()
         _annotations.value = emptyList()
         _announcementLog.value = emptyList()
 
@@ -453,8 +538,11 @@ class NavigationManager(
         lastSpokenMessage = ""
         consecutiveDeviationCount = 0
         consecutiveRerouteCount = 0
-        currentAnnotations = emptyList()
+        pathAnnotations = emptyList()
+        cumulativeDistances = emptyList()
         announcedAnnotationIds.clear()
+        virtualPassCount = 0
+        spatialBeeper.stop()
         _annotations.value = emptyList()
 
         // Heading Kalman 상태 리셋
@@ -514,8 +602,9 @@ class NavigationManager(
         consecutiveRerouteCount = 0
 
         // Forward-Only Waypoint 동기화 (지나간 waypoint를 다시 잡는 문제 방지)
+        // userBearing 를 함께 전달 — 가상 waypoint 통과 시점에 비프 안내에 사용.
         currentRoute?.let {
-            syncWaypointIndexForwardOnly(it, currentLat, currentLon)
+            syncWaypointIndexForwardOnly(it, currentLat, currentLon, userBearing)
         }
 
         //현재 추척중인 waypoint 정보
@@ -602,22 +691,14 @@ class NavigationManager(
         // waypoint 안내
         updateWaypointGuidance(currentLat, currentLon, userBearing, speed)
 
-        // 폴리라인 기반 코너 선제 안내 — RouteAnnotator 로 대체됨.
-        // 복구가 필요하면 아래 주석을 풀고 RouteAnnotator 발화 부분(checkAndAnnounceAnnotation)을 막을 것.
-        // if (_arrivalState.value == ArrivalState.FAR) {
-        //     announceUpcomingCorner(currentLat, currentLon, speed)
-        // }
-
-        // RouteAnnotator 사전 안내 발화
+        // RouteAnnotator 사전 안내 발화 — 폴리라인 기반 코너 즉석 감지를 대체함.
         if (_arrivalState.value == ArrivalState.FAR) {
-            checkAndAnnounceAnnotation(currentLat, currentLon, route)
+            announceUpcomingAnnotation(currentLat, currentLon, speed)
         }
 
-        // 직진 구간 무음 방지 + 점진적 꺾임 보정 안내
+        // 직진 구간 무음 방지 안내 (좌우 보정은 RouteAnnotator 사전 안내로 대체됨)
         if (_arrivalState.value == ArrivalState.FAR) {
-            provideDirectionalGuidance(
-                currentLat, currentLon, userBearing, speed, distToDestination
-            )
+            provideDirectionalGuidance(currentLat, currentLon, distToDestination)
         }
     }
 
@@ -1140,32 +1221,52 @@ class NavigationManager(
     private fun syncWaypointIndexForwardOnly(
         route: TMapRoute,
         currentLat: Double,
-        currentLon: Double
+        currentLon: Double,
+        userBearing: Float,
     ) {
         val waypoints = route.waypoints
         if (waypoints.isEmpty()) return
 
         // Step 1: 현재 waypoint 통과 판정
-        // 현재 타겟 waypoint에 10m 이내이고, 경로상 이미 지나갔으면 전진
+        // 현재 타겟 waypoint에 10m 이내이고, 경로상 이미 지나갔으면 전진.
+        // 가상 waypoint 는 5m 간격으로 촘촘하므로 통과 임계도 조금 더 짧게(7m) 적용.
+        var lastVirtualPassedThisTick: Waypoint? = null
         while (currentWaypointIndex < waypoints.size) {
             val wp = waypoints[currentWaypointIndex]
             val distToWp = distanceBetween(
                 currentLat, currentLon, wp.lat, wp.lon
             )
+            val passThreshold = if (wp.isVirtual) 7f else 10f
+            if (distToWp > passThreshold) {
+                println("[POLL-DBG] idx=$currentWaypointIndex 거리 초과: distToWp=$distToWp threshold=$passThreshold isVirtual=${wp.isVirtual}")
+                break
+            }
 
-            if (distToWp > 10f) break  // 아직 멀면 중단
-
-            // 경로상 통과 확인: waypoint에 가장 가까운 routePoint 인덱스가
-            // 현재 routePoint 진행 인덱스보다 뒤에 있는지 확인
-            val wpRouteIdx = findClosestRoutePointIndex(route, wp.lat, wp.lon)
+            // 경로상 통과 확인: waypoint 에 대응하는 routePoint 인덱스가
+            // 현재 routePoint 진행 인덱스보다 뒤에 있는지 확인.
+            //   - 가상 waypoint 는 polyline 위에 sampling 되므로 sourceRoutePointIdx 를 직접 사용
+            //     (findClosestRoutePointIndex 호출 자체가 불필요)
+            //   - 원본 waypoint 는 기존처럼 가장 가까운 routePoint 를 탐색
+            val wpRouteIdx = if (wp.isVirtual && wp.sourceRoutePointIdx >= 0) {
+                wp.sourceRoutePointIdx
+            } else {
+                findClosestRoutePointIndex(route, wp.lat, wp.lon)
+            }
             if (wpRouteIdx <= currentRoutePointIndex + 2) {
                 // 경로상 이미 지나갔거나 거의 같은 위치 → 전진
+                if (wp.isVirtual) lastVirtualPassedThisTick = wp
                 currentWaypointIndex++
             } else {
+                println("[POLL-DBG] idx=$currentWaypointIndex routePoint 미통과: wpRouteIdx=$wpRouteIdx currentRP=$currentRoutePointIndex")
                 break  // 아직 경로상 도달 안 함
             }
         }
 
+        // 한 tick 에서 여러 가상 waypoint 를 한꺼번에 통과했더라도 비프는 마지막 1회만.
+        // (연속 비프가 청각 피로를 유발하고 방향 의미도 마지막 점이 가장 최신이라.)
+        if (lastVirtualPassedThisTick != null) {
+            handleVirtualWaypointPassed(lastVirtualPassedThisTick, currentLat, currentLon, userBearing)
+        }
     }
 
     private fun findClosestRoutePointIndex(
@@ -1265,6 +1366,9 @@ class NavigationManager(
         if (currentWaypointIndex >= route.waypoints.size) return
 
         val nextWaypoint = route.waypoints[currentWaypointIndex]
+        // 가상 waypoint 는 음성 안내 대상이 아님 — syncWaypointIndexForwardOnly 가
+        // 통과 시점에 스테레오 비프(handleVirtualWaypointPassed) 로 처리.
+        if (nextWaypoint.isVirtual) return
         val distToNext = distanceBetween(
             currentLat, currentLon, nextWaypoint.lat, nextWaypoint.lon
         )
@@ -1341,15 +1445,15 @@ class NavigationManager(
     }
 
     /**
-     * 방향 기반 안내
-     * - 사용자 진행방향 vs 경로(폴리라인 lookahead) 방향 비교
-     * - 일치: "직진하세요" (20초 간격)
-     * - 20~45° 차이: "오른쪽/왼쪽으로 살짝 꺾으세요" (점진적 곡선 대응)
-     * - 45° 이상: "오른쪽/왼쪽으로 도세요" (waypoint 누락된 코너 대응)
+     * 직진 구간 무음 방지 안내.
+     * "약 N미터 직진" 형식으로 5초 간격(횡단보도 구간 제외) 발화한다.
+     *
+     * 과거에는 사용자 bearing vs 경로 bearing 차이로 좌우 보정 멘트도 냈으나,
+     * 시각장애 보행자에게 좌우 안내가 체감되지 않아 RouteAnnotator 의 사전 안내로 대체됨.
      */
     private fun provideDirectionalGuidance(
         currentLat: Double, currentLon: Double,
-        userBearing: Float, speed: Float, distToDestination: Float
+        distToDestination: Float,
     ) {
 
 
@@ -1374,52 +1478,15 @@ class NavigationManager(
         val waypointGuard = if (onCrosswalk) 5f else 25f
         if (distToNext <= waypointGuard) return
 
-        // 정지 상태에서는 bearing 부정확 — 방향 보정 안내는 생략, 위치 안내만
-        val stationary = speed < 0.5f
-
-        // 경로 진행 방향 계산 (앞으로 ~25m lookahead — 완만한 곡률도 감지)
-        val routeBearing = computeRouteBearingAhead(25f) ?: return
-
-        currentTargetBearing = routeBearing
+        // 경로 끝부분 등으로 진행 방향을 계산할 수 없으면 직진 안내도 부정확할 수 있어 생략.
+        computeRouteBearingAhead(25f) ?: return
 
         val now = currentTimeMillis()
 
-        // 횡단보도 구간 강화 임계값:
-        //   bearing diff: 15° → 10°
-        //   cross-track:  2m  → 1.0m
-        //   쿨다운:        6s  → 3s
-        val cooldownMs = if (onCrosswalk) 3_000L else 6_000L
-        val bearingThreshold = if (onCrosswalk) 10f else 15f
-        val crossTrackThreshold = if (onCrosswalk) 1.0f else 2f
-
-        // 좌우 보정 안내는 횡단보도 구간에서만 동작.
-        // 일반 구간의 보행 쏠림은 굽은 길 사전 안내(RouteAnnotator)로 대체됨.
-        // bearing 검사 = 방향 이탈 선행 감지, cross-track 검사 = 위치 이탈 후행 감지.
-        if (onCrosswalk && !stationary && now - lastCorrectionGuidanceTime >= cooldownMs) {
-            val diff = angleDiff(routeBearing, userBearing)
-            val absDiff = abs(diff)
-            val crossTrack = computeSignedCrossTrack(
-                currentLat, currentLon, route.routePoints, currentRoutePointIndex
-            )
-            val absCross = abs(crossTrack)
-
-            // 1. bearing 기반 — 횡단보도 임계값 10°
-            if (absDiff >= bearingThreshold) {
-                lastCorrectionGuidanceTime = now
-                val side = if (diff > 0) "오른쪽" else "왼쪽"
-                speak("횡단보도. 약간 ${side}으로", forceRepeat = true)
-                return
-            }
-
-            // 2. cross-track 기반 — 횡단보도 임계값 1m
-            // crossTrack > 0 → 사용자가 경로 왼쪽에 있음 → 오른쪽으로 가야 함
-            if (absCross >= crossTrackThreshold) {
-                lastCorrectionGuidanceTime = now
-                val side = if (crossTrack > 0) "오른쪽" else "왼쪽"
-                speak("횡단보도. 약간 ${side}으로", forceRepeat = true)
-                return
-            }
-        }
+        // 2026-05-21 — 좌우 보정 멘트 제거 (bearing/cross-track 기반).
+        // 시각장애 보행자에게 "약간 오른쪽으로" 같은 안내는 체감이 어렵고,
+        // 굽은 길은 RouteAnnotator 의 사전 안내(announceUpcomingAnnotation) 가 대체한다.
+        // 복구가 필요하면 git history 의 onCrosswalk 보정 블록을 참고할 것.
 
         // 직진 안내 — 시각장애 보행자 안심감을 위해 5초 간격. 횡단보도에서는 직진 안내 자체는 생략.
         if (onCrosswalk) return
@@ -1433,13 +1500,37 @@ class NavigationManager(
         }
 
         val message = if (currentSegment != null) {
-            val rounded = roundDistanceForTts(distToNext.toInt())
+            // ─── Distance anchors ────────────────────────────────────────────
+            // 안전성 직결: anchor 의미와 메시지 문구가 일치해야 한다.
+            //
+            // - waypoint anchor (distForWaypointAnchor):
+            //     다음 waypoint 까지의 직선거리. "이 구간 N미터 더 이동" /
+            //     "N미터 직진" 같은 segment-progress 메시지에 사용.
+            //     idx advance 가 정체되면 부정확할 수 있으나, segment-progress
+            //     의미에서는 사용자에게 "현재 향하는 다음 지점까지의 거리" 로
+            //     해석되어 의미 모순은 없다.
+            //
+            // - destination anchor (distForDestinationAnchor):
+            //     GPS 실측 직선거리 (함수 인자 distToDestination). "도착지까지
+            //     약 N미터" 같이 destination 의미를 직접 발화하는 메시지에 필수.
+            //     idx 정체와 무관하게 GPS 실측이라 안전.
+            //
+            // 과거 버그 (2026-05-25 실외 테스트):
+            //     "도착지" 분기가 distForWaypointAnchor 를 쓰는 바람에 idx 가
+            //     가상 waypoint 에 정체될 때 "도착지까지 25→70m" 식으로 거리가
+            //     역전 증가, 사용자가 도착지에서 멀어진다고 들리는 위험 발생.
+            // ────────────────────────────────────────────────────────────────
+            val distForWaypointAnchor = roundDistanceForTts(distToNext.toInt())
+            val distForDestinationAnchor = roundDistanceForTts(distToDestination.toInt())
             when {
-                currentSegment.name == "출발지" -> "약 ${rounded}미터 더 이동하세요"
-                currentSegment.name == "도착지" -> "도착지까지 약 ${rounded}미터"
-                currentSegment.name == "보행자도로" -> "약 ${rounded}미터 직진"
-                currentSegment.name.isBlank() -> "약 ${rounded}미터 직진"
-                else -> "${currentSegment.name} 방향 약 ${rounded}미터 직진"
+                // anchor: waypoint  — "이 구간 N미터 더 이동"
+                currentSegment.name == "출발지" -> "약 ${distForWaypointAnchor}미터 더 이동하세요"
+                // anchor: destination — 문구가 "도착지까지" 이므로 GPS 실측 사용 (★ 안전 직결)
+                currentSegment.name == "도착지" -> "도착지까지 약 ${distForDestinationAnchor}미터"
+                // anchor: waypoint — "이 도로 N미터 직진"
+                currentSegment.name == "보행자도로" -> "약 ${distForWaypointAnchor}미터 직진"
+                currentSegment.name.isBlank() -> "약 ${distForWaypointAnchor}미터 직진"
+                else -> "${currentSegment.name} 방향 약 ${distForWaypointAnchor}미터 직진"
             }
         } else {
             // segment 정보 없으면 거리만 안내 (백업)
@@ -1461,118 +1552,135 @@ class NavigationManager(
     // 같은 패키지(com.example.safewalknav.navigation)이므로 import 없이 자동 호출됨.
 
     /**
-     * RouteAnnotator 가 미리 분석한 annotation 을 사용자 위치 기반으로 발화한다.
+     * 가상 waypoint 통과 시 호출.
      *
-     * 발화 조건:
-     *   - annotation 시작 waypoint 까지 남은 거리가 announceDistance 이하
-     *   - 같은 annotation 은 한 번만 발화 (announcedAnnotationIds 로 중복 방지)
-     *   - announceMessage 가 비어있지 않음 (STRAIGHT/NONE 은 빈 문자열)
+     * 동작:
+     *   1. 이상적 진행 방향 = 통과한 가상 점 → 다음 waypoint(가상 포함) 의 bearing
+     *   2. 사용자가 두 점 사이 라인에서 얼마나 옆으로 벗어났는지(부호 있는 수직 거리) 계산
+     *   3. 이탈 정도에 따라 비프(LOW/HIGH/연속) 또는 음성으로 단계적 안내
      *
-     * announceDistance 는 annotation type 에 따라 다름:
-     *   SLIGHT_CURVE, CURVE, INTERNAL_CURVE → announceDistanceCurveM (15m)
-     *   SLIGHT_TURN, TURN                   → announceDistanceTurnM  (20m)
-     *   SHARP_TURN                          → announceDistanceSharpM (25m)
+     * sign 규약(`computeSignedCrossTrack`):
+     *   - 양수 = 사용자가 경로의 왼쪽에 있음 → 오른쪽으로 가야 함 → pan = +1f (오른쪽 채널)
+     *   - 음수 = 사용자가 경로의 오른쪽에 있음 → 왼쪽으로 가야 함 → pan = -1f (왼쪽 채널)
+     *
+     * "잘 가고 있을 때" (이탈 < curveDeviationLowM) 무음에 가깝게 유지 — 3번째 통과마다만 중앙 톤.
+     * 음성으로 전환되는 임계(>= curveDeviationCriticalM) 에서는 NavigationManager.speak() 사용.
      */
-    private fun checkAndAnnounceAnnotation(
-        currentLat: Double, currentLon: Double,
-        route: TMapRoute,
+    private fun handleVirtualWaypointPassed(
+        passed: Waypoint,
+        userLat: Double,
+        userLon: Double,
+        @Suppress("UNUSED_PARAMETER") userBearing: Float,
     ) {
-        if (currentAnnotations.isEmpty()) return
-        val config = NavigatorConfig()
+        val route = currentRoute ?: return
+        // 통과 직후엔 currentWaypointIndex 가 다음 점을 가리킴.
+        val nextWp = route.waypoints.getOrNull(currentWaypointIndex) ?: return
 
-        for (ann in currentAnnotations) {
-            // 이미 발화한 annotation 은 건너뜀
-            if (ann.startWaypointIndex in announcedAnnotationIds) continue
-            // 비어있는 메시지 건너뜀 (STRAIGHT 등)
-            if (ann.announceMessage.isBlank()) continue
-            // startWaypointIndex 가 이미 지나간 waypoint 면 건너뜀
-            if (ann.startWaypointIndex < currentWaypointIndex) {
-                announcedAnnotationIds.add(ann.startWaypointIndex)
-                continue
+        val crossM = computeSignedCrossTrack(
+            currentLat = userLat,
+            currentLon = userLon,
+            routePoints = listOf(
+                LatLng(passed.lat, passed.lon),
+                LatLng(nextWp.lat, nextWp.lon),
+            ),
+            currentRoutePointIndex = 0,
+        )
+        val deviationM = kotlin.math.abs(crossM)
+
+        // pan: 사용자가 가야 할 쪽으로 채널 분배.
+        // crossM > 0 (사용자가 왼쪽에 있음) → 오른쪽으로 끌어와야 함 → pan +1f
+        val pan = if (crossM > 0f) +1f else -1f
+
+        virtualPassCount++
+
+        when {
+            deviationM < navigatorConfig.curveDeviationLowM -> {
+                // 잘 가는 중 — 3번에 한 번만 중앙 LOW 톤으로 "확인음".
+                if (virtualPassCount % 3 == 0) {
+                    spatialBeeper.playBeep(0f, BeepTone.LOW, 1)
+                }
             }
-
-            // 시작 waypoint 까지의 거리
-            val startWp = route.waypoints.getOrNull(ann.startWaypointIndex) ?: continue
-            val distToStart = distanceBetween(
-                currentLat, currentLon, startWp.lat, startWp.lon
-            )
-
-            // type 별 announceDistance 결정
-            val announceDist = when (ann.type) {
-                PathSegmentType.SLIGHT_CURVE,
-                PathSegmentType.CURVE,
-                PathSegmentType.INTERNAL_CURVE ->
-                    config.announceDistanceCurveM.toFloat()
-                PathSegmentType.SLIGHT_TURN, PathSegmentType.TURN ->
-                    config.announceDistanceTurnM.toFloat()
-                PathSegmentType.SHARP_TURN ->
-                    config.announceDistanceSharpM.toFloat()
-                PathSegmentType.STRAIGHT -> continue
+            deviationM < navigatorConfig.curveDeviationHighM -> {
+                spatialBeeper.playBeep(pan, BeepTone.LOW, 1)
             }
-
-            // 거리 내 진입 시 발화
-            if (distToStart <= announceDist) {
-                speak(ann.announceMessage)
-                announcedAnnotationIds.add(ann.startWaypointIndex)
-                return  // 한 update 에 한 번만 발화
+            deviationM < navigatorConfig.curveDeviationCriticalM -> {
+                spatialBeeper.playBeep(pan, BeepTone.HIGH, 2)
+            }
+            else -> {
+                // 심각한 이탈 — 음성으로 명시적으로 안내.
+                val side = if (crossM > 0f) "오른쪽" else "왼쪽"
+                speak("${side}으로 이동하세요")
             }
         }
     }
 
     /**
-     * 폴리라인 코너 선제 안내
-     * T-Map waypoint이 없는 각도 변화(골목→인도 진입 등)를 routePoints 기하로 감지.
-     * 15m 이내 앞에서 30° 이상 꺾이는 지점을 미리 안내.
+     * RouteAnnotator 가 미리 분석한 annotation 을 사용자 진행 거리 기준으로 발화한다.
+     *
+     * 발화 조건:
+     *   - 다음 waypoint 가 15m 이내면 waypoint 사전 안내와 충돌하므로 발화 보류.
+     *   - 사용자 누적 거리(userCumulativeDistance) 와 annotation 의 시작 거리
+     *     (distanceFromStartM) 차이가 type 별 triggerDist 이하일 때 발화.
+     *   - 같은 annotation 은 한 번만 발화 (announcedAnnotationIds 로 중복 방지).
+     *   - announceMessage 가 비어있지 않음 (STRAIGHT/NONE 은 빈 문자열).
+     *
+     * 직선 거리 대신 누적 거리를 쓰는 이유: 굽은 경로에서 직선 거리가 실제 진행 거리를
+     * 과소평가해 안내가 너무 늦게 나오는 문제가 있었다.
+     *
+     * triggerDist 는 annotation type 에 따라 다름:
+     *   SLIGHT_CURVE, CURVE, INTERNAL_CURVE → announceDistanceCurveM (15m)
+     *   SLIGHT_TURN, TURN                   → announceDistanceTurnM  (20m)
+     *   SHARP_TURN                          → announceDistanceSharpM (25m)
      */
-    private fun announceUpcomingCorner(
-        currentLat: Double, currentLon: Double, speed: Float
+    private fun announceUpcomingAnnotation(
+        currentLat: Double, currentLon: Double, speed: Float,
     ) {
-        val route = currentRoute ?: return
-        val pts = route.routePoints
-        if (pts.size < 3) return
-        if (speed < 0.3f) return // 이동 중일 때만
+        if (pathAnnotations.isEmpty()) return
+        if (speed < 0.3f) return
 
-        // 다음 waypoint이 너무 가까우면 waypoint 안내와 충돌
+        val route = currentRoute ?: return
         if (currentWaypointIndex < route.waypoints.size) {
             val wp = route.waypoints[currentWaypointIndex]
-            val distWp = distanceBetween(
-                currentLat, currentLon, wp.lat, wp.lon
-            )
+            val distWp = distanceBetween(currentLat, currentLon, wp.lat, wp.lon)
             if (distWp <= 15f) return
         }
 
-        val startIdx = currentRoutePointIndex
-        val endIdx = minOf(pts.size - 2, startIdx + 30)
-        var accumulated = 0f
+        val userCum = userCumulativeDistance(currentLat, currentLon, route)
+        val candidate = selectAnnouncementCandidate(
+            annotations = pathAnnotations,
+            userCumulativeDistance = userCum,
+            announcedIds = announcedAnnotationIds,
+            config = navigatorConfig,
+        ) ?: return
 
-        for (i in startIdx until endIdx) {
-            val a = pts[i]
-            val b = pts[i + 1]
-            val c = pts[i + 2]
-            val seg = distanceBetween(a.lat, a.lon, b.lat, b.lon)
-            accumulated += seg
-            if (accumulated > 15f) return
-
-            val b1 = bearing(a.lat, a.lon, b.lat, b.lon)
-            val b2 = bearing(b.lat, b.lon, c.lat, c.lon)
-            val diff = angleDiff(b2, b1)
-
-            if (abs(diff) >= 30f) {
-                val cornerIdx = i + 1
-                if (cornerIdx == lastCornerAnnouncedIdx) return
-                // 코너까지 거리 (현재 위치 → 코너점)
-                val distToCorner = distanceBetween(
-                    currentLat, currentLon, b.lat, b.lon
-                ).toInt().coerceAtLeast(1)
-                lastCornerAnnouncedIdx = cornerIdx
-                lastStraightGuidanceTime = currentTimeMillis()
-                val side = if (diff > 0) "오른쪽" else "왼쪽"
-                val verb = if (abs(diff) >= 60f) "도세요" else "꺾으세요"
-                speak("${distToCorner}미터 앞 ${side}으로 ${verb}")
-                return
-            }
-        }
+        announcedAnnotationIds.add(candidate.startWaypointIndex)
+        speak(candidate.announceMessage)
     }
+
+    /**
+     * 사용자의 경로상 누적 진행 거리 (m).
+     *
+     * 계산:
+     *   cumulativeDistances[currentWaypointIndex] = 다음 waypoint 까지의 누적 거리.
+     *   거기서 "다음 waypoint 까지의 직선 거리(remaining)" 를 빼면 사용자 진행 거리가 된다.
+     *
+     * cumulativeDistances 가 비어있으면 0.0.
+     */
+    private fun userCumulativeDistance(
+        currentLat: Double, currentLon: Double, route: TMapRoute,
+    ): Double {
+        if (cumulativeDistances.isEmpty()) return 0.0
+        val idx = currentWaypointIndex.coerceAtMost(cumulativeDistances.size - 1)
+        val wp = route.waypoints.getOrNull(idx) ?: return cumulativeDistances[idx]
+        val remaining = distanceBetween(currentLat, currentLon, wp.lat, wp.lon).toDouble()
+        return (cumulativeDistances[idx] - remaining).coerceAtLeast(0.0)
+    }
+
+    // 2026-05-21 — RouteAnnotator 의 사전 분석 결과(announceUpcomingAnnotation) 로 대체됨.
+    // 폴리라인 기반 즉석 코너 감지는 곡선/회전을 동일 로직으로 다루는 RouteAnnotator 보다 약하고,
+    // 같은 지점을 양쪽에서 안내해 멘트가 겹치는 문제가 있었다.
+    // 복구가 필요하면 git history 의 announceUpcomingCorner 본문을 참고할 것.
+    // private fun announceUpcomingCorner(...) { ... }
 
     // computeSignedCrossTrack() — KMM 마이그레이션으로
     // shared/commonMain/.../navigation/CrossTrack.kt 로 이동.
