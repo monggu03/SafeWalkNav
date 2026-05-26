@@ -45,32 +45,39 @@ fun findCrosswalkZoneInfo(
 ): CrosswalkZoneInfo {
     if (waypoints.isEmpty()) return CrosswalkZoneInfo(CrosswalkZoneState.NONE)
 
-    if (currentWaypointIndex < waypoints.size) {
-        val next = waypoints[currentWaypointIndex]
-        if (isCrosswalkWaypoint(next)) {
-            val dist = distanceBetween(currentLat, currentLon, next.lat, next.lon)
+    val lookAheadEnd = minOf(currentWaypointIndex + LOOK_AHEAD, waypoints.size)
+    for (i in currentWaypointIndex until lookAheadEnd) {
+        val wp = waypoints[i]
+        if (isCrosswalkWaypoint(wp)) {
+            val dist = distanceBetween(currentLat, currentLon, wp.lat, wp.lon)
             if (dist <= APPROACHING_RADIUS_M) {
                 return CrosswalkZoneInfo(
                     state = CrosswalkZoneState.APPROACHING,
-                    crosswalkIndex = currentWaypointIndex,
+                    crosswalkIndex = i,
                     distanceMeters = dist
                 )
             }
+            break
         }
     }
 
-    val prevIdx = currentWaypointIndex - 1
-    if (prevIdx in waypoints.indices) {
-        val prev = waypoints[prevIdx]
-        if (isCrosswalkWaypoint(prev)) {
-            val dist = distanceBetween(currentLat, currentLon, prev.lat, prev.lon)
+    val backStart = maxOf(0, currentWaypointIndex - LOOK_BACK)
+    for (i in (currentWaypointIndex - 1) downTo backStart) {
+        val wp = waypoints[i]
+        if (isCrosswalkWaypoint(wp)) {
+            val dist = distanceBetween(currentLat, currentLon, wp.lat, wp.lon)
             if (dist <= PASSED_RADIUS_M) {
                 return CrosswalkZoneInfo(
-                    state = CrosswalkZoneState.PASSED,
-                    crosswalkIndex = prevIdx,
+                    state = if (i == currentWaypointIndex - 1) {
+                        CrosswalkZoneState.PASSED
+                    } else {
+                        CrosswalkZoneState.NEARBY
+                    },
+                    crosswalkIndex = i,
                     distanceMeters = dist
                 )
             }
+            break
         }
     }
 
@@ -86,7 +93,7 @@ fun findCrosswalkZoneInfo(
         }
     }
 
-    if (nearestIndex != null && nearestDistance <= APPROACHING_RADIUS_M) {
+    if (nearestIndex != null && nearestDistance <= NEARBY_RADIUS_M) {
         return CrosswalkZoneInfo(
             state = CrosswalkZoneState.NEARBY,
             crosswalkIndex = nearestIndex,
@@ -103,3 +110,6 @@ fun findCrosswalkZoneInfo(
 
 private const val APPROACHING_RADIUS_M = 50f
 private const val PASSED_RADIUS_M = 30f
+private const val NEARBY_RADIUS_M = 50f
+private const val LOOK_AHEAD = 5
+private const val LOOK_BACK = 3
