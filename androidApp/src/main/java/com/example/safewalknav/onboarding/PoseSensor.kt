@@ -5,6 +5,8 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Handler
+import android.os.Looper
 import kotlin.math.abs
 
 /**
@@ -49,7 +51,12 @@ class PoseSensor(
     fun start() {
         if (running) return
         gravitySensor?.let {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
+            // 콜백 스레드를 main 으로 명시 — Handler 미지정 시 OEM 별로 워커 스레드에서 호출될 수 있어
+            // AutoOnboardingCoordinator 의 stage 전환 / TTS 발화가 백그라운드에서 호출되는 위험이 있음.
+            sensorManager.registerListener(
+                this, it, SensorManager.SENSOR_DELAY_GAME,
+                Handler(Looper.getMainLooper()),
+            )
             running = true
         }
     }
