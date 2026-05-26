@@ -128,14 +128,18 @@ class AutoOnboardingCoordinator(
     }
 
     /**
-     * 진행 중인 온보딩 강제 종료. 센서/타이머 정리.
+     * 진행 중인 온보딩 강제 종료. 센서/타이머/콜백 참조 정리.
      * onCompleted 콜백은 호출되지 않는다 — 호출자가 별도로 정리해야 함.
+     *
+     * 주의: onCompleted 람다가 MainActivity 등 Activity context 를 capture 하므로
+     * 반드시 null 로 비워야 Activity 누수가 안 일어남.
      */
     fun stop() {
         stageTimerJob?.cancel()
         stageTimerJob = null
         poseSensor.stop()
         headingSensor.stop()
+        onCompleted = null   // ← Activity 누수 방지
         if (stage != Stage.IDLE && stage != Stage.DONE) {
             stage = Stage.IDLE
         }
