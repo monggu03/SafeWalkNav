@@ -34,6 +34,7 @@ import com.example.safewalknav.navigation.walking.HeadingLogger
 import com.example.safewalknav.navigation.walking.LeanStatus
 import com.example.safewalknav.navigation.walking.NoopHeadingLogger
 import com.example.safewalknav.navigation.walking.WalkingDiagnostic
+import com.example.safewalknav.navigation.walking.CrosswalkZoneInfo
 import com.example.safewalknav.navigation.walking.findCrosswalkZoneInfo
 import com.example.safewalknav.navigation.walking.isCrosswalkWaypoint
 import com.example.safewalknav.navigation.walking.isOnCrosswalkSegment
@@ -648,6 +649,10 @@ class NavigationManager(
                     "risk=${currentSegment?.riskLevel}\n" +
                     "turnType=${currentWp?.turnType}\n" +
                     "desc=${currentWp?.description}"
+        val crosswalkDebugBase =
+            "scenario=${if (isInCrossWalkZone) "CROSSWALK_ZONE" else "NO_CROSSWALK_ZONE"}\n" +
+                    _debugMessage.value
+        _debugMessage.value = crosswalkDebugBase
         if (isInCrossWalkZone) {
             val nearest = trafficSignals.minByOrNull {
                 distanceBetween(currentLat, currentLon, it.lat, it.lon)
@@ -674,9 +679,22 @@ class NavigationManager(
                             "nearestSignalLon=${nearestSignal.lon}\n" +
                             "교차로 매칭 시도"
 
+                _debugMessage.value =
+                    crosswalkDebugBase + "\n" +
+                            "scenario=CROSSWALK_SIGNAL_NEARBY\n" +
+                            "signals=${trafficSignals.size}\n" +
+                            "nearestId=${nearestSignal.itstId}\n" +
+                            "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
+                            "nearestSignalLat=${nearestSignal.lat}\n" +
+                            "nearestSignalLon=${nearestSignal.lon}\n" +
+                            "intersectionLookup=pending"
+
                 fetchTrafficSignalData(
                     signalLat = nearestSignal.lat,
-                    signalLon = nearestSignal.lon
+                    signalLon = nearestSignal.lon,
+                    crosswalkZoneInfo = crosswalkZoneInfo,
+                    nearestSignalId = nearestSignal.itstId,
+                    nearestSignalDistance = nearestDist
                 )
             } else {
                 _debugMessage.value =
@@ -689,6 +707,34 @@ class NavigationManager(
         }
 
         // waypoint 안내
+        if (isInCrossWalkZone) {
+            val nearestSignalForScenario = TrafficSignalMatcher.findNearestSignal(
+                currentLat = currentLat,
+                currentLon = currentLon,
+                signals = trafficSignals,
+                radiusMeters = 80f
+            )
+            if (nearestSignalForScenario == null) {
+                val nearestForScenario = trafficSignals.minByOrNull {
+                    distanceBetween(currentLat, currentLon, it.lat, it.lon)
+                }
+                val nearestDistForScenario = nearestForScenario?.let {
+                    distanceBetween(currentLat, currentLon, it.lat, it.lon)
+                }
+                _debugMessage.value =
+                    crosswalkDebugBase + "\n" +
+                            "scenario=CROSSWALK_NO_SIGNAL\n" +
+                            "signalPresent=false\n" +
+                            "remainingTimeAvailable=false\n" +
+                            "reason=NO_NEARBY_SIGNAL\n" +
+                            "signals=${trafficSignals.size}\n" +
+                            "nearestId=${nearestForScenario?.itstId ?: "?놁쓬"}\n" +
+                            "nearestDist=${nearestDistForScenario?.toInt() ?: -1}m\n" +
+                            "signalRadius=80m\n" +
+                            "nearbySignal=false"
+            }
+        }
+
         updateWaypointGuidance(currentLat, currentLon, userBearing, speed)
 
         // RouteAnnotator 사전 안내 발화 — 폴리라인 기반 코너 즉석 감지를 대체함.
@@ -811,18 +857,47 @@ class NavigationManager(
 
     suspend fun fetchTrafficSignalData(
         signalLat: Double,
-        signalLon: Double
+        signalLon: Double,
+        crosswalkZoneInfo: CrosswalkZoneInfo? = null,
+        nearestSignalId: String? = null,
+        nearestSignalDistance: Float? = null
     ) {
+        val signalDebugBase =
+            "crosswalkState=${crosswalkZoneInfo?.state ?: "?놁쓬"}\n" +
+                    "crosswalkIdx=${crosswalkZoneInfo?.crosswalkIndex ?: -1}\n" +
+                    "crosswalkDist=${crosswalkZoneInfo?.distanceMeters?.toInt() ?: -1}m\n" +
+                    "nearestSignalId=${nearestSignalId ?: "?놁쓬"}\n" +
+                    "nearestSignalDist=${nearestSignalDistance?.toInt() ?: -1}m\n" +
+                    "signalLat=$signalLat\n" +
+                    "signalLon=$signalLon"
         _debugMessage.value = "fetchTrafficSignalData 진입"//위치 확인용 임시
+        _debugMessage.value =
+            signalDebugBase + "\n" +
+                    "scenario=CROSSWALK_SIGNAL_LOOKUP_PENDING\n" +
+                    "signalPresent=true\n" +
+                    "remainingTimeAvailable=unknown\n" +
+                    "intersectionLookup=pending"
         val crossroadJson = signalApiClient.fetchIntersectionData()
 
         if (crossroadJson == null) {
-            _debugMessage.value = "교차로 API 실패"
+            _debugMessage.value =
+                signalDebugBase + "\n" +
+                        "scenario=CROSSWALK_INTERSECTION_API_FAILED\n" +
+                        "signalPresent=true\n" +
+                        "remainingTimeAvailable=false\n" +
+                        "reason=INTERSECTION_API_NULL\n" +
+                        "intersectionApi=null"
             return
         }
 
         if (crossroadJson.startsWith("ERROR")) {
-            _debugMessage.value = crossroadJson
+            _debugMessage.value =
+                signalDebugBase + "\n" +
+                        "scenario=CROSSWALK_INTERSECTION_API_FAILED\n" +
+                        "signalPresent=true\n" +
+                        "remainingTimeAvailable=false\n" +
+                        "reason=INTERSECTION_API_ERROR\n" +
+                        "intersectionApi=$crossroadJson"
             return
         }
 
@@ -837,7 +912,13 @@ class NavigationManager(
 
         if (nearestIntersection == null) {
             _debugMessage.value =
-                "근처 교차로 없음\nintersections=${intersections.size}"
+                signalDebugBase + "\n" +
+                        "scenario=CROSSWALK_SIGNAL_NON_INTERSECTION\n" +
+                        "signalPresent=true\n" +
+                        "remainingTimeAvailable=false\n" +
+                        "reason=NO_INTERSECTION_MATCH\n" +
+                        "intersectionMatched=false\n" +
+                        "intersections=${intersections.size}"
             return
         }
 
@@ -879,6 +960,24 @@ class NavigationManager(
             }
         }
         val allPedestrianSignals = buildPedestrianSignalDebug(parsedSignals)
+        val targetDirection = routeBearing?.let { bearingToSignalDirection(it) }
+        val signalScenario = when {
+            remainJson == null || remainJson.startsWith("ERROR") ->
+                "CROSSWALK_SIGNAL_REMAINING_API_FAILED"
+            parsedSignals.isEmpty() ->
+                "CROSSWALK_SIGNAL_NO_PEDESTRIAN_DATA"
+            selectedSignal == null ->
+                "CROSSWALK_SIGNAL_DIRECTION_MISSING"
+            selectedSignal.remainingSeconds == null ->
+                "CROSSWALK_SIGNAL_SELECTED_NO_REMAINING"
+            else ->
+                "CROSSWALK_SIGNAL_SELECTED"
+        }
+        val signalReason = when (signalScenario) {
+            "CROSSWALK_SIGNAL_SELECTED_NO_REMAINING" ->
+                "NO_REMAINING_TIME_FOR_SELECTED_SIGNAL"
+            else -> signalScenario
+        }
 
         _debugMessage.value =
             "교차로 매칭 성공\n" +
@@ -890,6 +989,24 @@ class NavigationManager(
                     "보행신호=${selectedSignal?.stateName ?: "없음"}\n" +
                     "raw=${selectedSignal?.remainingRaw ?: -1}\n" +
                     "남은시간=${selectedSignal?.remainingSeconds ?: -1}초\n" +
+                    "parsedSignals=${parsedSignals.size}\n" +
+                    "allPdsg=$allPedestrianSignals"
+
+        _debugMessage.value =
+            signalDebugBase + "\n" +
+                    "scenario=$signalScenario\n" +
+                    "signalPresent=true\n" +
+                    "remainingTimeAvailable=${selectedSignal?.remainingSeconds != null}\n" +
+                    "reason=$signalReason\n" +
+                    "intersectionMatched=true\n" +
+                    "itstId=${nearestIntersection.itstId}\n" +
+                    "name=${nearestIntersection.itstNm ?: "?놁쓬"}\n" +
+                    "routeBearing=${routeBearing?.toInt() ?: -1}\n" +
+                    "targetDirection=${targetDirection ?: "?놁쓬"}\n" +
+                    "selectedDirection=${selectedSignal?.direction ?: "?놁쓬"}\n" +
+                    "walkSignal=${selectedSignal?.stateName ?: "?놁쓬"}\n" +
+                    "remainingRaw=${selectedSignal?.remainingRaw ?: -1}\n" +
+                    "remainingSeconds=${selectedSignal?.remainingSeconds ?: -1}\n" +
                     "parsedSignals=${parsedSignals.size}\n" +
                     "allPdsg=$allPedestrianSignals"
     }
