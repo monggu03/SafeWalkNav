@@ -1027,15 +1027,26 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                 navigationManager.updateLocation(location.toGpsLocation())
 
-                // 디버그 박스 갱신 (DEBUG 빌드만)
-                if (BuildConfig.DEBUG) {
-                    val dist = LocationTracker.distanceBetween(
-                        location.latitude, location.longitude,
-                        navigationManager.destinationLat, navigationManager.destinationLon
-                    )
-                    val accuracyText =
-                        if (location.hasAccuracy()) "±${location.accuracy.toInt()}m" else ""
+                // 디버그 박스 갱신 (DEBUG 빌드만) + 파일 로그 (전체 빌드)
+                val dist = LocationTracker.distanceBetween(
+                    location.latitude, location.longitude,
+                    navigationManager.destinationLat, navigationManager.destinationLon
+                )
+                val accuracyText =
+                    if (location.hasAccuracy()) "±${location.accuracy.toInt()}m" else ""
+                val speedText =
+                    if (location.hasSpeed()) "${"%.1f".format(location.speed)}m/s" else "?m/s"
 
+                // 횡단보도 zone 디버깅 — 매 GPS tick 마다 파일 로그.
+                // 외출 후 walk_logs/*.log 파일을 받아서 분석할 수 있도록 모든 핵심 필드 dump.
+                // 형식: GPS_TICK | gps좌표 | acc | spd | dest거리 | <debugMessage 전체 (zone/idx/wp/turnType/desc/nearestXW)>
+                val debugSnapshot = navigationManager.debugMessage.value.replace("\n", " | ")
+                appendNavLog(
+                    "GPS_TICK lat=${"%.5f".format(location.latitude)} lon=${"%.5f".format(location.longitude)} " +
+                            "$accuracyText spd=$speedText dest=${dist.toInt()}m | $debugSnapshot"
+                )
+
+                if (BuildConfig.DEBUG) {
                     tvDebugGuidance.text =
                         "${navigationManager.debugMessage.value}\n" +
                                 "GPS ${"%.5f".format(location.latitude)}, ${"%.5f".format(location.longitude)}" +
