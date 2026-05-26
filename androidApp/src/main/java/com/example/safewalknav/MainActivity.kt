@@ -52,6 +52,7 @@ import com.example.safewalknav.location.LocationTracker
 import com.example.safewalknav.ml.TrafficLightAnalyzer
 import com.example.safewalknav.ml.TrafficLightDetection
 import com.example.safewalknav.ml.TrafficLightDetector
+import com.example.safewalknav.onboarding.AutoOnboardingCoordinator
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -231,6 +232,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // GPS update 마다 NavigationManager 가 isOnCrosswalkSegment() 로 판정 → state flow emit.
     // observeGuidance 의 collectLatest 로 갱신.
     private var inCrosswalkZone: Boolean = false
+
+    // ==================== 초기 방향 안내 (AutoOnboardingCoordinator) ====================
+    // iOS AutoOnboardingCoordinator.swift 를 Android 로 이식 — Section 5 of android_handover.md.
+    // 안내 시작 직후 5단계 시퀀스: summary → flatPose → rotating → confirming → done.
+    // onCompleted 콜백에서 실제 GPS tracking 을 켠다.
+    private var onboardingCoordinator: AutoOnboardingCoordinator? = null
 
     // ==================== 진동 / 효과음 ====================
 
@@ -483,6 +490,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         directionalBeaconJob?.cancel()
         longPressJob?.cancel()
         arrivedReturnJob?.cancel()
+        onboardingCoordinator?.stop()
+        onboardingCoordinator = null
         stopCamera()
         trafficLightDetector?.close()
         trafficLightDetector = null
@@ -901,7 +910,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 endLon = selected.lon,
                 endName = selected.name,
                 frontLat = selected.frontLat,
-                frontLon = selected.frontLon
+                frontLon = selected.frontLon,
+                // AutoOnboardingCoordinator 가 요약 발화를 담당하므로 NavigationManager 의
+                // 자동 _guidanceMessage 갱신 (= TTS 중복) 차단.
+                suppressInitialSummary = true,
             )
 
             if (success) {
@@ -923,12 +935,40 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     }
                 }
 
-                val summary = getRouteSummary()
-                if (summary.isNotEmpty()) {
-                    speakTTS(summary)
+                // ──── 초기 방향 안내 (AutoOnboardingCoordinator) ────
+                // 5단계 시퀀스: summary → flatPose → rotating → confirming → done.
+                // 완료 콜백에서 실제 위치 추적을 시작한다.
+                val firstWaypoint = route?.waypoints?.firstOrNull()
+                if (firstWaypoint != null) {
+                    val summary = navigationManager.buildInitialSummary()
+                    appendNavLog("Onboarding 시작 — summary='$summary' firstWp=(${firstWaypoint.lat},${firstWaypoint.lon})")
+
+                    val coordinator = onboardingCoordinator ?: AutoOnboardingCoordinator(
+                        context = applicationContext,
+                        scope = lifecycleScope,
+                        speak = { msg -> speakTTS(msg) },
+                    ).also { onboardingCoordinator = it }
+
+                    coordinator.start(
+                        summary = summary,
+                        currentLat = currentLocation.latitude,
+                        currentLon = currentLocation.longitude,
+                        firstWaypointLat = firstWaypoint.lat,
+                        firstWaypointLon = firstWaypoint.lon,
+                        onCompleted = {
+                            appendNavLog("Onboarding 완료 — 위치 추적 시작")
+                            startLocationTracking()
+                            startAutoRepeat()
+                        },
+                    )
+                } else {
+                    // route 가 없거나 waypoint 0 개 — 매우 예외적 케이스. Onboarding 건너뛰고 바로 시작.
+                    appendNavLog("Onboarding 생략 — 첫 waypoint 없음")
+                    val summary = getRouteSummary()
+                    if (summary.isNotEmpty()) speakTTS(summary)
+                    startLocationTracking()
+                    startAutoRepeat()
                 }
-                startLocationTracking()
-                startAutoRepeat()
             } else {
                 playToneError()
                 speakAndListenIdle("경로를 찾을 수 없습니다. 다른 목적지를 말씀해주세요.")
@@ -970,6 +1010,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         trackingJob?.cancel()
         stopAutoRepeat()
         stopBeacon()
+        // 도착 시점에 Onboarding 이 살아있을 가능성은 거의 없지만 (이미 onCompleted 후 startLocationTracking 진입)
+        // 5단계 시퀀스 중 강제 종료된 경우 (예: 사용자가 회전 중 도착) 대비 cleanup.
+        onboardingCoordinator?.stop()
         navigationManager.stopNavigation()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
@@ -995,6 +1038,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         stopBeacon()
         stopDirectionalBeacon()
         arrivedReturnJob?.cancel()
+        // Onboarding 진행 중에 사용자가 "종료" 했을 수 있음 — 센서/타이머 정리.
+        onboardingCoordinator?.stop()
         // navigationManager.stopNavigation() 가 자체적으로 "안내를 종료합니다" 를
         // guidanceMessage 에 emit 함 → observeGuidance 가 그걸 받아 TTS 재생.
         // 우리가 여기서 또 speakTTS 호출하면 중복 발화 → 호출 안 함.
