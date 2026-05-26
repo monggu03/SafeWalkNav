@@ -6,6 +6,8 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.os.Handler
+import android.os.Looper
 
 /**
  * 진북 (true north) 기준 방위각 센서 래퍼.
@@ -52,7 +54,13 @@ class HeadingSensor(
     fun start() {
         if (running) return
         rotationSensor?.let {
-            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME)
+            // 콜백 스레드를 main 으로 명시 — Handler 미지정 시 OEM 별로 워커 스레드에서
+            // 호출될 수 있어 AutoOnboardingCoordinator 의 stage 전환이 백그라운드에서
+            // 일어나는 위험이 있음.
+            sensorManager.registerListener(
+                this, it, SensorManager.SENSOR_DELAY_GAME,
+                Handler(Looper.getMainLooper()),
+            )
             running = true
         }
     }
