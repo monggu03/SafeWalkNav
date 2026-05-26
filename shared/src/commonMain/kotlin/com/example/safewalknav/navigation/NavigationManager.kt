@@ -637,7 +637,20 @@ class NavigationManager(
                     || it.toWaypointIndex == currentWaypointIndex
         }
 
-        //횡단보도 상태 디버그 출력 (segment 정보 포함)
+        // 횡단보도 zone 디버그 — 가장 가까운 CROSSWALK waypoint 거리도 같이 표시.
+        // (zone false 일 때 "그럼 가장 가까운 횡단보도가 얼마나 떨어져있냐" 를 즉시 알 수 있어 디버깅 용이)
+        val nearestCrosswalk = route.waypoints
+            .withIndex()
+            .filter { isCrosswalkWaypoint(it.value) }
+            .map { (idx, wp) ->
+                Triple(idx, wp, distanceBetween(currentLat, currentLon, wp.lat, wp.lon))
+            }
+            .minByOrNull { it.third }
+        val totalCrosswalkCount = route.waypoints.count { isCrosswalkWaypoint(it) }
+        val nearestCrosswalkInfo = nearestCrosswalk?.let { (idx, _, dist) ->
+            "nearestXW=idx${idx} dist=${dist.toInt()}m (total ${totalCrosswalkCount}개)"
+        } ?: "nearestXW=없음 (route 에 CROSSWALK 0개 — TMap sparse response 의심)"
+
         _debugMessage.value =
             "횡단보도=$isInCrossWalkZone\n" +
                     "idx=$currentWaypointIndex/${route.waypoints.size}\n" +
@@ -648,7 +661,8 @@ class NavigationManager(
                     "seg='${currentSegment?.name}' road=${currentSegment?.roadType} " +
                     "risk=${currentSegment?.riskLevel}\n" +
                     "turnType=${currentWp?.turnType}\n" +
-                    "desc=${currentWp?.description}"
+                    "desc=${currentWp?.description}\n" +
+                    nearestCrosswalkInfo
         val crosswalkDebugBase =
             "scenario=${if (isInCrossWalkZone) "CROSSWALK_ZONE" else "NO_CROSSWALK_ZONE"}\n" +
                     _debugMessage.value

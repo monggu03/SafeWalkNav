@@ -535,12 +535,23 @@ class TMapApiClient(
             ?.string("fullAddress")
     }.getOrNull()
 
-    /** TMap turnType 코드를 SafeWalk 포인트 유형으로 분류 */
+    /**
+     * TMap turnType 코드를 SafeWalk 포인트 유형으로 분류.
+     *
+     * ⚠️ 분류 우선순위 (CROSSWALK 우선 — 안전 critical):
+     *   1. DESTINATION (turnType 200) — 목적지가 가장 우선
+     *   2. CROSSWALK — turnType 코드(211~217) OR description 에 "횡단보도" 포함
+     *      (TMap 이 "우회전 후 횡단보도" 같은 케이스에서 turnType=2 + description="횡단보도"
+     *       로 줄 수 있는데, 이전 로직은 TURN 으로 잘못 분류해서 횡단보도 zone 감지가 실패했음)
+     *   3. TURN — 순수 방향 전환만
+     *   4. STAIRS — 계단
+     *   5. WAYPOINT — 그 외
+     */
     private fun classifyPointType(turnType: Int, description: String): String = when {
-        turnType == 200 -> "DESTINATION"     // 목적지 도착
-        turnType in 211..217 -> "CROSSWALK"  // 횡단보도 (모든 방향)
-        turnType in 1..8 -> "TURN"           // 방향 전환
-        description.contains("횡단보도") -> "CROSSWALK"
+        turnType == 200 -> "DESTINATION"     // 목적지 도착 (최우선)
+        turnType in 211..217 -> "CROSSWALK"  // 횡단보도 전용 코드 (모든 방향)
+        description.contains("횡단보도") -> "CROSSWALK"  // turnType 이 TURN 이어도 description 에 횡단보도 있으면 CROSSWALK
+        turnType in 1..8 -> "TURN"           // 방향 전환 (CROSSWALK 가 아닌 순수 회전)
         description.contains("계단") -> "STAIRS"
         else -> "WAYPOINT"
     }
