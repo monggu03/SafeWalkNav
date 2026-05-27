@@ -1450,10 +1450,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // 검출기/executor 초기화 (재사용)
         if (trafficLightDetector == null) {
             try {
-                trafficLightDetector = TrafficLightDetector(this)
-                Log.d("SafeWalkNav", "TrafficLightDetector loaded")
+                trafficLightDetector = TrafficLightDetector(this).apply {
+                    // 디버그 빌드일 땐 진단 모드 ON — confidence 0.3 까지 잡아서 모델이 신호등을 보고 있는지
+                    // 임계값에 막혀 떨어진 건지 식별 가능하게 함. 운영 (release) 에선 자동으로 OFF.
+                    diagnosticMode = BuildConfig.DEBUG
+                }
+                Log.d("SafeWalkNav", "TrafficLightDetector loaded (diagnosticMode=${BuildConfig.DEBUG})")
+                appendNavLog("TrafficLightDetector loaded (diagnosticMode=${BuildConfig.DEBUG})")
             } catch (e: Exception) {
                 Log.e("SafeWalkNav", "Failed to load TrafficLightDetector", e)
+                appendNavLog("Failed to load TrafficLightDetector: ${e.message}")
             }
         }
         if (analysisExecutor == null) {
@@ -1507,13 +1513,49 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     /**
      * 신호등 검출 결과 처리.
-     * - 검출 0건: 무시 (신호등 못 봄. 안내 안 함)
+     * - 검출 0건: 안내 안 하지만 진단 통계는 walk 로그에 기록 (zone 안일 때만).
      * - 검출 ≥1건: 가장 큰 박스 (가장 가까운 신호등) 채택 → 디바운스 후 TTS
      *   · 같은 색 연속: SIGNAL_SPEAK_INTERVAL_MS 마다 한 번만 안내
      *   · 색 변경 (빨강 ↔ 초록): 즉시 안내
+     *
+     * 진단: zone 안에서 매 inference 의 단계별 통과 개수를 walk_*.log 에 기록한다.
+     *   TL_DIAG zone=true|false | raw=N | aboveTh=K | validated=M | nearest=label/conf/box |
+     *           peakConf=X.XX (R=Y.YY G=Z.ZZ) | inferenceMs=W | action=...
+     * 이 줄만 보면 어디서 막혔는지 즉시 식별 가능.
      */
     private fun onTrafficLightDetected(detections: List<TrafficLightDetection>) {
-        if (detections.isEmpty()) return
+        val stats = trafficLightDetector?.lastStats
+
+        // ──── 진단 통계 헤더 (zone 진입 후 매 inference 기록) ────
+        // zone=false 일 땐 spam 방지 위해 기록 안 함. zone=true 인데 detections=0 면 모델이 신호등을
+        // 못 보고 있다는 강력한 신호.
+        val statsLine = if (stats != null) {
+            "TL_DIAG zone=$inCrosswalkZone " +
+                    "raw=${detections.size} " +
+                    "aboveTh=${stats.rawCandidatesAboveThreshold} " +
+                    "peakConf=${"%.2f".format(stats.peakConfidence)} " +
+                    "(R=${"%.2f".format(stats.peakConfRed)} G=${"%.2f".format(stats.peakConfGreen)}) " +
+                    "th=${"%.2f".format(stats.confidenceThresholdUsed)}${if (stats.diagnosticMode) "[DIAG]" else ""} " +
+                    "inferMs=${stats.inferenceMs}"
+        } else {
+            "TL_DIAG zone=$inCrosswalkZone raw=${detections.size} stats=null"
+        }
+
+        // zone 안에서만 파일 로깅 — 평소 보행 중엔 spam 방지.
+        if (inCrosswalkZone) {
+            appendNavLog(statsLine)
+        }
+
+        // ──── 안내 흐름 (기존 로직, 단 reason 명시) ────
+
+        if (detections.isEmpty()) {
+            // 모델이 신호등을 못 봄 (또는 threshold 미달).
+            // zone 안이라도 안내 안 함. 진단 라인은 이미 기록됨.
+            if (BuildConfig.DEBUG) {
+                tvDebugGuidance.text = "ML: $statsLine"
+            }
+            return
+        }
 
         // 0차 필터: 횡단보도 zone 진입했을 때만 안내.
         // NavigationManager.isInCrosswalkZone (TMap waypoint pointType=CROSSWALK + GPS 위치 판정) 기반.
@@ -1527,9 +1569,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             d.bbox.width >= minBoxDimension && d.bbox.height >= minBoxDimension
         }
         if (validated.isEmpty()) {
-            // DEBUG: noise 무시했음을 표시
-            if (BuildConfig.DEBUG && detections.isNotEmpty()) {
-                val small = detections.first()
+            // 1차 필터에서 다 떨어짐 — 진단 라인에 reason 추가
+            val small = detections.first()
+            appendNavLog(
+                "TL_DIAG  └─ ALL_TOO_SMALL nearest=${small.label} ${(small.confidence * 100).toInt()}% " +
+                        "box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}% (min=6%)"
+            )
+            if (BuildConfig.DEBUG) {
                 tvDebugGuidance.text = "TL noise 무시: ${small.label} ${(small.confidence * 100).toInt()}% box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}%"
             }
             return
@@ -1541,7 +1587,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val sameColor = nearest.classId == lastSpokenSignalColor
         val withinCooldown = now - lastSpokenSignalAt < SIGNAL_SPEAK_INTERVAL_MS
         if (sameColor && withinCooldown) {
-            // 디바운스 중 — 안내 안 함, 디버그만 갱신
+            // 디바운스 중 — 안내 안 함, 진단 라인에 reason 추가 + 디버그 UI 만 갱신
+            appendNavLog(
+                "TL_DIAG  └─ COOLDOWN nearest=${nearest.label} ${(nearest.confidence * 100).toInt()}% " +
+                        "validated=${validated.size}/${detections.size}"
+            )
             if (BuildConfig.DEBUG) {
                 tvDebugGuidance.text = "TL (cooldown): ${nearest.label} ${(nearest.confidence * 100).toInt()}%"
             }
@@ -1558,7 +1608,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
         speakTTS(message)
         Log.d("SafeWalkNav", "TL announced: $message (conf=${nearest.confidence}, box=${nearest.bbox.width}x${nearest.bbox.height})")
-        appendNavLog("TL announced: $message (conf=${nearest.confidence}, box=${nearest.bbox.width}x${nearest.bbox.height}, total ${detections.size} det)")
+        appendNavLog("TL_DIAG  └─ ANNOUNCED $message (conf=${"%.2f".format(nearest.confidence)}, box=${"%.2f".format(nearest.bbox.width)}x${"%.2f".format(nearest.bbox.height)}, validated=${validated.size}/${detections.size})")
 
         // 색 변경 시 진동 한 번
         if (!sameColor) vibrateShort()
