@@ -3,68 +3,113 @@ package com.example.safewalknav.navigation.walking
 import com.example.safewalknav.navigation.geo.distanceBetween
 import com.example.safewalknav.navigation.tmap.Waypoint
 
-/**
- * waypoint가 횡단보도 관련인지 판정.
- *
- * 판정 기준:
- *   - pointType == "CROSSWALK"
- *   - turnType ∈ 211..217 — T-Map 횡단보도 안내 코드 그룹
- *     (211 횡단보도, 212~217 좌/우/8/10/2/4시 방향 횡단보도)
- *
- * KMM commonMain — Android/iOS 공통.
- */
+enum class CrosswalkZoneState {
+    NONE,
+    APPROACHING,
+    PASSED,
+    NEARBY
+}
+
+data class CrosswalkZoneInfo(
+    val state: CrosswalkZoneState,
+    val crosswalkIndex: Int? = null,
+    val distanceMeters: Float? = null
+) {
+    val isInZone: Boolean
+        get() = state != CrosswalkZoneState.NONE
+}
+
 fun isCrosswalkWaypoint(wp: Waypoint): Boolean {
     return wp.pointType == "CROSSWALK" || wp.turnType in 211..217
 }
-
-/**
- * 현재 위치가 횡단보도 구간(진입 직전 ~ 통과 직후) 안에 있는지.
- *
- * 활성화 윈도우:
- *   1. 다음 waypoint가 횡단보도이고 50m 이내 → 진입 직전 (보도 대기 시점부터)
- *   2. 직전 waypoint가 횡단보도이고 30m 이내 → 통과 직후 (인도 복귀까지)
- *
- * 시각장애인은 횡단보도 직전 보도에서 신호등 확인 + 안전 판단해야 하므로
- * 30m 보다 너그럽게 50m. GPS 정확도 ±20m 도 흡수.
- *
- * 이 윈도우 안에서는 상위 레벨 안내 로직이 임계값을 강화해서
- * 작은 쏠림도 즉시 보정 안내한다.
- *
- * KMM commonMain — Android/iOS 공통.
- *
- * @param currentLat 현재 위도
- * @param currentLon 현재 경도
- * @param waypoints 경로의 waypoint 리스트
- * @param currentWaypointIndex 현재 추적 중인 waypoint 인덱스 (다음 도달 예정)
- * @return 횡단보도 윈도우 안 여부
- */
 
 fun isOnCrosswalkSegment(
     currentLat: Double,
     currentLon: Double,
     waypoints: List<Waypoint>,
     currentWaypointIndex: Int
-    ): Boolean {
-        if (waypoints.isEmpty()) return false
+): Boolean {
+    return findCrosswalkZoneInfo(
+        currentLat = currentLat,
+        currentLon = currentLon,
+        waypoints = waypoints,
+        currentWaypointIndex = currentWaypointIndex
+    ).isInZone
+}
 
-        // 1) 다음 waypoint = 진입 예정 횡단보도 (보도 대기 시점부터 활성)
-        if (currentWaypointIndex < waypoints.size) {
-            val next = waypoints[currentWaypointIndex]
-            if (isCrosswalkWaypoint(next)) {
-                val dist = distanceBetween(currentLat, currentLon, next.lat, next.lon)
-                if (dist <= 50f) return true
+fun findCrosswalkZoneInfo(
+    currentLat: Double,
+    currentLon: Double,
+    waypoints: List<Waypoint>,
+    currentWaypointIndex: Int
+): CrosswalkZoneInfo {
+    if (waypoints.isEmpty()) return CrosswalkZoneInfo(CrosswalkZoneState.NONE)
+
+    val lookAheadEnd = minOf(currentWaypointIndex + LOOK_AHEAD, waypoints.size)
+    for (i in currentWaypointIndex until lookAheadEnd) {
+        val wp = waypoints[i]
+        if (isCrosswalkWaypoint(wp)) {
+            val dist = distanceBetween(currentLat, currentLon, wp.lat, wp.lon)
+            if (dist <= APPROACHING_RADIUS_M) {
+                return CrosswalkZoneInfo(
+                    state = CrosswalkZoneState.APPROACHING,
+                    crosswalkIndex = i,
+                    distanceMeters = dist
+                )
             }
+            break
         }
-
-        // 2) 직전 waypoint = 방금 통과한 횡단보도
-        val prevIdx = currentWaypointIndex - 1
-        if (prevIdx in waypoints.indices) {
-            val prev = waypoints[prevIdx]
-            if (isCrosswalkWaypoint(prev)) {
-                val dist = distanceBetween(currentLat, currentLon, prev.lat, prev.lon)
-                if (dist <= 30f) return true
-            }
-        }
-
-        return false
     }
+
+    val backStart = maxOf(0, currentWaypointIndex - LOOK_BACK)
+    for (i in (currentWaypointIndex - 1) downTo backStart) {
+        val wp = waypoints[i]
+        if (isCrosswalkWaypoint(wp)) {
+            val dist = distanceBetween(currentLat, currentLon, wp.lat, wp.lon)
+            if (dist <= PASSED_RADIUS_M) {
+                return CrosswalkZoneInfo(
+                    state = if (i == currentWaypointIndex - 1) {
+                        CrosswalkZoneState.PASSED
+                    } else {
+                        CrosswalkZoneState.NEARBY
+                    },
+                    crosswalkIndex = i,
+                    distanceMeters = dist
+                )
+            }
+            break
+        }
+    }
+
+    var nearestIndex: Int? = null
+    var nearestDistance = Float.MAX_VALUE
+    waypoints.forEachIndexed { index, waypoint ->
+        if (isCrosswalkWaypoint(waypoint)) {
+            val distance = distanceBetween(currentLat, currentLon, waypoint.lat, waypoint.lon)
+            if (distance < nearestDistance) {
+                nearestDistance = distance
+                nearestIndex = index
+            }
+        }
+    }
+
+    if (nearestIndex != null && nearestDistance <= NEARBY_RADIUS_M) {
+        return CrosswalkZoneInfo(
+            state = CrosswalkZoneState.NEARBY,
+            crosswalkIndex = nearestIndex,
+            distanceMeters = nearestDistance
+        )
+    }
+
+    return CrosswalkZoneInfo(
+        state = CrosswalkZoneState.NONE,
+        crosswalkIndex = nearestIndex,
+        distanceMeters = nearestDistance.takeIf { it != Float.MAX_VALUE }
+    )
+}
+
+private const val APPROACHING_RADIUS_M = 50f
+private const val PASSED_RADIUS_M = 30f
+private const val NEARBY_RADIUS_M = 50f
+private const val LOOK_AHEAD = 5
+private const val LOOK_BACK = 3
