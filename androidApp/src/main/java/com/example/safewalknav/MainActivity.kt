@@ -52,6 +52,7 @@ import com.example.safewalknav.location.LocationTracker
 import com.example.safewalknav.ml.TrafficLightAnalyzer
 import com.example.safewalknav.ml.TrafficLightDetection
 import com.example.safewalknav.ml.TrafficLightDetector
+import com.example.safewalknav.onboarding.AutoOnboardingCoordinator
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -149,6 +150,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var debugContainer: ViewGroup
     private lateinit var tvDebugStatus: TextView
     private lateinit var tvDebugGuidance: TextView
+    private lateinit var tvDebugAiResult: TextView
 
     // ==================== 흐름 ====================
 
@@ -231,6 +233,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // GPS update 마다 NavigationManager 가 isOnCrosswalkSegment() 로 판정 → state flow emit.
     // observeGuidance 의 collectLatest 로 갱신.
     private var inCrosswalkZone: Boolean = false
+
+    // ==================== 초기 방향 안내 (AutoOnboardingCoordinator) ====================
+    // iOS AutoOnboardingCoordinator.swift 를 Android 로 이식 — Section 5 of android_handover.md.
+    // 안내 시작 직후 5단계 시퀀스: summary → flatPose → rotating → confirming → done.
+    // onCompleted 콜백에서 실제 GPS tracking 을 켠다.
+    private var onboardingCoordinator: AutoOnboardingCoordinator? = null
 
     // ==================== 진동 / 효과음 ====================
 
@@ -418,6 +426,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         debugContainer = findViewById(R.id.debugContainer)
         tvDebugStatus = findViewById(R.id.tvDebugStatus)
         tvDebugGuidance = findViewById(R.id.tvDebugGuidance)
+        tvDebugAiResult = findViewById(R.id.tvDebugAiResult)
 
         // DEBUG 빌드만 디버그 박스 표시 + 시각 힌트 텍스트 표시
         if (BuildConfig.DEBUG) {
@@ -483,6 +492,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         directionalBeaconJob?.cancel()
         longPressJob?.cancel()
         arrivedReturnJob?.cancel()
+        onboardingCoordinator?.stop()
+        onboardingCoordinator = null
         stopCamera()
         trafficLightDetector?.close()
         trafficLightDetector = null
@@ -570,10 +581,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun updateDebugInfo() {
         if (!BuildConfig.DEBUG) return
+        if (!::tvDebugStatus.isInitialized) return
         val talkback = if (isTalkBackEnabled()) "ON" else "OFF"
         val gps = if (gpsReady) "OK" else "?"
         val last = lastSearchKeyword.ifEmpty { "-" }
-        tvDebugStatus.text = "STATE=${appState.name} | GPS=$gps | TalkBack=$talkback | last=$last"
+        val ai = if (inCrosswalkZone) "ON" else "OFF"
+        tvDebugStatus.text = "STATE=${appState.name} | GPS=$gps | AI=$ai | TalkBack=$talkback | last=$last"
+    }
+
+    private fun updateAiDebugResult(message: String) {
+        if (!BuildConfig.DEBUG) return
+        if (!::tvDebugAiResult.isInitialized) return
+        tvDebugAiResult.text = message
     }
 
     private fun isTalkBackEnabled(): Boolean {
@@ -901,7 +920,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 endLon = selected.lon,
                 endName = selected.name,
                 frontLat = selected.frontLat,
-                frontLon = selected.frontLon
+                frontLon = selected.frontLon,
+                // AutoOnboardingCoordinator 가 요약 발화를 담당하므로 NavigationManager 의
+                // 자동 _guidanceMessage 갱신 (= TTS 중복) 차단.
+                suppressInitialSummary = true,
             )
 
             if (success) {
@@ -923,12 +945,40 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     }
                 }
 
-                val summary = getRouteSummary()
-                if (summary.isNotEmpty()) {
-                    speakTTS(summary)
+                // ──── 초기 방향 안내 (AutoOnboardingCoordinator) ────
+                // 5단계 시퀀스: summary → flatPose → rotating → confirming → done.
+                // 완료 콜백에서 실제 위치 추적을 시작한다.
+                val firstWaypoint = route?.waypoints?.firstOrNull()
+                if (firstWaypoint != null) {
+                    val summary = navigationManager.buildInitialSummary()
+                    appendNavLog("Onboarding 시작 — summary='$summary' firstWp=(${firstWaypoint.lat},${firstWaypoint.lon})")
+
+                    val coordinator = onboardingCoordinator ?: AutoOnboardingCoordinator(
+                        context = applicationContext,
+                        scope = lifecycleScope,
+                        speak = { msg -> speakTTS(msg) },
+                    ).also { onboardingCoordinator = it }
+
+                    coordinator.start(
+                        summary = summary,
+                        currentLat = currentLocation.latitude,
+                        currentLon = currentLocation.longitude,
+                        firstWaypointLat = firstWaypoint.lat,
+                        firstWaypointLon = firstWaypoint.lon,
+                        onCompleted = {
+                            appendNavLog("Onboarding 완료 — 위치 추적 시작")
+                            startLocationTracking()
+                            startAutoRepeat()
+                        },
+                    )
+                } else {
+                    // route 가 없거나 waypoint 0 개 — 매우 예외적 케이스. Onboarding 건너뛰고 바로 시작.
+                    appendNavLog("Onboarding 생략 — 첫 waypoint 없음")
+                    val summary = getRouteSummary()
+                    if (summary.isNotEmpty()) speakTTS(summary)
+                    startLocationTracking()
+                    startAutoRepeat()
                 }
-                startLocationTracking()
-                startAutoRepeat()
             } else {
                 playToneError()
                 speakAndListenIdle("경로를 찾을 수 없습니다. 다른 목적지를 말씀해주세요.")
@@ -970,6 +1020,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         trackingJob?.cancel()
         stopAutoRepeat()
         stopBeacon()
+        // 도착 시점에 Onboarding 이 살아있을 가능성은 거의 없지만 (이미 onCompleted 후 startLocationTracking 진입)
+        // 5단계 시퀀스 중 강제 종료된 경우 (예: 사용자가 회전 중 도착) 대비 cleanup.
+        onboardingCoordinator?.stop()
         navigationManager.stopNavigation()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
@@ -995,6 +1048,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         stopBeacon()
         stopDirectionalBeacon()
         arrivedReturnJob?.cancel()
+        // Onboarding 진행 중에 사용자가 "종료" 했을 수 있음 — 센서/타이머 정리.
+        onboardingCoordinator?.stop()
         // navigationManager.stopNavigation() 가 자체적으로 "안내를 종료합니다" 를
         // guidanceMessage 에 emit 함 → observeGuidance 가 그걸 받아 TTS 재생.
         // 우리가 여기서 또 speakTTS 호출하면 중복 발화 → 호출 안 함.
@@ -1027,15 +1082,26 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                 navigationManager.updateLocation(location.toGpsLocation())
 
-                // 디버그 박스 갱신 (DEBUG 빌드만)
-                if (BuildConfig.DEBUG) {
-                    val dist = LocationTracker.distanceBetween(
-                        location.latitude, location.longitude,
-                        navigationManager.destinationLat, navigationManager.destinationLon
-                    )
-                    val accuracyText =
-                        if (location.hasAccuracy()) "±${location.accuracy.toInt()}m" else ""
+                // 디버그 박스 갱신 (DEBUG 빌드만) + 파일 로그 (전체 빌드)
+                val dist = LocationTracker.distanceBetween(
+                    location.latitude, location.longitude,
+                    navigationManager.destinationLat, navigationManager.destinationLon
+                )
+                val accuracyText =
+                    if (location.hasAccuracy()) "±${location.accuracy.toInt()}m" else ""
+                val speedText =
+                    if (location.hasSpeed()) "${"%.1f".format(location.speed)}m/s" else "?m/s"
 
+                // 횡단보도 zone 디버깅 — 매 GPS tick 마다 파일 로그.
+                // 외출 후 walk_logs/*.log 파일을 받아서 분석할 수 있도록 모든 핵심 필드 dump.
+                // 형식: GPS_TICK | gps좌표 | acc | spd | dest거리 | <debugMessage 전체 (zone/idx/wp/turnType/desc/nearestXW)>
+                val debugSnapshot = navigationManager.debugMessage.value.replace("\n", " | ")
+                appendNavLog(
+                    "GPS_TICK lat=${"%.5f".format(location.latitude)} lon=${"%.5f".format(location.longitude)} " +
+                            "$accuracyText spd=$speedText dest=${dist.toInt()}m | $debugSnapshot"
+                )
+
+                if (BuildConfig.DEBUG) {
                     tvDebugGuidance.text =
                         "${navigationManager.debugMessage.value}\n" +
                                 "GPS ${"%.5f".format(location.latitude)}, ${"%.5f".format(location.longitude)}" +
@@ -1288,12 +1354,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     // 진입 시점 — 디바운스 리셋해서 첫 검출 즉시 안내
                     lastSpokenSignalColor = -1
                     lastSpokenSignalAt = 0L
-                    Log.d("SafeWalkNav", "Crosswalk zone ENTER — TL 안내 활성화")
-                    appendNavLog("Crosswalk zone ENTER — TL 안내 활성화")
+                    Log.d("SafeWalkNav", "Crosswalk zone ENTER | TrafficLight AI=ON")
+                    appendNavLog("Crosswalk zone ENTER | TrafficLight AI=ON")
+                    updateAiDebugResult("AI ON | waiting frame")
                 } else if (!inZone && wasIn) {
-                    Log.d("SafeWalkNav", "Crosswalk zone EXIT — TL 안내 비활성화")
-                    appendNavLog("Crosswalk zone EXIT — TL 안내 비활성화")
+                    Log.d("SafeWalkNav", "Crosswalk zone EXIT | TrafficLight AI=OFF")
+                    appendNavLog("Crosswalk zone EXIT | TrafficLight AI=OFF")
+                    updateAiDebugResult("AI OFF")
                 }
+                updateDebugInfo()
             }
         }
 
@@ -1394,10 +1463,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // 검출기/executor 초기화 (재사용)
         if (trafficLightDetector == null) {
             try {
-                trafficLightDetector = TrafficLightDetector(this)
-                Log.d("SafeWalkNav", "TrafficLightDetector loaded")
+                trafficLightDetector = TrafficLightDetector(this).apply {
+                    // 디버그 빌드일 땐 진단 모드 ON — confidence 0.3 까지 잡아서 모델이 신호등을 보고 있는지
+                    // 임계값에 막혀 떨어진 건지 식별 가능하게 함. 운영 (release) 에선 자동으로 OFF.
+                    diagnosticMode = BuildConfig.DEBUG
+                }
+                Log.d("SafeWalkNav", "TrafficLightDetector loaded (diagnosticMode=${BuildConfig.DEBUG})")
+                appendNavLog("TrafficLightDetector loaded (diagnosticMode=${BuildConfig.DEBUG})")
             } catch (e: Exception) {
                 Log.e("SafeWalkNav", "Failed to load TrafficLightDetector", e)
+                appendNavLog("Failed to load TrafficLightDetector: ${e.message}")
             }
         }
         if (analysisExecutor == null) {
@@ -1451,13 +1526,62 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     /**
      * 신호등 검출 결과 처리.
-     * - 검출 0건: 무시 (신호등 못 봄. 안내 안 함)
+     * - 검출 0건: 안내 안 하지만 진단 통계는 walk 로그에 기록 (zone 안일 때만).
      * - 검출 ≥1건: 가장 큰 박스 (가장 가까운 신호등) 채택 → 디바운스 후 TTS
      *   · 같은 색 연속: SIGNAL_SPEAK_INTERVAL_MS 마다 한 번만 안내
      *   · 색 변경 (빨강 ↔ 초록): 즉시 안내
+     *
+     * 진단: zone 안에서 매 inference 의 단계별 통과 개수를 walk_*.log 에 기록한다.
+     *   TL_DIAG zone=true|false | raw=N | aboveTh=K | validated=M | nearest=label/conf/box |
+     *           peakConf=X.XX (R=Y.YY G=Z.ZZ) | inferenceMs=W | action=...
+     * 이 줄만 보면 어디서 막혔는지 즉시 식별 가능.
      */
     private fun onTrafficLightDetected(detections: List<TrafficLightDetection>) {
-        if (detections.isEmpty()) return
+        val stats = trafficLightDetector?.lastStats
+
+        // ──── 진단 통계 헤더 (zone 진입 후 매 inference 기록) ────
+        // zone=false 일 땐 spam 방지 위해 기록 안 함. zone=true 인데 detections=0 면 모델이 신호등을
+        // 못 보고 있다는 강력한 신호.
+        val statsLine = if (stats != null) {
+            "TL_DIAG zone=$inCrosswalkZone " +
+                    "raw=${detections.size} " +
+                    "aboveTh=${stats.rawCandidatesAboveThreshold} " +
+                    "peakConf=${"%.2f".format(stats.peakConfidence)} " +
+                    "(R=${"%.2f".format(stats.peakConfRed)} G=${"%.2f".format(stats.peakConfGreen)}) " +
+                    "th=${"%.2f".format(stats.confidenceThresholdUsed)}${if (stats.diagnosticMode) "[DIAG]" else ""} " +
+                    "inferMs=${stats.inferenceMs}"
+        } else {
+            "TL_DIAG zone=$inCrosswalkZone raw=${detections.size} stats=null"
+        }
+        val aiResultLine = if (stats != null) {
+            "AI ${if (inCrosswalkZone) "ON" else "OFF"} | raw=${detections.size} " +
+                    "above=${stats.rawCandidatesAboveThreshold} " +
+                    "peak=${"%.2f".format(stats.peakConfidence)} " +
+                    "R=${"%.2f".format(stats.peakConfRed)} " +
+                    "G=${"%.2f".format(stats.peakConfGreen)} " +
+                    "th=${"%.2f".format(stats.confidenceThresholdUsed)} " +
+                    "ms=${stats.inferenceMs}"
+        } else {
+            "AI ${if (inCrosswalkZone) "ON" else "OFF"} | raw=${detections.size} stats=null"
+        }
+        updateAiDebugResult("$aiResultLine | action=CHECKING")
+
+        // zone 안에서만 파일 로깅 — 평소 보행 중엔 spam 방지.
+        if (inCrosswalkZone) {
+            appendNavLog(statsLine)
+        }
+
+        // ──── 안내 흐름 (기존 로직, 단 reason 명시) ────
+
+        if (detections.isEmpty()) {
+            // 모델이 신호등을 못 봄 (또는 threshold 미달).
+            // zone 안이라도 안내 안 함. 진단 라인은 이미 기록됨.
+            if (BuildConfig.DEBUG) {
+                tvDebugGuidance.text = "ML: $statsLine"
+                updateAiDebugResult("$aiResultLine | action=NO_DET")
+            }
+            return
+        }
 
         // 0차 필터: 횡단보도 zone 진입했을 때만 안내.
         // NavigationManager.isInCrosswalkZone (TMap waypoint pointType=CROSSWALK + GPS 위치 판정) 기반.
@@ -1471,10 +1595,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             d.bbox.width >= minBoxDimension && d.bbox.height >= minBoxDimension
         }
         if (validated.isEmpty()) {
-            // DEBUG: noise 무시했음을 표시
-            if (BuildConfig.DEBUG && detections.isNotEmpty()) {
-                val small = detections.first()
+            // 1차 필터에서 다 떨어짐 — 진단 라인에 reason 추가
+            val small = detections.first()
+            appendNavLog(
+                "TL_DIAG  └─ ALL_TOO_SMALL nearest=${small.label} ${(small.confidence * 100).toInt()}% " +
+                        "box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}% (min=6%)"
+            )
+            if (BuildConfig.DEBUG) {
                 tvDebugGuidance.text = "TL noise 무시: ${small.label} ${(small.confidence * 100).toInt()}% box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}%"
+                updateAiDebugResult(
+                    "$aiResultLine | action=SMALL label=${small.label} " +
+                            "conf=${(small.confidence * 100).toInt()}% " +
+                            "box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}%"
+                )
             }
             return
         }
@@ -1485,9 +1618,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val sameColor = nearest.classId == lastSpokenSignalColor
         val withinCooldown = now - lastSpokenSignalAt < SIGNAL_SPEAK_INTERVAL_MS
         if (sameColor && withinCooldown) {
-            // 디바운스 중 — 안내 안 함, 디버그만 갱신
+            // 디바운스 중 — 안내 안 함, 진단 라인에 reason 추가 + 디버그 UI 만 갱신
+            appendNavLog(
+                "TL_DIAG  └─ COOLDOWN nearest=${nearest.label} ${(nearest.confidence * 100).toInt()}% " +
+                        "validated=${validated.size}/${detections.size}"
+            )
             if (BuildConfig.DEBUG) {
                 tvDebugGuidance.text = "TL (cooldown): ${nearest.label} ${(nearest.confidence * 100).toInt()}%"
+                updateAiDebugResult(
+                    "$aiResultLine | action=COOLDOWN label=${nearest.label} " +
+                            "conf=${(nearest.confidence * 100).toInt()}% " +
+                            "box=${(nearest.bbox.width * 100).toInt()}x${(nearest.bbox.height * 100).toInt()}%"
+                )
             }
             return
         }
@@ -1502,7 +1644,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
         speakTTS(message)
         Log.d("SafeWalkNav", "TL announced: $message (conf=${nearest.confidence}, box=${nearest.bbox.width}x${nearest.bbox.height})")
-        appendNavLog("TL announced: $message (conf=${nearest.confidence}, box=${nearest.bbox.width}x${nearest.bbox.height}, total ${detections.size} det)")
+        appendNavLog("TL_DIAG  └─ ANNOUNCED $message (conf=${"%.2f".format(nearest.confidence)}, box=${"%.2f".format(nearest.bbox.width)}x${"%.2f".format(nearest.bbox.height)}, validated=${validated.size}/${detections.size})")
 
         // 색 변경 시 진동 한 번
         if (!sameColor) vibrateShort()
@@ -1510,6 +1652,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (BuildConfig.DEBUG) {
             tvDebugGuidance.text =
                 "TL: ${nearest.label} ${(nearest.confidence * 100).toInt()}% (${validated.size}/${detections.size} det)"
+            updateAiDebugResult(
+                "$aiResultLine | action=ANNOUNCED label=${nearest.label} " +
+                        "conf=${(nearest.confidence * 100).toInt()}% " +
+                        "box=${(nearest.bbox.width * 100).toInt()}x${(nearest.bbox.height * 100).toInt()}%"
+            )
         }
     }
 
