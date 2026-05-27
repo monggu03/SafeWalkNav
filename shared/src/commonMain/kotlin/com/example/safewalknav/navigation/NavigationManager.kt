@@ -73,6 +73,11 @@ class NavigationManager(
 
     private var currentWaypointIndex = 0
 
+    // skip-ahead fallback 상태 — wp[N] 을 우회 advance 할 후보로 들어간 시각
+    // 0L = 후보 아님. 조건이 깨지면 0L 로 리셋.
+    private var skipCandidateStartMs: Long = 0L
+    private var skipCandidateForIndex: Int = -1
+
     var destinationLat = 0.0
         private set
     var destinationLon = 0.0
@@ -133,6 +138,11 @@ class NavigationManager(
 
     // 가상 waypoint 통과 카운터 — "잘 가고 있을 때" 무음 vs 가벼운 확인음 토글에 사용.
     private var virtualPassCount = 0
+
+    // 곡선 방향 리마인더 — 마지막 발화 시각(시간 쿨다운용).
+    private var lastCurveReminderTime = 0L
+    // 곡선 방향 리마인더 — 마지막에 발화한 방향("LEFT"/"RIGHT"). 곡선이 바뀌면 카운터 주기와 무관하게 즉시 발화.
+    private var lastCurveReminderDirection: String? = null
 
     // 디버그용 — iOS 에서 관찰 가능하게 StateFlow 로 노출
     private val _annotations = MutableStateFlow<List<PathAnnotation>>(emptyList())
@@ -385,6 +395,8 @@ class NavigationManager(
         cumulativeDistances = computeCumulativeDistances(currentRoute!!.waypoints)
         announcedAnnotationIds.clear()
         virtualPassCount = 0
+        skipCandidateStartMs = 0L
+        skipCandidateForIndex = -1
         _annotations.value = pathAnnotations
         _announcementLog.value = emptyList()
 
@@ -519,6 +531,8 @@ class NavigationManager(
         cumulativeDistances = emptyList()
         announcedAnnotationIds.clear()
         virtualPassCount = 0
+        lastCurveReminderTime = 0L
+        lastCurveReminderDirection = null
         spatialBeeper.stop()
         _annotations.value = emptyList()
         _announcementLog.value = emptyList()
@@ -543,6 +557,8 @@ class NavigationManager(
         cumulativeDistances = emptyList()
         announcedAnnotationIds.clear()
         virtualPassCount = 0
+        lastCurveReminderTime = 0L
+        lastCurveReminderDirection = null
         spatialBeeper.stop()
         _annotations.value = emptyList()
 
@@ -1132,6 +1148,12 @@ class NavigationManager(
         val waypoints = route.waypoints
         if (waypoints.isEmpty()) return
 
+        // skip-ahead fallback 임계값
+        val SKIP_AHEAD_MIN_DELTA_M = 3f         // 다음 wp 가 현재 wp 보다 최소 이만큼 더 가까워야 후보
+        val SKIP_AHEAD_CROSS_TRACK_M = 15f      // 경로 cross-track 이탈이 이 값 이하여야 (이탈 아님)
+        val SKIP_AHEAD_HOLD_MS = 3000L          // 후보 상태가 이만큼 유지되어야 실제 skip
+        val SKIP_AHEAD_HARD_TIMEOUT_MS = 20000L // 동일 idx 에서 이만큼 advance 못 하면 강제 skip 1회 허용
+
         // Step 1: 현재 waypoint 통과 판정
         // 현재 타겟 waypoint에 10m 이내이고, 경로상 이미 지나갔으면 전진.
         // 가상 waypoint 는 5m 간격으로 촘촘하므로 통과 임계도 조금 더 짧게(7m) 적용.
@@ -1144,6 +1166,68 @@ class NavigationManager(
             val passThreshold = if (wp.isVirtual) 7f else 10f
             if (distToWp > passThreshold) {
                 println("[POLL-DBG] idx=$currentWaypointIndex 거리 초과: distToWp=$distToWp threshold=$passThreshold isVirtual=${wp.isVirtual}")
+
+                // ───── skip-ahead fallback ─────
+                // 사용자가 wp[N] 의 통과 임계 안에 들어오지 않더라도
+                // wp[N+1] 에 일관되게 더 가까워졌고 경로 이탈이 작으면 skip.
+                val nextIdx = currentWaypointIndex + 1
+                var didSkip = false
+                if (nextIdx < waypoints.size) {
+                    val nextWp = waypoints[nextIdx]
+                    val distToNext = distanceBetween(currentLat, currentLon, nextWp.lat, nextWp.lon)
+                    val delta = distToWp - distToNext   // 양수면 다음 wp 가 더 가까움
+
+                    // cross-track: 현재 wp - 다음 wp 선분에 대한 사용자의 수직 이탈
+                    val crossM = computeSignedCrossTrack(
+                        currentLat = currentLat,
+                        currentLon = currentLon,
+                        routePoints = listOf(LatLng(wp.lat, wp.lon), LatLng(nextWp.lat, nextWp.lon)),
+                        currentRoutePointIndex = 0,
+                    )
+                    val deviation = kotlin.math.abs(crossM)
+
+                    val now = currentTimeMillis()
+                    val candidateValid = delta >= SKIP_AHEAD_MIN_DELTA_M && deviation <= SKIP_AHEAD_CROSS_TRACK_M
+
+                    if (candidateValid) {
+                        if (skipCandidateForIndex != currentWaypointIndex) {
+                            // 새 후보 등록
+                            skipCandidateForIndex = currentWaypointIndex
+                            skipCandidateStartMs = now
+                            println("[SKIP-AHEAD] 후보 등록 idx=$currentWaypointIndex distToWp=$distToWp distToNext=$distToNext delta=$delta cross=$deviation")
+                        } else if (now - skipCandidateStartMs >= SKIP_AHEAD_HOLD_MS) {
+                            // hold 충족 — skip 실행
+                            println("[SKIP-AHEAD] SKIP 실행 idx=$currentWaypointIndex → ${currentWaypointIndex + 1} (hold ${now - skipCandidateStartMs}ms)")
+                            currentWaypointIndex++
+                            skipCandidateForIndex = -1
+                            skipCandidateStartMs = 0L
+                            didSkip = true
+                        }
+                    } else {
+                        // 후보 무효화
+                        if (skipCandidateForIndex == currentWaypointIndex) {
+                            println("[SKIP-AHEAD] 후보 무효 idx=$currentWaypointIndex delta=$delta cross=$deviation")
+                            skipCandidateForIndex = -1
+                            skipCandidateStartMs = 0L
+                        }
+                    }
+
+                    // hard timeout — 같은 idx 에서 너무 오래 멈춰 있으면 cross-track 만 통과해도 강제 skip 1회
+                    if (!didSkip && skipCandidateForIndex == currentWaypointIndex
+                        && now - skipCandidateStartMs >= SKIP_AHEAD_HARD_TIMEOUT_MS
+                        && deviation <= SKIP_AHEAD_CROSS_TRACK_M
+                    ) {
+                        println("[SKIP-AHEAD] HARD-TIMEOUT 강제 SKIP idx=$currentWaypointIndex (${now - skipCandidateStartMs}ms)")
+                        currentWaypointIndex++
+                        skipCandidateForIndex = -1
+                        skipCandidateStartMs = 0L
+                        didSkip = true
+                    }
+                }
+
+                if (didSkip) continue
+                // ───── skip-ahead fallback 끝 ─────
+
                 break
             }
 
@@ -1463,6 +1547,7 @@ class NavigationManager(
      *   1. 이상적 진행 방향 = 통과한 가상 점 → 다음 waypoint(가상 포함) 의 bearing
      *   2. 사용자가 두 점 사이 라인에서 얼마나 옆으로 벗어났는지(부호 있는 수직 거리) 계산
      *   3. 이탈 정도에 따라 비프(LOW/HIGH/연속) 또는 음성으로 단계적 안내
+     *   4. (NEW 2026-05-26) 곡선 구간이면 진행 중 방향 리마인더("오른쪽으로 휘어집니다") 주기 발화
      *
      * sign 규약(`computeSignedCrossTrack`):
      *   - 양수 = 사용자가 경로의 왼쪽에 있음 → 오른쪽으로 가야 함 → pan = +1f (오른쪽 채널)
@@ -1470,6 +1555,13 @@ class NavigationManager(
      *
      * "잘 가고 있을 때" (이탈 < curveDeviationLowM) 무음에 가깝게 유지 — 3번째 통과마다만 중앙 톤.
      * 음성으로 전환되는 임계(>= curveDeviationCriticalM) 에서는 NavigationManager.speak() 사용.
+     *
+     * 곡선 방향 리마인더 (NEW):
+     *   - 통과한 가상 waypoint 의 curveDirection 이 채워져 있을 때만 동작 (곡선 구간 한정)
+     *   - virtualPassCount % curveReminderEveryNVirtuals == 0 (기본 3개마다, ≈15m)
+     *   - 시간 쿨다운(기본 8초) 으로 같은 멘트 연속 발화 방지
+     *   - 이탈 상태와 독립적으로 발화 — GPS sideways pass 로 통과 판정이 누락될 가능성 대응
+     *   - 곡선 방향 전환(LEFT↔RIGHT) 시에는 카운터 주기를 무시하고 즉시 발화
      */
     private fun handleVirtualWaypointPassed(
         passed: Waypoint,
@@ -1498,6 +1590,20 @@ class NavigationManager(
 
         virtualPassCount++
 
+        // ─── (1) 이탈 정도에 따른 비프/음성 안내 (기존 로직 유지) ───
+        // 진단 로그 — deviation 이 어느 분기로 떨어지는지 + spatialBeeper 인스턴스 타입 확인.
+        // (iosImpl 콜백이 안 박혀 있어도 KMP 측 클래스 이름은 "SpatialBeeper" 로 동일하게 찍히므로,
+        //  iosImpl null 여부 자체는 본 로그로 판단 불가 — 분기 진입 + 무음 여부와 함께 해석할 것.)
+        val branchLabel = when {
+            deviationM < navigatorConfig.curveDeviationLowM -> "LOW-cadenced(${virtualPassCount % 3 == 0})"
+            deviationM < navigatorConfig.curveDeviationHighM -> "LOW"
+            deviationM < navigatorConfig.curveDeviationCriticalM -> "HIGH2"
+            else -> "VOICE"
+        }
+        println("[VBEEP] idx=$currentWaypointIndex passed=(${passed.lat},${passed.lon}) " +
+                "deviation=${deviationM}m crossM=$crossM pan=$pan virtPassCount=$virtualPassCount " +
+                "beeperImpl=${spatialBeeper::class.simpleName} branch=$branchLabel")
+
         when {
             deviationM < navigatorConfig.curveDeviationLowM -> {
                 // 잘 가는 중 — 3번에 한 번만 중앙 LOW 톤으로 "확인음".
@@ -1517,6 +1623,29 @@ class NavigationManager(
                 speak("${side}으로 이동하세요")
             }
         }
+
+        // ─── (2) 곡선 방향 리마인더 (NEW 2026-05-26) ───
+        // curveDirection 이 채워진 가상 점만 대상 — 직선 구간 가상 점은 제외.
+        val curveDir = passed.curveDirection ?: return
+
+        // 곡선이 바뀌면(LEFT→RIGHT 등) 카운터 주기와 무관하게 즉시 발화 허용.
+        // 동일 방향 연속 곡선은 카운터 주기로 제어.
+        val directionChanged = (curveDir != lastCurveReminderDirection)
+        val onCadence = (virtualPassCount % navigatorConfig.curveReminderEveryNVirtuals == 0)
+        if (!directionChanged && !onCadence) return
+
+        // 시간 쿨다운 — 카운터 주기가 짧아도 8초 이내엔 같은 멘트 안 나감.
+        val now = currentTimeMillis()
+        if (now - lastCurveReminderTime < navigatorConfig.curveReminderCooldownMs) return
+
+        val side = when (curveDir) {
+            "RIGHT" -> "오른쪽"
+            "LEFT" -> "왼쪽"
+            else -> return  // NONE 또는 미지값은 발화 안 함
+        }
+        speak("${side}으로 휘어집니다")
+        lastCurveReminderTime = now
+        lastCurveReminderDirection = curveDir
     }
 
     /**
