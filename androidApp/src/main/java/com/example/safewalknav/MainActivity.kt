@@ -150,6 +150,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var debugContainer: ViewGroup
     private lateinit var tvDebugStatus: TextView
     private lateinit var tvDebugGuidance: TextView
+    private lateinit var tvDebugAiResult: TextView
 
     // ==================== 흐름 ====================
 
@@ -425,6 +426,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         debugContainer = findViewById(R.id.debugContainer)
         tvDebugStatus = findViewById(R.id.tvDebugStatus)
         tvDebugGuidance = findViewById(R.id.tvDebugGuidance)
+        tvDebugAiResult = findViewById(R.id.tvDebugAiResult)
 
         // DEBUG 빌드만 디버그 박스 표시 + 시각 힌트 텍스트 표시
         if (BuildConfig.DEBUG) {
@@ -579,10 +581,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun updateDebugInfo() {
         if (!BuildConfig.DEBUG) return
+        if (!::tvDebugStatus.isInitialized) return
         val talkback = if (isTalkBackEnabled()) "ON" else "OFF"
         val gps = if (gpsReady) "OK" else "?"
         val last = lastSearchKeyword.ifEmpty { "-" }
-        tvDebugStatus.text = "STATE=${appState.name} | GPS=$gps | TalkBack=$talkback | last=$last"
+        val ai = if (inCrosswalkZone) "ON" else "OFF"
+        tvDebugStatus.text = "STATE=${appState.name} | GPS=$gps | AI=$ai | TalkBack=$talkback | last=$last"
+    }
+
+    private fun updateAiDebugResult(message: String) {
+        if (!BuildConfig.DEBUG) return
+        if (!::tvDebugAiResult.isInitialized) return
+        tvDebugAiResult.text = message
     }
 
     private fun isTalkBackEnabled(): Boolean {
@@ -1344,12 +1354,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     // 진입 시점 — 디바운스 리셋해서 첫 검출 즉시 안내
                     lastSpokenSignalColor = -1
                     lastSpokenSignalAt = 0L
-                    Log.d("SafeWalkNav", "Crosswalk zone ENTER — TL 안내 활성화")
-                    appendNavLog("Crosswalk zone ENTER — TL 안내 활성화")
+                    Log.d("SafeWalkNav", "Crosswalk zone ENTER | TrafficLight AI=ON")
+                    appendNavLog("Crosswalk zone ENTER | TrafficLight AI=ON")
+                    updateAiDebugResult("AI ON | waiting frame")
                 } else if (!inZone && wasIn) {
-                    Log.d("SafeWalkNav", "Crosswalk zone EXIT — TL 안내 비활성화")
-                    appendNavLog("Crosswalk zone EXIT — TL 안내 비활성화")
+                    Log.d("SafeWalkNav", "Crosswalk zone EXIT | TrafficLight AI=OFF")
+                    appendNavLog("Crosswalk zone EXIT | TrafficLight AI=OFF")
+                    updateAiDebugResult("AI OFF")
                 }
+                updateDebugInfo()
             }
         }
 
@@ -1540,6 +1553,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         } else {
             "TL_DIAG zone=$inCrosswalkZone raw=${detections.size} stats=null"
         }
+        val aiResultLine = if (stats != null) {
+            "AI ${if (inCrosswalkZone) "ON" else "OFF"} | raw=${detections.size} " +
+                    "above=${stats.rawCandidatesAboveThreshold} " +
+                    "peak=${"%.2f".format(stats.peakConfidence)} " +
+                    "R=${"%.2f".format(stats.peakConfRed)} " +
+                    "G=${"%.2f".format(stats.peakConfGreen)} " +
+                    "th=${"%.2f".format(stats.confidenceThresholdUsed)} " +
+                    "ms=${stats.inferenceMs}"
+        } else {
+            "AI ${if (inCrosswalkZone) "ON" else "OFF"} | raw=${detections.size} stats=null"
+        }
+        updateAiDebugResult("$aiResultLine | action=CHECKING")
 
         // zone 안에서만 파일 로깅 — 평소 보행 중엔 spam 방지.
         if (inCrosswalkZone) {
@@ -1553,6 +1578,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             // zone 안이라도 안내 안 함. 진단 라인은 이미 기록됨.
             if (BuildConfig.DEBUG) {
                 tvDebugGuidance.text = "ML: $statsLine"
+                updateAiDebugResult("$aiResultLine | action=NO_DET")
             }
             return
         }
@@ -1577,6 +1603,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             )
             if (BuildConfig.DEBUG) {
                 tvDebugGuidance.text = "TL noise 무시: ${small.label} ${(small.confidence * 100).toInt()}% box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}%"
+                updateAiDebugResult(
+                    "$aiResultLine | action=SMALL label=${small.label} " +
+                            "conf=${(small.confidence * 100).toInt()}% " +
+                            "box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}%"
+                )
             }
             return
         }
@@ -1594,6 +1625,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             )
             if (BuildConfig.DEBUG) {
                 tvDebugGuidance.text = "TL (cooldown): ${nearest.label} ${(nearest.confidence * 100).toInt()}%"
+                updateAiDebugResult(
+                    "$aiResultLine | action=COOLDOWN label=${nearest.label} " +
+                            "conf=${(nearest.confidence * 100).toInt()}% " +
+                            "box=${(nearest.bbox.width * 100).toInt()}x${(nearest.bbox.height * 100).toInt()}%"
+                )
             }
             return
         }
@@ -1616,6 +1652,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (BuildConfig.DEBUG) {
             tvDebugGuidance.text =
                 "TL: ${nearest.label} ${(nearest.confidence * 100).toInt()}% (${validated.size}/${detections.size} det)"
+            updateAiDebugResult(
+                "$aiResultLine | action=ANNOUNCED label=${nearest.label} " +
+                        "conf=${(nearest.confidence * 100).toInt()}% " +
+                        "box=${(nearest.bbox.width * 100).toInt()}x${(nearest.bbox.height * 100).toInt()}%"
+            )
         }
     }
 
