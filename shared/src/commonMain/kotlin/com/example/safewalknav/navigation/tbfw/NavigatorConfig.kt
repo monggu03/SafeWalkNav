@@ -8,6 +8,10 @@ package com.example.safewalknav.navigation.tbfw
  * 2026-05-23 — Trust Score / GPS Jump / ForwardOnlyTracker 관련 필드 일괄 제거.
  *   사유: 1차 설계의 신뢰도 점수화는 magnetic heading 노이즈로 실측 부정확.
  *   RouteAnnotator 의 사전 안내 + 가상 waypoint 기반 곡선 안내로 대체.
+ *
+ * 2026-05-26 — 곡선 진행 중 방향 리마인더 추가.
+ *   사유: 사전 안내(15~25m 전 1회)만으로는 긴 곡선 중간에 사용자가 방향을 잊을 수 있고,
+ *   GPS sideways pass 로 가상 waypoint 통과 판정이 누락될 수 있어 정보 우선으로 발화.
  */
 data class NavigatorConfig(
     // ─── 보행 쏠림 보정 (Path Annotation) ───
@@ -38,6 +42,15 @@ data class NavigatorConfig(
     val curveDeviationLowM: Double = 1.0,
     val curveDeviationHighM: Double = 3.0,
     val curveDeviationCriticalM: Double = 5.0,
+
+    // ─── 곡선 방향 리마인더 (NEW 2026-05-26) ───
+    // 곡선 진행 중 사용자가 방향을 잊지 않도록 주기적으로 "오른쪽/왼쪽으로 휘어집니다" 발화.
+    // GPS sideways pass 로 가상 waypoint 통과가 누락될 가능성을 고려해 이탈 상태 무관하게 발화한다.
+    //
+    // curveReminderEveryNVirtuals = 3 → 가상 waypoint 3개(≈15m)마다 리마인더 후보.
+    // curveReminderCooldownMs = 8000 → 같은 멘트가 8초 이내 반복되지 않도록 시간 쿨다운 안전장치.
+    val curveReminderEveryNVirtuals: Int = 3,
+    val curveReminderCooldownMs: Long = 8_000L,
 ) {
     companion object {
         /**

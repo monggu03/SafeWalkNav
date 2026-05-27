@@ -237,6 +237,135 @@ class AnnouncementSelectorTest {
         assertTrue(diff < 0.5, "두 구간 거리가 비슷해야 함 (≈ ${seg1}m vs ${seg2}m)")
     }
 
+    // ───────── INTERNAL_CURVE 범위 안 TURN 계열 차단 (NEW 2026-05-26) ─────────
+
+    @Test
+    fun `INTERNAL_CURVE 범위 안 SHARP_TURN 은 발화 차단`() {
+        // INTERNAL_CURVE [3..7] 안에 SHARP_TURN at 5 가 있는 케이스.
+        // 사용자가 안내 윈도우에 들어가도 SHARP_TURN 은 후보에서 제외돼야 함.
+        val internalCurve = ann(
+            startIdx = 3,
+            distanceFromStartM = 50.0,
+            type = PathSegmentType.INTERNAL_CURVE,
+            message = "왼쪽으로 휘어집니다",
+        ).copy(endWaypointIndex = 7)
+        val sharpTurn = ann(
+            startIdx = 5,
+            distanceFromStartM = 60.0,
+            type = PathSegmentType.SHARP_TURN,
+            message = "급좌회전합니다",
+        )
+        // SHARP_TURN trigger 25m, distance 60m, user 40m → gap 20m → 윈도우 안.
+        // 하지만 INTERNAL_CURVE 범위 안이므로 차단되어야 함.
+        val result = selectAnnouncementCandidate(
+            annotations = listOf(internalCurve, sharpTurn),
+            userCumulativeDistance = 40.0,
+            announcedIds = emptySet(),
+            config = config,
+        )
+        // 결과: INTERNAL_CURVE (startIdx=3) 가 선택됨. SHARP_TURN(startIdx=5)은 차단.
+        assertNotNull(result)
+        assertEquals(3, result.startWaypointIndex)
+        assertEquals(PathSegmentType.INTERNAL_CURVE, result.type)
+    }
+
+    @Test
+    fun `INTERNAL_CURVE 범위 밖 SHARP_TURN 은 정상 발화`() {
+        // INTERNAL_CURVE [3..7], SHARP_TURN at 10 — 범위 밖이므로 차단 안 됨.
+        val internalCurve = ann(
+            startIdx = 3,
+            distanceFromStartM = 50.0,
+            type = PathSegmentType.INTERNAL_CURVE,
+        ).copy(endWaypointIndex = 7)
+        val sharpTurn = ann(
+            startIdx = 10,
+            distanceFromStartM = 200.0,  // 멀리 떨어진 별개 회전
+            type = PathSegmentType.SHARP_TURN,
+        )
+        // INTERNAL_CURVE 발화 직후 announcedIds 에 추가됐다고 가정.
+        // 그 후 SHARP_TURN 윈도우에 도달했을 때 정상 발화돼야 함.
+        val result = selectAnnouncementCandidate(
+            annotations = listOf(internalCurve, sharpTurn),
+            userCumulativeDistance = 180.0,  // SHARP_TURN 의 25m 윈도우 안
+            announcedIds = setOf(3),         // INTERNAL_CURVE 는 이미 발화됨
+            config = config,
+        )
+        assertNotNull(result)
+        assertEquals(10, result.startWaypointIndex)
+        assertEquals(PathSegmentType.SHARP_TURN, result.type)
+    }
+
+    @Test
+    fun `INTERNAL_CURVE 범위 안 TURN 과 SLIGHT_TURN 모두 차단`() {
+        // 한 INTERNAL_CURVE 안에 TURN 과 SLIGHT_TURN 이 같이 있는 케이스 — 둘 다 차단.
+        val internalCurve = ann(
+            startIdx = 0,
+            distanceFromStartM = 100.0,
+            type = PathSegmentType.INTERNAL_CURVE,
+        ).copy(endWaypointIndex = 10)
+        val turn = ann(
+            startIdx = 3,
+            distanceFromStartM = 105.0,
+            type = PathSegmentType.TURN,
+        )
+        val slightTurn = ann(
+            startIdx = 7,
+            distanceFromStartM = 115.0,
+            type = PathSegmentType.SLIGHT_TURN,
+        )
+        // INTERNAL_CURVE 가 이미 발화됐다고 가정. TURN/SLIGHT_TURN 윈도우 도달 시 모두 차단.
+        val result = selectAnnouncementCandidate(
+            annotations = listOf(internalCurve, turn, slightTurn),
+            userCumulativeDistance = 95.0,
+            announcedIds = setOf(0),
+            config = config,
+        )
+        assertNull(result, "TURN/SLIGHT_TURN 둘 다 차단되어야 함")
+    }
+
+    @Test
+    fun `INTERNAL_CURVE 범위 안 CURVE 는 차단 안 됨`() {
+        // 정책은 TURN 계열만 차단. CURVE / SLIGHT_CURVE 는 영향 없음.
+        val internalCurve = ann(
+            startIdx = 0,
+            distanceFromStartM = 100.0,
+            type = PathSegmentType.INTERNAL_CURVE,
+        ).copy(endWaypointIndex = 10)
+        val nestedCurve = ann(
+            startIdx = 3,
+            distanceFromStartM = 105.0,
+            type = PathSegmentType.CURVE,
+        )
+        val result = selectAnnouncementCandidate(
+            annotations = listOf(internalCurve, nestedCurve),
+            userCumulativeDistance = 95.0,
+            announcedIds = setOf(0),  // INTERNAL_CURVE 발화됨
+            config = config,
+        )
+        // CURVE 가 선택됨 — 차단 정책은 TURN 계열에만 적용.
+        assertNotNull(result)
+        assertEquals(3, result.startWaypointIndex)
+        assertEquals(PathSegmentType.CURVE, result.type)
+    }
+
+    @Test
+    fun `INTERNAL_CURVE 가 없으면 기존 동작과 동일`() {
+        // 회귀 테스트 — INTERNAL_CURVE 가 리스트에 없으면 SHARP_TURN 정상 발화.
+        val sharpTurn = ann(
+            startIdx = 5,
+            distanceFromStartM = 100.0,
+            type = PathSegmentType.SHARP_TURN,
+        )
+        val result = selectAnnouncementCandidate(
+            annotations = listOf(sharpTurn),
+            userCumulativeDistance = 80.0,
+            announcedIds = emptySet(),
+            config = config,
+        )
+        assertNotNull(result)
+        assertEquals(5, result.startWaypointIndex)
+    }
+
     private fun mkWaypoint(lat: Double, lon: Double): Waypoint = Waypoint(
         lat = lat,
         lon = lon,
