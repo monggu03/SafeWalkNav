@@ -165,6 +165,17 @@
             android:layout_marginTop="2dp"
             android:importantForAccessibility="no"
             tools:text="guidance=목적지까지 200미터" />
+        <TextView
+            android:id="@+id/tvDebugAiResult"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textSize="11sp"
+            android:textColor="#FFD700"
+            android:fontFamily="monospace"
+            android:layout_marginTop="2dp"
+            android:importantForAccessibility="no"
+            tools:text="AI OFF" />
     </LinearLayout>
 
 </FrameLayout>
