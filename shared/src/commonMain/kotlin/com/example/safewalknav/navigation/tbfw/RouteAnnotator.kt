@@ -121,7 +121,9 @@ class RouteAnnotator(
         }
 
         // ─── Stage B: 각 RouteSegment 내부 곡선 분석 (신규) ───
-        for (segment in segments) {
+        for ((segIdx, segment) in segments.withIndex()) {
+            println("[Stage B] segIdx=$segIdx wpRange=[${segment.fromWaypointIndex}..${segment.toWaypointIndex}] " +
+                    "points.size=${segment.points.size} → scanInternalCurve 호출")
             if (segment.points.size < 3) continue
             val segDistance = cumulativeDistances.getOrNull(segment.fromWaypointIndex) ?: continue
             val internal = scanInternalCurve(segment, segDistance)
@@ -162,7 +164,19 @@ class RouteAnnotator(
         val primary = annotate(waypoints)
         if (waypoints.size < 2 || routePoints.size < 3) return primary
 
-        // 2. annotation 이 없는 waypoint 구간 추출
+        // 2. 각 waypoint pair([i→i+1]) 단위로 routePoints 내부 곡선을 보조 검출.
+        val cumulativeDistances = computeCumulativeDistances(waypoints)
+        val pairSupplementary = mutableListOf<PathAnnotation>()
+        for (i in 0 until waypoints.size - 1) {
+            val curveAnn = detectCurveInRoutePoints(
+                waypoints, routePoints, i, i + 1, cumulativeDistances,
+            )
+            if (curveAnn != null) {
+                pairSupplementary.add(curveAnn)
+            }
+        }
+
+        // 3. annotation 이 없는 waypoint 구간 추출
         //    각 waypoint 가 어느 annotation 에 포함되는지 표시
         val coveredWaypointIndices = mutableSetOf<Int>()
         for (ann in primary.annotations) {
@@ -171,9 +185,8 @@ class RouteAnnotator(
             }
         }
 
-        // 3. 직진 구간(연속된 비-cover waypoint 들) 단위로 routePoints 검사
-        val supplementary = mutableListOf<PathAnnotation>()
-        val cumulativeDistances = computeCumulativeDistances(waypoints)
+        // 기존 직진 구간(연속된 비-cover waypoint 들) 단위 routePoints 검사 유지.
+        val existingSupplementary = mutableListOf<PathAnnotation>()
         var i = 0
         while (i < waypoints.size - 1) {
             // 직진 구간 시작 찾기
@@ -191,14 +204,19 @@ class RouteAnnotator(
                     waypoints, routePoints, i, end, cumulativeDistances,
                 )
                 if (curveAnn != null) {
-                    supplementary.add(curveAnn)
+                    existingSupplementary.add(curveAnn)
                 }
             }
             i = end + 1
         }
 
-        // 4. 1차 + 보조 결과 병합 (시간 순서 정렬)
-        val merged = (primary.annotations + supplementary)
+        // 4. 1차 + 기존 보조 + pair 보조 결과 병합.
+        // pair 는 상위 우선순위 annotation range 에 완전히 포함될 때만 제거한다.
+        val higherPriority = primary.annotations + existingSupplementary
+        val filteredPairs = pairSupplementary.filterNot { pair ->
+            higherPriority.any { higher -> containsRange(higher, pair) }
+        }
+        val merged = (higherPriority + filteredPairs)
             .sortedBy { it.startWaypointIndex }
         return AnnotatedRoute(waypoints, merged)
     }
@@ -221,7 +239,12 @@ class RouteAnnotator(
         //   기준: 시작 waypoint 에 가장 가까운 routePoint 부터 끝 waypoint 에 가장 가까운 routePoint 까지
         val startRpIdx = closestRoutePointIndex(routePoints, startWp.lat, startWp.lon)
         val endRpIdx = closestRoutePointIndex(routePoints, endWp.lat, endWp.lon)
-        if (endRpIdx - startRpIdx < 2) return null
+        val isPair = endIdx == startIdx + 1
+        val sliceCount = if (endRpIdx >= startRpIdx) endRpIdx - startRpIdx + 1 else 0
+        if (endRpIdx - startRpIdx < 2) {
+            if (isPair) logPairCurve(startIdx, sliceCount, 0.0, "SKIP(slice<3)")
+            return null
+        }
 
         // 구간 길이 체크 (15m 이상만)
         var segmentDist = 0.0
@@ -231,7 +254,10 @@ class RouteAnnotator(
                 routePoints[j + 1].lat, routePoints[j + 1].lon
             ).toDouble()
         }
-        if (segmentDist < config.minSegmentDistanceM * 5) return null
+        if (segmentDist < config.minSegmentDistanceM * 5) {
+            if (isPair) logPairCurve(startIdx, sliceCount, 0.0, "SKIP(distance<${config.minSegmentDistanceM * 5}m)")
+            return null
+        }
 
         // routePoints 누적 곡률 계산
         var cumulative = 0.0
@@ -239,6 +265,8 @@ class RouteAnnotator(
         var sameSignCount = 0
         var totalCount = 0
         var sign = 0.0
+        var curveStartRpIdx = -1
+        var curveEndRpIdx = -1
 
         for (j in startRpIdx until endRpIdx - 1) {
             val a = routePoints[j]
@@ -254,6 +282,9 @@ class RouteAnnotator(
 
             if (abs(delta) < config.noiseAngleThresholdDeg) continue
 
+            if (curveStartRpIdx < 0) curveStartRpIdx = j
+            curveEndRpIdx = j + 2
+
             if (sign == 0.0) sign = if (delta >= 0) 1.0 else -1.0
             val isSameSign = (delta >= 0 && sign > 0) || (delta < 0 && sign < 0)
             cumulative += delta
@@ -262,15 +293,26 @@ class RouteAnnotator(
             if (isSameSign) sameSignCount++
         }
 
-        if (totalCount == 0) return null
+        if (totalCount == 0) {
+            if (isPair) logPairCurve(startIdx, sliceCount, cumulative, "REJECTED(totalCount==0)")
+            return null
+        }
         val ratio = sameSignCount.toDouble() / totalCount
-        if (ratio < config.curveSignConsistencyRatio) return null
-        if (abs(cumulative) < config.curveCumulativeThresholdDeg) return null
+        if (ratio < config.curveSignConsistencyRatio) {
+            if (isPair) logPairCurve(startIdx, sliceCount, cumulative, "REJECTED(consistency=$ratio)")
+            return null
+        }
+        if (abs(cumulative) < config.curveCumulativeThresholdDeg) {
+            if (isPair) logPairCurve(startIdx, sliceCount, cumulative, "REJECTED(cumulative<${config.curveCumulativeThresholdDeg}°)")
+            return null
+        }
+        if (isPair) logPairCurve(startIdx, sliceCount, cumulative, "PASS rpRange=$curveStartRpIdx→$curveEndRpIdx")
 
         val dir = if (cumulative >= 0) "RIGHT" else "LEFT"
         println("[Annotator RP-CURVE] startIdx=$startIdx endIdx=$endIdx " +
                 "startWp=(${startWp.lat},${startWp.lon}) endWp=(${endWp.lat},${endWp.lon}) " +
-                "cumulative=$cumulative peak=$peak direction=$dir")
+                "cumulative=$cumulative peak=$peak direction=$dir " +
+                "rpRange=$curveStartRpIdx→$curveEndRpIdx")
 
         // 보조 annotation 생성 (CURVE 로 분류)
         val partial = PathAnnotation(
@@ -283,8 +325,26 @@ class RouteAnnotator(
             peakAngle = peak,
             distanceFromStartM = cumulativeDistances.getOrElse(startIdx) { 0.0 },
             announceMessage = "",
+            startRoutePointIndex = curveStartRpIdx,
+            endRoutePointIndex = curveEndRpIdx,
         )
         return partial.copy(announceMessage = MessageBuilder.buildAnnotationAnnounce(partial))
+    }
+
+    private fun containsRange(
+        outer: PathAnnotation,
+        inner: PathAnnotation,
+    ): Boolean =
+        outer.startWaypointIndex <= inner.startWaypointIndex &&
+                outer.endWaypointIndex >= inner.endWaypointIndex
+
+    private fun logPairCurve(
+        index: Int,
+        sliceCount: Int,
+        cumulative: Double,
+        verdict: String,
+    ) {
+        println("[PairCurve] i=$index sliceCount=$sliceCount cumulative=$cumulative° verdict=$verdict")
     }
 
     private fun closestRoutePointIndex(
@@ -442,6 +502,10 @@ class RouteAnnotator(
         distanceFromStartM: Double,
     ): PathAnnotation? {
         val points = segment.points
+        println("[InternalCurve IN] seg(from=${segment.fromWaypointIndex},to=${segment.toWaypointIndex}) " +
+                "points.size=${points.size} " +
+                "first=(${points.firstOrNull()?.lat},${points.firstOrNull()?.lon}) " +
+                "last=(${points.lastOrNull()?.lat},${points.lastOrNull()?.lon})")
         if (points.size < 3) return null
 
         // 첫 sub-segment(인덱스 0,1,2) 의 부호를 기준. 짧은 구간이라도 일단 sign 만 얻고,
@@ -463,7 +527,10 @@ class RouteAnnotator(
 
             val d1 = distanceBetween(a.lat, a.lon, b.lat, b.lon).toDouble()
             val d2 = distanceBetween(b.lat, b.lon, c.lat, c.lon).toDouble()
-            if (d1 < config.minSegmentDistanceM || d2 < config.minSegmentDistanceM) continue
+            if (d1 < config.minSegmentDistanceM || d2 < config.minSegmentDistanceM) {
+                println("[InternalCurve STEP] i=$i d1=${d1}m d2=${d2}m SKIP(d<minSeg=${config.minSegmentDistanceM}m)")
+                continue
+            }
 
             val b1 = bearing(a.lat, a.lon, b.lat, b.lon).toDouble()
             val b2 = bearing(b.lat, b.lon, c.lat, c.lon).toDouble()
@@ -474,11 +541,31 @@ class RouteAnnotator(
             totalCount++
             val sameSign = (delta >= 0 && sign > 0) || (delta < 0 && sign < 0)
             if (sameSign) sameSignCount++
+            println("[InternalCurve STEP] i=$i d1=${d1}m d2=${d2}m PASS delta=${delta}° " +
+                    "sameSign=$sameSign cumulative=${cumulative}° totalCount=$totalCount")
         }
 
-        if (totalCount == 0) return null
+        if (totalCount == 0) {
+            println("[InternalCurve OUT] seg(from=${segment.fromWaypointIndex},to=${segment.toWaypointIndex}) " +
+                    "totalCount=0 cumulative=${cumulative}° " +
+                    "vs threshold cum>=${config.curveCumulativeThresholdDeg}° consistency>=${config.curveSignConsistencyRatio} " +
+                    "→ REJECTED(totalCount==0, all sub-segments filtered by minSeg)")
+            return null
+        }
 
         val consistencyRatio = sameSignCount.toDouble() / totalCount
+        val cumOk = abs(cumulative) >= config.curveCumulativeThresholdDeg
+        val ratioOk = consistencyRatio >= config.curveSignConsistencyRatio
+        val verdict = when {
+            !cumOk && !ratioOk -> "REJECTED(cumulative miss & consistency miss)"
+            !cumOk -> "REJECTED(cumulative miss)"
+            !ratioOk -> "REJECTED(consistency miss)"
+            else -> "PASS"
+        }
+        println("[InternalCurve OUT] seg(from=${segment.fromWaypointIndex},to=${segment.toWaypointIndex}) " +
+                "totalCount=$totalCount cumulative=${cumulative}° consistency=$consistencyRatio " +
+                "vs threshold cum>=${config.curveCumulativeThresholdDeg}° consistency>=${config.curveSignConsistencyRatio} " +
+                "→ $verdict")
         if (abs(cumulative) < config.curveCumulativeThresholdDeg) return null
         if (consistencyRatio < config.curveSignConsistencyRatio) return null
 
@@ -523,8 +610,12 @@ class RouteAnnotator(
         val original = annotated.waypoints
         if (original.isEmpty()) return emptyList()
 
-        // annotation 에서 curve 구간만 추출 (direction 도 같이 보존)
-        data class CurveSpan(val range: IntRange, val direction: String?)
+        // annotation 에서 curve 구간만 추출 (direction 과 routePoint subrange 도 같이 보존)
+        data class CurveSpan(
+            val waypointRange: IntRange,
+            val direction: String?,
+            val routePointRange: IntRange?,
+        )
         val curveSpans: List<CurveSpan> = annotated.annotations
             .filter {
                 it.type == PathSegmentType.CURVE
@@ -533,14 +624,38 @@ class RouteAnnotator(
             }
             .map {
                 val dir = if (it.direction == TurnDirection.NONE) null else it.direction.name
-                CurveSpan(it.startWaypointIndex..it.endWaypointIndex, dir)
+                val rpRange = if (it.startRoutePointIndex >= 0 &&
+                    it.endRoutePointIndex > it.startRoutePointIndex
+                ) {
+                    it.startRoutePointIndex..it.endRoutePointIndex
+                } else {
+                    null
+                }
+                CurveSpan(it.startWaypointIndex..it.endWaypointIndex, dir, rpRange)
             }
 
         val expanded = mutableListOf<Waypoint>()
         for (i in original.indices) {
             expanded.add(original[i])
             if (i + 1 < original.size) {
-                val curve = curveSpans.firstOrNull { i in it.range }
+                val explicitCurve = curveSpans.firstOrNull {
+                    it.routePointRange != null && i == it.waypointRange.first
+                }
+                if (explicitCurve?.routePointRange != null) {
+                    val virtuals = generateVirtualPointsAlongRoutePointRange(
+                        routePoints = routePoints,
+                        range = explicitCurve.routePointRange,
+                        spacingM = config.virtualWaypointSpacingM,
+                        curveDirection = explicitCurve.direction,
+                        roadType = original[i].roadType,
+                    )
+                    expanded.addAll(virtuals)
+                    continue
+                }
+
+                val curve = curveSpans.firstOrNull {
+                    it.routePointRange == null && i in it.waypointRange
+                }
                 if (curve != null) {
                     val virtuals = generateVirtualPointsAlongPolyline(
                         start = original[i],
@@ -553,7 +668,24 @@ class RouteAnnotator(
                 }
             }
         }
-        return expanded
+        val virtualBefore = expanded.count { it.isVirtual }
+        val seenVirtualSourceIndices = mutableSetOf<Int>()
+        val deduped = expanded.filter { waypoint ->
+            if (!waypoint.isVirtual || waypoint.sourceRoutePointIdx < 0) {
+                true
+            } else {
+                seenVirtualSourceIndices.add(waypoint.sourceRoutePointIdx)
+            }
+        }
+        val virtualAfter = deduped.count { it.isVirtual }
+        val duplicateAfter = deduped
+            .filter { it.isVirtual && it.sourceRoutePointIdx >= 0 }
+            .groupingBy { it.sourceRoutePointIdx }
+            .eachCount()
+            .count { it.value > 1 }
+        println("[VirtualDedup] before=$virtualBefore after=$virtualAfter " +
+                "removed=${virtualBefore - virtualAfter} duplicateSourceRPAfter=$duplicateAfter")
+        return deduped
     }
 
     /**
@@ -582,6 +714,25 @@ class RouteAnnotator(
 
         val startIdx = closestRoutePointIndex(routePoints, start.lat, start.lon)
         val endIdx = closestRoutePointIndex(routePoints, end.lat, end.lon)
+        return generateVirtualPointsAlongRoutePointRange(
+            routePoints = routePoints,
+            range = startIdx..endIdx,
+            spacingM = spacingM,
+            curveDirection = curveDirection,
+            roadType = start.roadType,
+        )
+    }
+
+    private fun generateVirtualPointsAlongRoutePointRange(
+        routePoints: List<LatLng>,
+        range: IntRange,
+        spacingM: Double,
+        curveDirection: String?,
+        roadType: Int,
+    ): List<Waypoint> {
+        if (routePoints.size < 2) return emptyList()
+        val startIdx = range.first.coerceIn(0, routePoints.lastIndex)
+        val endIdx = range.last.coerceIn(0, routePoints.lastIndex)
         if (endIdx <= startIdx) return emptyList()
 
         val virtuals = mutableListOf<Waypoint>()
@@ -608,7 +759,7 @@ class RouteAnnotator(
                         turnType = 0,
                         description = "virtual",
                         distance = 0,
-                        roadType = start.roadType,
+                        roadType = roadType,
                         pointType = "VIRTUAL_CURVE",
                         isVirtual = true,
                         sourceRoutePointIdx = i,
@@ -621,7 +772,7 @@ class RouteAnnotator(
             accumulated += segDist
         }
 
-        println("[VirtualGen] curve(${start.lat},${start.lon})→(${end.lat},${end.lon})")
+        println("[VirtualGen] curve(${routePoints[startIdx].lat},${routePoints[startIdx].lon})→(${routePoints[endIdx].lat},${routePoints[endIdx].lon})")
         println("[VirtualGen]   polyline range: $startIdx → $endIdx, generated ${virtuals.size}점")
         virtuals.forEachIndexed { idx, v ->
             println("[VirtualGen]   [$idx] (${v.lat}, ${v.lon}) sourceRP=${v.sourceRoutePointIdx} bearing=${v.bearingToNext}")
