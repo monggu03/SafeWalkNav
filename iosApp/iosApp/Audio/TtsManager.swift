@@ -59,7 +59,7 @@ final class TtsManager: NSObject, ObservableObject {
     /// 텍스트를 한국어 음성으로 출력
     /// - Parameters:
     ///   - text: 말할 내용
-    ///   - priority: .high이면 현재 출력 중인 음성을 끊고 즉시 재생
+    ///   - priority: 호환용 인자. 현재는 큐잉 정책 통일로 .high 도 끊지 않고 뒤에 붙는다.
     func speak(_ text: String, priority: Priority = .normal) {
         // 1. 빈 문자열은 무시
         guard !text.isEmpty else { return }
@@ -69,15 +69,12 @@ final class TtsManager: NSObject, ObservableObject {
             return
         }
 
-        // 3. high priority면 기존 음성 중단
-        if priority == .high && synthesizer.isSpeaking {
-            synthesizer.stopSpeaking(at: .immediate)
-        }
+        // 3. 큐잉 정책 — 현재 발화 중이면 native 큐 뒤에 붙는다.
+        //    AVSpeechSynthesizer 는 직전 utterance 의 didFinish 후에야 다음 utterance 를 시작하므로
+        //    멘트가 중간에 잘리지 않는다. priority 인자는 호환을 위해 남기되 끊지 않는다.
+        //    (자기 목소리가 마이크로 들어가는 걸 막아야 하는 STT 진입 등은 명시적 stop() 사용)
 
-        // 4. 현재 말하고 있으면 큐에 쌓이도록 그냥 둠 (normal priority)
-        // AVSpeechSynthesizer는 자동으로 큐잉 처리
-
-        // 5. 발화
+        // 4. 발화
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: "ko-KR")
         utterance.rate = 0.5            // 0.0(느림) ~ 1.0(빠름), 기본 0.5
@@ -86,7 +83,7 @@ final class TtsManager: NSObject, ObservableObject {
 
         synthesizer.speak(utterance)
 
-        // 6. 상태 갱신
+        // 5. 상태 갱신
         lastSpokenText = text
         lastSpeakTime = Date()
     }

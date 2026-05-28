@@ -425,6 +425,49 @@ class RouteAnnotatorTest {
         )
     }
 
+    @Test
+    fun `annotateHybrid stores routePoint subrange for pair curve`() {
+        // waypoint pair 전체는 길지만, 실제 곡률은 중간 일부 routePoints 에만 존재한다.
+        // 전체 slice 를 가상화하면 긴 직선부까지 sourceRoutePointIdx 가 생기므로,
+        // annotation 의 routePoint subrange 로 좁혀져야 한다.
+        val routePoints = makeRoutePoints(listOf(
+            90.0 to 20.0,
+            90.0 to 20.0,
+            90.0 to 20.0,
+            105.0 to 15.0,
+            120.0 to 15.0,
+            135.0 to 15.0,
+            135.0 to 20.0,
+            135.0 to 20.0,
+        ))
+        val waypoints = listOf(
+            Waypoint(routePoints.first().lat, routePoints.first().lon,
+                0, "start", 0, 0, "TURN"),
+            Waypoint(routePoints.last().lat, routePoints.last().lon,
+                0, "end", 0, 0, "TURN"),
+        )
+
+        val annotated = annotator.annotateHybrid(waypoints, routePoints)
+        val ann = annotated.annotations.firstOrNull()
+        assertTrue(ann != null, "expected routePoints curve annotation")
+        assertTrue(
+            ann.startRoutePointIndex > 0,
+            "curve subrange should start after initial straight section: $ann",
+        )
+        assertTrue(
+            ann.endRoutePointIndex < routePoints.lastIndex,
+            "curve subrange should end before final straight section: $ann",
+        )
+
+        val expanded = annotator.expandWithVirtualWaypoints(annotated, routePoints)
+        val virtuals = expanded.filter { it.isVirtual }
+        assertTrue(virtuals.isNotEmpty(), "expected virtual waypoints in narrowed curve subrange")
+        assertTrue(
+            virtuals.all { it.sourceRoutePointIdx in ann.startRoutePointIndex until ann.endRoutePointIndex },
+            "virtual sourceRP should stay inside ${ann.startRoutePointIndex} until ${ann.endRoutePointIndex}: $virtuals",
+        )
+    }
+
     // ─── 9. expandWithVirtualWaypoints ───
 
     /**
