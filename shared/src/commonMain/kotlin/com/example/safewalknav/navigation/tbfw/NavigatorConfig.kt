@@ -24,10 +24,10 @@ data class NavigatorConfig(
     val sharpThresholdDeg: Double = 70.0,
     val curveSignConsistencyRatio: Double = 0.75,
 
-    // 안내 시점 — 곡선/회전 시작 지점에서 얼마 전부터 미리 알릴지.
-    val announceDistanceCurveM: Double = 15.0,
-    val announceDistanceTurnM: Double = 20.0,
-    val announceDistanceSharpM: Double = 25.0,
+    // 안내 시점 — 곡선/회전 시작 직전에 짧게 알린다.
+    val announceDistanceCurveM: Double = 5.0,
+    val announceDistanceTurnM: Double = 5.0,
+    val announceDistanceSharpM: Double = 5.0,
 
     // ─── 초기 방향 안내 ───
     val initialHeadingToleranceDeg: Double = 15.0,

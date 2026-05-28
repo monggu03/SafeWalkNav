@@ -1612,8 +1612,8 @@ class NavigationManager(
             lastStraightGuidanceTime = currentTimeMillis()
         } else {
             // 사전 안내 거리는 "다음에 도달할 waypoint" 의 종류에 따라 결정.
-            //   CROSSWALK → 50m (횡단보도 — 충분한 준비 시간)
-            //   그 외 KEY → 30m (TURN/STAIRS/DESTINATION 등)
+            //   CROSSWALK → 30m (횡단보도 — 준비 시간 유지)
+            //   그 외 KEY → 5m (회전/계단/목적지 — 너무 이른 발화 방지)
             // 현재 segment 가 SAFE(순수 보행자도로) 면 사전 안내 자체 생략 — 목표 ① TTS 피로 감소.
             val currentSegment = route.segments.firstOrNull {
                 it.toWaypointIndex == currentWaypointIndex
@@ -1655,8 +1655,8 @@ class NavigationManager(
      * 횡단보도는 시각장애인에게 가장 중요한 위험 지점이므로 충분한 준비 시간 확보.
      */
     private fun preAnnounceDistance(waypoint: Waypoint): Float = when (waypoint.pointType) {
-        "CROSSWALK" -> 50f
-        else        -> 30f
+        "CROSSWALK" -> 30f
+        else        -> 5f
     }
 
     /**
@@ -1888,9 +1888,9 @@ class NavigationManager(
      * 과소평가해 안내가 너무 늦게 나오는 문제가 있었다.
      *
      * triggerDist 는 annotation type 에 따라 다름:
-     *   SLIGHT_CURVE, CURVE, INTERNAL_CURVE → announceDistanceCurveM (15m)
-     *   SLIGHT_TURN, TURN                   → announceDistanceTurnM  (20m)
-     *   SHARP_TURN                          → announceDistanceSharpM (25m)
+     *   SLIGHT_CURVE, CURVE, INTERNAL_CURVE → announceDistanceCurveM (5m)
+     *   SLIGHT_TURN, TURN                   → announceDistanceTurnM  (5m)
+     *   SHARP_TURN                          → announceDistanceSharpM (5m)
      */
     private fun announceUpcomingAnnotation(
         currentLat: Double, currentLon: Double, speed: Float,

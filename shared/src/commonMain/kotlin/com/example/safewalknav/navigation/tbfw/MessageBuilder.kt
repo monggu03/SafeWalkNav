@@ -25,17 +25,17 @@ object MessageBuilder {
         }
         return when (annotation.type) {
             PathSegmentType.SLIGHT_CURVE ->
-                "앞쪽 길이 ${dir}으로 완만하게 휘어집니다. 인도 방향을 따라 이동하세요."
+                "곧 ${dir}으로 완만히 휘어집니다."
             PathSegmentType.CURVE ->
-                "앞쪽 길이 ${dir}으로 휘어집니다. 인도 방향을 따라 이동하세요."
+                "곧 ${dir}으로 휘어집니다."
             PathSegmentType.SLIGHT_TURN ->
-                "잠시 후 ${dir}으로 살짝 꺾어집니다."
+                "곧 ${dir}으로 살짝 꺾습니다."
             PathSegmentType.TURN ->
-                "잠시 후 ${dir}으로 꺾어집니다."
+                "곧 ${dir}으로 꺾습니다."
             PathSegmentType.SHARP_TURN ->
-                "잠시 후 ${dir}으로 크게 꺾어집니다."
+                "곧 ${dir}으로 크게 꺾습니다."
             PathSegmentType.INTERNAL_CURVE ->
-                "앞쪽 도로가 ${dir}으로 휘어집니다. 인도를 따라가세요."
+                "곧 ${dir}으로 휘어집니다."
             PathSegmentType.STRAIGHT -> ""
         }
     }

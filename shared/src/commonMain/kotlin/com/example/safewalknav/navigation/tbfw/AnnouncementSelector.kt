@@ -67,9 +67,9 @@ private fun PathAnnotation.isTurnFamily(): Boolean = when (type) {
 /**
  * annotation type 별 사전 안내 trigger 거리 (m).
  *
- *   SHARP_TURN                    → announceDistanceSharpM   (기본 25m)
- *   TURN / SLIGHT_TURN            → announceDistanceTurnM    (기본 20m)
- *   그 외 (CURVE / INTERNAL_CURVE / SLIGHT_CURVE / STRAIGHT) → announceDistanceCurveM (기본 15m)
+ *   SHARP_TURN                    → announceDistanceSharpM   (기본 5m)
+ *   TURN / SLIGHT_TURN            → announceDistanceTurnM    (기본 5m)
+ *   그 외 (CURVE / INTERNAL_CURVE / SLIGHT_CURVE / STRAIGHT) → announceDistanceCurveM (기본 5m)
  *
  * STRAIGHT 의 trigger 값은 의미가 없지만 (selectAnnouncementCandidate 가 빈 메시지로 거르므로) 안전 기본값을 돌려준다.
  */
