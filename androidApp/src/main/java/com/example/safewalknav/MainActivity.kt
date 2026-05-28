@@ -1063,7 +1063,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun startLocationTracking() {
         trackingJob?.cancel()
         trackingJob = lifecycleScope.launch {
-            locationTracker.getLocationUpdates(2000L).collectLatest { location ->
+            locationTracker.getLocationUpdates(500L).collectLatest { location ->
                 // 극단적 오염(터널 출구 GPS 점프 등)만 사전 차단 — 세밀한 gating은 KalmanHeading에 위임
                 if (location.hasAccuracy() && location.accuracy > 50f) {
                     return@collectLatest

@@ -136,7 +136,7 @@ class KalmanHeading(
 
     private companion object {
         const val INITIAL_UNCERTAINTY = 10.0
-        const val PROCESS_NOISE = 0.5
+        const val PROCESS_NOISE = 0.125  // 500ms tick 기준 (2000ms 시절 0.5의 1/4 — tick당 불확실성 성장률 동일)
         const val MEAS_NOISE_GAIN = 3.0
         const val MEAS_NOISE_FLOOR = 5.0
         const val STATIONARY_NOISE = 999.0
