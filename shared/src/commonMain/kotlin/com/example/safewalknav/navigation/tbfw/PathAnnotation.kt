@@ -47,6 +47,8 @@ enum class TurnDirection { LEFT, RIGHT, NONE }
  * @param peakAngle 단일 구간 최대 각도 변화 (부호 있음)
  * @param distanceFromStartM 경로 시작점부터 annotation 시작까지의 누적 거리 (m)
  * @param announceMessage 발화할 안내 문장 (MessageBuilder.buildAnnotationAnnounce 결과)
+ * @param startRoutePointIndex routePoints 내부 곡선 시작 인덱스. 없으면 -1.
+ * @param endRoutePointIndex routePoints 내부 곡선 끝 인덱스. 없으면 -1.
  */
 data class PathAnnotation(
     val startWaypointIndex: Int,
@@ -57,6 +59,8 @@ data class PathAnnotation(
     val peakAngle: Double,
     val distanceFromStartM: Double,
     val announceMessage: String,
+    val startRoutePointIndex: Int = -1,
+    val endRoutePointIndex: Int = -1,
 ) {
     companion object {
         /** Swift interop 용 — Swift 는 default 인자를 인식 못 하므로 팩토리 제공. */
