@@ -25,9 +25,9 @@ class LocationTracker(private val context: Context) {
 
     /**
      * 실시간 위치 업데이트를 Flow로 제공
-     * @param intervalMs 업데이트 간격 (ms), 기본 2초
+     * @param intervalMs 업데이트 간격 (ms), 기본 500ms
      */
-    fun getLocationUpdates(intervalMs: Long = 2000L): Flow<Location> = callbackFlow {
+    fun getLocationUpdates(intervalMs: Long = 500L): Flow<Location> = callbackFlow {
         // 권한 체크
         if (ActivityCompat.checkSelfPermission(
                 context,
@@ -42,8 +42,9 @@ class LocationTracker(private val context: Context) {
             Priority.PRIORITY_HIGH_ACCURACY,
             intervalMs
         ).apply {
-            setMinUpdateDistanceMeters(1f)  // 최소 1m 이동 시에만 업데이트
-            setWaitForAccurateLocation(true)
+            setMinUpdateDistanceMeters(0f)
+            setWaitForAccurateLocation(false)
+            setMaxUpdateDelayMillis(intervalMs)
         }.build()
 
         val callback = object : LocationCallback() {
