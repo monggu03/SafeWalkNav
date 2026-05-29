@@ -66,7 +66,7 @@ androidApp/libs/
 # ===== ML 모델 백업 (대용량 — 앱 번들에는 androidApp/src/main/assets/ 만 포함) =====
 # best.pt (PyTorch 원본), best_float32.tflite, best_mlpackage.zip 등은 재학습/변환 가능하므로 git 제외
 /models/
-
+/ml_experiments/
 # ===== 외출 디버그 로그 (개인 위치정보 포함) =====
 # adb pull 로 받은 walk_*.log 파일들. 개인 GPS 좌표/시간 포함이라 git 절대 금지.
 /debug_logs/
