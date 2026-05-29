@@ -61,9 +61,31 @@ class NavigationManager(
     private var trafficSignals: List<TrafficSignalLocation> = emptyList(), //횡단보도 주변 신호등 데이터
 ) {
     private val walkingDiagnostic = WalkingDiagnostic()
-    // --- 여기 아래 코드를 추가해줘 ---
+    // 사용자 휴대폰 자력계+가속도 fusion azimuth (MainActivity 가 매 sensor tick 마다 push)
     private val _compassHeading = MutableStateFlow(0f)
-    private var currentTargetBearing: Float = 0f // 현재 목표 방위각 저장용 변수
+    val compassHeading: StateFlow<Float> = _compassHeading.asStateFlow()
+
+    // 현재 도로 진행 방향 (computeRouteBearingAhead 결과, 매 GPS tick 갱신).
+    // CompassView 가 이 값과 compassHeading 두 화살표를 한 원에 그려 방향 비교를 시각화.
+    private val _targetBearing = MutableStateFlow(0f)
+    val targetBearing: StateFlow<Float> = _targetBearing.asStateFlow()
+    private var currentTargetBearing: Float
+        get() = _targetBearing.value
+        set(value) { _targetBearing.value = value }
+
+    // 첫 GPS tick 으로 도로 방향이 최초로 갱신됐는지. false 면 updateCompassHeading 의
+    // lean 안내 분기를 건너뛴다 — 도로 방향 없는 상태에서 0f 와 비교하면
+    // 사용자 azimuth 와 항상 큰 차이가 나서 즉시 잘못된 발화가 일어남.
+    private var hasRoadBearing = false
+
+    // 최근 GPS 속도 (m/s) — 정지 상태에선 IMU heading 비교 의미 없으므로
+    // updateCompassHeading 에서 MIN_WALKING_SPEED_MPS 미만이면 walkingDiagnostic 건너뛴다.
+    private var latestSpeed: Float = 0f
+    private val MIN_WALKING_SPEED_MPS = 0.3f
+
+    // Settling — 첫 lean 발화 후 사용자가 보정해서 STRAIGHT 한 번 거치기 전엔
+    // 재누적 안 함. 발화 직후 과보정 → 반대 LEAN → 즉시 반대 발화 사이클 방지.
+    private var requireStraightBeforeNextLean: Boolean = false
 
     // 외부에서 관찰할 수 있는 StateFlow (필요시)
 
@@ -211,9 +233,28 @@ class NavigationManager(
         latestCompassHeading = azimuth
         _compassHeading.value = azimuth
 
-        if (_isNavigating.value) {
+        // 도로 방향 미갱신 상태에선 lean 비교 건너뛴다 — 첫 GPS tick 들어와서
+        // hasRoadBearing=true 가 될 때까지는 walkingDiagnostic 으로 가지 않음.
+        // 단 latestCompassHeading / _compassHeading 자체는 갱신해 CompassView 흰 화살표는 그대로 작동.
+        if (_isNavigating.value && hasRoadBearing) {
+            // 정지/거의 정지 상태에선 IMU heading 비교 자체가 의미 없음.
+            // 사용자가 멈춰 있으면 휴대폰을 두리번거리거나 자세 바꾸는 게 흔하고, 그게 진행 방향과 무관.
+            // 보행 중(speed >= 0.3 m/s) 일 때만 walkingDiagnostic 진입.
+            if (latestSpeed < MIN_WALKING_SPEED_MPS) return
+
             val targetBearing = currentTargetBearing
             val status = walkingDiagnostic.analyzeLeanStatus(azimuth, targetBearing)
+
+            // Settling — 직전 발화 후 사용자가 보정해서 STRAIGHT 한 번 거치기 전엔 재누적 안 함.
+            // 발화 직후 사용자가 과보정하면 반대 방향 LEAN 이 5초 후 또 발화되는 핑퐁 사이클 방지.
+            if (requireStraightBeforeNextLean) {
+                if (status == LeanStatus.STRAIGHT) {
+                    requireStraightBeforeNextLean = false
+                    leanAccumulator = 0
+                }
+                // STRAIGHT 든 LEAN 이든 일단 누적/발화는 안 함.
+                return
+            }
 
             // 5초 쿨타임 체크
             if (currentTime - lastGuidanceTime >= guidanceCooldownMs) {
@@ -236,6 +277,7 @@ class NavigationManager(
 
                     emitGuidance(message)
                     lastGuidanceTime = currentTime
+                    requireStraightBeforeNextLean = true   // 다음 발화는 STRAIGHT 한 번 거친 후
 
                     // 발화 후에는 다시 0부터 쌓이도록 초기화
                     leanAccumulator = 0
@@ -310,6 +352,12 @@ class NavigationManager(
         _isNavigating.value = true
         _arrivalState.value = ArrivalState.FAR
         _distanceToDestination.value = Float.MAX_VALUE
+        // 새 경로 시작 — 도로 방향은 첫 GPS tick 들어올 때까지 미정.
+        hasRoadBearing = false
+        currentTargetBearing = 0f
+        latestSpeed = 0f
+        requireStraightBeforeNextLean = false
+        leanAccumulator = 0
 
         // === 진단: TMap 응답이 횡단보도를 별도 waypoint 로 만들었는지 검증 ===
         // 시각장애인 안내의 핵심 — 만약 CROSSWALK 0 개면 TMap API 가 sparse 응답한 것.
@@ -572,6 +620,13 @@ class NavigationManager(
         _annotations.value = emptyList()
         _announcementLog.value = emptyList()
 
+        // 도로 방향 상태 리셋 — 다음 경로 시작 시 첫 GPS tick 까지 lean 안내 차단.
+        hasRoadBearing = false
+        currentTargetBearing = 0f
+        latestSpeed = 0f
+        requireStraightBeforeNextLean = false
+        leanAccumulator = 0
+
         // Heading Kalman 상태 리셋
         kalmanHeading.reset()
 
@@ -600,6 +655,11 @@ class NavigationManager(
         spatialBeeper.stop()
         _annotations.value = emptyList()
 
+        // 도로 방향 상태 리셋
+        hasRoadBearing = false
+        currentTargetBearing = 0f
+        leanAccumulator = 0
+
         // Heading Kalman 상태 리셋
         kalmanHeading.reset()
 
@@ -620,6 +680,9 @@ class NavigationManager(
         // GPS accuracy 는 GpsLocation 변환 시점에 fallback(10f) 적용되므로 여기선 그대로 사용.
         val accuracy = location.accuracy
         val userBearing = updateSmoothedHeading(rawBearing, speed, accuracy)
+
+        // updateCompassHeading 에서 정지 상태 판정용으로 노출 — sensor tick 이 GPS 보다 자주 들어옴.
+        latestSpeed = speed
 
         // CSV 로그 기록 (기존 로직에 영향 없음, writer 미초기화 시 no-op)
         writeLogRow(rawBearing, speed, accuracy, currentLat, currentLon)
@@ -660,6 +723,18 @@ class NavigationManager(
         // userBearing 를 함께 전달 — 가상 waypoint 통과 시점에 비프 안내에 사용.
         currentRoute?.let {
             syncWaypointIndexForwardOnly(it, currentLat, currentLon, userBearing)
+        }
+
+        // ──── 도로 진행 방향 갱신 — IMU heading 보정 안내용 (Step 1, 2026-05-29) ────
+        // computeRouteBearingAhead 는 폴리라인 기반이라 굽은 길에서도 자동으로 변한다.
+        // 사용자 휴대폰 자세(자력계+가속도 fusion azimuth) vs 이 도로 방향을 walkingDiagnostic 가
+        // 비교해 25° 이상 벌어지면 LEFT/RIGHT_LEAN 누적 → 3회 도달 시 음성 보정 안내.
+        // MainActivity.orientationListener → navigationManager.updateCompassHeading 경로가 이 값을
+        // 읽어가므로 매 GPS tick 마다 최신 도로 방향으로 갱신해 둔다.
+        val roadBearingAhead = computeRouteBearingAhead(15f)
+        if (roadBearingAhead != null) {
+            currentTargetBearing = roadBearingAhead
+            hasRoadBearing = true
         }
 
         //현재 추척중인 waypoint 정보
