@@ -510,6 +510,15 @@ struct StatusTab: View {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
+
+                    GroupBox("🧪 IMU 검증 로거") {
+                        NavigationLink {
+                            ValidationLoggerView()
+                        } label: {
+                            Label("검증 로거 열기", systemImage: "waveform.path.ecg")
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
                 .padding()
             }
