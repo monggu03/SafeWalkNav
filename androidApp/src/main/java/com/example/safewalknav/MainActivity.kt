@@ -49,6 +49,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.safewalknav.location.LocationTracker
+import com.example.safewalknav.compass.CompassView
 import com.example.safewalknav.ml.BoundingBoxOverlay
 import com.example.safewalknav.ml.TrafficLightAnalyzer
 import com.example.safewalknav.ml.TrafficLightDetection
@@ -148,6 +149,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var resultsContainer: LinearLayout
     private lateinit var arrivedContainer: ViewGroup
     private lateinit var tvArrivedName: TextView
+    private lateinit var compassContainer: ViewGroup
+    private lateinit var compassView: CompassView
+    private lateinit var tvCompassGuidance: TextView
+    private lateinit var tvCompassSubInfo: TextView
     private lateinit var debugContainer: ViewGroup
     private lateinit var tvDebugStatus: TextView
     private lateinit var tvDebugGuidance: TextView
@@ -185,6 +190,74 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var navLogFile: File? = null
     private val tsFormat = SimpleDateFormat("HH:mm:ss.SSS")
 
+    // ==================== 외출 정량 평가 지표 (실 테스트용, 2026-05-29) ====================
+    // startNavLog 시점에 모두 reset, closeNavLog 시점에 walk_log 끝에 SUMMARY 블록으로 출력.
+    // Capstone 발표 / 시각장애인 사용자 테스트 분석 / 슬라이드 정량 인용용.
+    private var metricStartMs: Long = 0L
+    private var metricLeanCount = 0              // "치우쳤습니다"
+    private var metricCurveCount = 0             // "휘어집니다" / "꺾습니다"
+    private var metricCrosswalkAnnounceCount = 0 // "횡단보도가 있습니다" / "휴대폰을 세로로"
+    private var metricMlRedCount = 0             // ANNOUNCED_RED 발화
+    private var metricMlGreenStaticCount = 0     // ANNOUNCED_STATIC_GREEN 발화
+    private var metricMlTransitionCount = 0      // ANNOUNCED_TRANSITION_R_TO_G 발화
+    private var metricMlGreenToRedCount = 0      // ANNOUNCED_TRANSITION_G_TO_R 발화
+    private var metricFlickerCount = 0           // FLICKER_DETECTED
+    private var metricRerouteCount = 0           // "경로를 다시 탐색" 류
+    private var metricZoneEnterCount = 0         // 횡단보도 zone 진입
+    private var metricDistanceM = 0.0            // 누적 GPS 거리 (m)
+    private var metricSpeedSum = 0.0             // 평균 속도용 누적
+    private var metricSpeedSamples = 0
+    private var metricLastLat = 0.0
+    private var metricLastLon = 0.0
+    private var metricHasLastGps = false
+
+    private fun resetMetrics() {
+        metricStartMs = System.currentTimeMillis()
+        metricLeanCount = 0
+        metricCurveCount = 0
+        metricCrosswalkAnnounceCount = 0
+        metricMlRedCount = 0
+        metricMlGreenStaticCount = 0
+        metricMlTransitionCount = 0
+        metricMlGreenToRedCount = 0
+        metricFlickerCount = 0
+        metricRerouteCount = 0
+        metricZoneEnterCount = 0
+        metricDistanceM = 0.0
+        metricSpeedSum = 0.0
+        metricSpeedSamples = 0
+        metricHasLastGps = false
+    }
+
+    private fun writeWalkSummary() {
+        val elapsedMs = System.currentTimeMillis() - metricStartMs
+        val elapsedMin = elapsedMs / 60_000
+        val elapsedSec = (elapsedMs % 60_000) / 1000
+        val avgSpeed = if (metricSpeedSamples > 0) metricSpeedSum / metricSpeedSamples else 0.0
+        val totalMlAnnounces = metricMlRedCount + metricMlGreenStaticCount +
+                metricMlTransitionCount + metricMlGreenToRedCount
+        val mlSuccessRate = if (metricZoneEnterCount > 0)
+            (totalMlAnnounces * 100) / metricZoneEnterCount else 0
+        appendNavLog("===================== WALK SUMMARY =====================")
+        appendNavLog("총 시간: ${elapsedMin}분 ${elapsedSec}초 (${elapsedMs / 1000}초)")
+        appendNavLog("이동 거리(GPS 누적): ${metricDistanceM.toInt()}m")
+        appendNavLog("평균 속도: ${"%.2f".format(avgSpeed)} m/s")
+        appendNavLog("--- 보행 안내 ---")
+        appendNavLog("lean 보정 발화: ${metricLeanCount}회")
+        appendNavLog("곡선/회전 안내: ${metricCurveCount}회")
+        appendNavLog("횡단보도 진입 안내: ${metricCrosswalkAnnounceCount}회")
+        appendNavLog("재라우팅: ${metricRerouteCount}회")
+        appendNavLog("--- ML 신호등 ---")
+        appendNavLog("횡단보도 zone 진입: ${metricZoneEnterCount}회")
+        appendNavLog("ML 안내 총합: ${totalMlAnnounces}회 (zone 대비 ${mlSuccessRate}%)")
+        appendNavLog("  · 빨간불(RED): ${metricMlRedCount}")
+        appendNavLog("  · 정적 초록(STATIC_GREEN): ${metricMlGreenStaticCount}")
+        appendNavLog("  · R→G 전환: ${metricMlTransitionCount}")
+        appendNavLog("  · G→R 전환: ${metricMlGreenToRedCount}")
+        appendNavLog("  · Flicker 감지: ${metricFlickerCount}")
+        appendNavLog("=======================================================")
+    }
+
     private fun startNavLog() {
         try {
             val dir = getExternalFilesDir("walk_logs")
@@ -195,6 +268,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 writeText("=== SafeWalkNav 외출 로그 시작 ${Date()} ===\n")
             }
             Log.d("SafeWalkNav", "Nav log file: ${navLogFile?.absolutePath}")
+            // 정량 지표 카운터 reset — 매 외출마다 깨끗한 상태로 시작.
+            resetMetrics()
         } catch (e: Exception) {
             Log.e("SafeWalkNav", "Nav log file create failed", e)
         }
@@ -208,6 +283,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun closeNavLog() {
+        if (navLogFile == null) return   // 이미 닫혔으면 no-op (idempotent)
+        // 종료 직전 SUMMARY 블록 자동 출력 — 실 사용자 테스트 후 walk_log 마지막에
+        // 그대로 슬라이드/리포트에 인용할 수 있는 정량 데이터.
+        writeWalkSummary()
         appendNavLog("=== 종료 ===")
         navLogFile = null
     }
@@ -241,7 +320,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     //   - 안정성 필터(3 frame) + 색 변경 시에만 TTS 정책이 살아있으므로 정적인 신호등 사진에 대고 TTS 가 폭주하진 않음
     //   - bbox 6% 미만 필터도 그대로 적용 — 진짜 작은 noise 는 그래도 걸러짐
     //   - DEBUG 빌드 전제 (release 빌드는 디버그 박스 안 보이므로 사실상 영향 적음)
-    private val TEST_MODE_FORCE_ML_ON = true
+    //
+    // 2026-05-29 — 화면 모드 전환(zone 진입 시 카메라 ON / 이탈 시 카메라 OFF) 도입 후
+    //   실 외출에서도 zone 밖에선 카메라 자체가 꺼져 있으므로 ML 동작 안 함.
+    //   따라서 false 로 두는 게 실 외출의 정확한 의도(zone 안에서만 ML).
+    //   시연/강의실 신호등 사진 인식 테스트 시에만 true 로 켜고, 외출 전 다시 false 로 되돌릴 것.
+    private val TEST_MODE_FORCE_ML_ON = false
 
     // 시연용 박스 표시 임계값 — 이 값 이상의 confidence 만 BoundingBoxOverlay 에 그린다.
     // DEBUG 빌드에서 진단 모드(threshold 0.3)로 추론 중이라 noise 박스도 검출 결과에 섞이는데,
@@ -420,8 +504,29 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     if (az < 0) az += 360f
                     val delta = ((az - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.15f * delta + 360f) % 360f
-                    // PR-FIX: NavigationManager.updateCompassHeading 가 주석 처리됨 — 호출 disabled
-                    // navigationManager.updateCompassHeading(currentAzimuth, now)
+                    // Step 1 (2026-05-29) — IMU heading 보정 안내 복원.
+                    // NavigationManager 가 currentTargetBearing 을 매 GPS tick 마다 도로 방향으로
+                    // 갱신하므로, 이 호출이 walkingDiagnostic.analyzeLeanStatus 를 거쳐 25° 이상
+                    // 벌어지면 LEFT/RIGHT_LEAN 누적 → 3회 도달 시 음성 보정 안내.
+                    // 휴대폰 자세 가정: 평평하게 눕혀서 들고 있음 (Step 2 에서 자세 토글 추가 예정).
+                    if (::navigationManager.isInitialized) {
+                        // Onboarding(SUMMARY/FLAT_POSE/ROTATING/CONFIRMING) 진행 중엔
+                        // 사용자가 의도적으로 회전하는 중이라 lean 안내가 잘못 발화됨 → 차단.
+                        // coordinator 가 null 이거나 DONE 일 때만 lean 분기 진입.
+                        val onboardingDone =
+                            onboardingCoordinator == null ||
+                                    onboardingCoordinator?.stage == AutoOnboardingCoordinator.Stage.DONE
+                        if (onboardingDone) {
+                            navigationManager.updateCompassHeading(currentAzimuth, now)
+                        }
+                        // 나침반 UI 갱신 — 사용자 방향(흰 화살표) + 도로 방향(초록 화살표) 동시 push.
+                        // 나침반 컨테이너가 GONE 일 때도 invalidate 비용은 미미.
+                        // 시각 표시는 onboarding 중에도 유지 (사용자 회전 확인용).
+                        if (::compassView.isInitialized) {
+                            val target = navigationManager.targetBearing.value
+                            compassView.setHeading(currentAzimuth, target)
+                        }
+                    }
                 }
 
             }
@@ -485,6 +590,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         resultsContainer = findViewById(R.id.resultsContainer)
         arrivedContainer = findViewById(R.id.arrivedContainer)
         tvArrivedName = findViewById(R.id.tvArrivedName)
+        compassContainer = findViewById(R.id.compassContainer)
+        compassView = findViewById(R.id.compassView)
+        tvCompassGuidance = findViewById(R.id.tvCompassGuidance)
+        tvCompassSubInfo = findViewById(R.id.tvCompassSubInfo)
         debugContainer = findViewById(R.id.debugContainer)
         tvDebugStatus = findViewById(R.id.tvDebugStatus)
         tvDebugGuidance = findViewById(R.id.tvDebugGuidance)
@@ -565,6 +674,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         toneGenerator?.release()
         releaseStereoTrack()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // walk_log 가 NAVIGATING 중에 열려있는 상태에서 OS 가 Activity 를 강제 종료할 수 있음.
+        // 그 경우에도 SUMMARY 블록이 walk_log 끝에 들어가도록 닫는다.
+        // navLogFile=null 이면 closeNavLog 가 no-op 이라 안전.
+        closeNavLog()
     }
 
     // ==================== 상태 전환 ====================
@@ -578,13 +691,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         appState = state
         Log.d("SafeWalkNav", "AppState: $previous -> $state")
 
-        // 컨테이너 visibility (FrameLayout 위에 쌓인 4개 컨테이너 중 하나만 보이게)
+        // 컨테이너 visibility (FrameLayout 위에 쌓인 5개 컨테이너 중 하나만 보이게)
         when (state) {
             AppState.IDLE, AppState.LISTENING, AppState.SEARCHING -> {
                 beforeContainer.visibility = View.VISIBLE
                 resultsContainer.visibility = View.GONE
                 arrivedContainer.visibility = View.GONE
                 cameraPreviewContainer.visibility = View.GONE
+                compassContainer.visibility = View.GONE
             }
 
             AppState.RESULTS -> {
@@ -592,13 +706,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 resultsContainer.visibility = View.VISIBLE
                 arrivedContainer.visibility = View.GONE
                 cameraPreviewContainer.visibility = View.GONE
+                compassContainer.visibility = View.GONE
             }
 
             AppState.NAVIGATING -> {
+                // 2026-05-29 — NAVIGATING 진입 시 기본은 나침반 모드.
+                // 횡단보도 zone(50m) 진입하면 카메라 모드로 전환 (applyNavigatingMode 가 처리).
                 beforeContainer.visibility = View.GONE
                 resultsContainer.visibility = View.GONE
                 arrivedContainer.visibility = View.GONE
-                cameraPreviewContainer.visibility = View.VISIBLE
+                applyNavigatingMode(inCrosswalkZone)
             }
 
             AppState.ARRIVED -> {
@@ -606,6 +723,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 resultsContainer.visibility = View.GONE
                 arrivedContainer.visibility = View.VISIBLE
                 cameraPreviewContainer.visibility = View.GONE
+                compassContainer.visibility = View.GONE
             }
         }
 
@@ -614,10 +732,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             resultsContainer.removeAllViews()
         }
 
-        // 카메라 lifecycle — NAVIGATING 진입/이탈 시 토글
-        if (state == AppState.NAVIGATING && previous != AppState.NAVIGATING) {
-            startCamera()
-        } else if (previous == AppState.NAVIGATING && state != AppState.NAVIGATING) {
+        // 카메라 lifecycle — 이제 NAVIGATING 자체가 아니라 inCrosswalkZone 변화에 따라 토글.
+        // NAVIGATING 진입 시점엔 zone=false 가정이라 나침반만 표시, 카메라는 zone 진입 시 startCamera().
+        // NAVIGATING 이탈 시 카메라가 켜져 있으면 정리.
+        if (previous == AppState.NAVIGATING && state != AppState.NAVIGATING) {
             stopCamera()
         }
 
@@ -639,6 +757,28 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         updateDebugInfo()
+    }
+
+    /**
+     * NAVIGATING 상태일 때 inZone 에 따라 카메라/나침반 화면을 토글한다.
+     *
+     * inZone=false → 나침반 모드 (compassContainer VISIBLE, 카메라 OFF)
+     * inZone=true  → 카메라 모드 (cameraPreviewContainer VISIBLE, startCamera 호출)
+     *
+     * NAVIGATING 진입 시 showState 가 inCrosswalkZone 값으로 1회 호출 (초기 false 가정).
+     * 이후 inCrosswalkZone StateFlow collect 가 transition 마다 다시 호출.
+     */
+    private fun applyNavigatingMode(inZone: Boolean) {
+        if (appState != AppState.NAVIGATING) return
+        if (inZone) {
+            compassContainer.visibility = View.GONE
+            cameraPreviewContainer.visibility = View.VISIBLE
+            startCamera()
+        } else {
+            cameraPreviewContainer.visibility = View.GONE
+            compassContainer.visibility = View.VISIBLE
+            stopCamera()
+        }
     }
 
     private fun updateDebugInfo() {
@@ -1136,13 +1276,37 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     val gpsBearing = location.bearing
                     val delta = ((gpsBearing - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.3f * delta + 360f) % 360f
-                    // PR-FIX: NavigationManager.updateCompassHeading 가 주석 처리됨 — 호출 disabled
-                    // if (::navigationManager.isInitialized) {
-                    //     navigationManager.updateCompassHeading(currentAzimuth, System.currentTimeMillis())
-                    // }
+                    // Step 1 (2026-05-29) — 자력계 없는 디바이스에서 GPS bearing 으로 azimuth 추정 후
+                    // 같은 lean 보정 채널로 전달. magnetometerAvailable=true 인 경우는
+                    // orientationListener 가 매 sensor tick 마다 별도로 호출하고 있으므로 중복 없음.
+                    // Onboarding 진행 중엔 차단 (orientationListener 와 동일 가드).
+                    if (::navigationManager.isInitialized) {
+                        val onboardingDone =
+                            onboardingCoordinator == null ||
+                                    onboardingCoordinator?.stage == AutoOnboardingCoordinator.Stage.DONE
+                        if (onboardingDone) {
+                            navigationManager.updateCompassHeading(currentAzimuth, System.currentTimeMillis())
+                        }
+                    }
                 }
 
                 navigationManager.updateLocation(location.toGpsLocation())
+
+                // 정량 지표 — 매 GPS tick 마다 거리 누적 + 속도 평균 샘플 추가.
+                if (metricHasLastGps) {
+                    val seg = LocationTracker.distanceBetween(
+                        metricLastLat, metricLastLon, location.latitude, location.longitude
+                    )
+                    // 30m 넘는 점프는 GPS jitter 로 보고 제외 (실제 보행 속도 한계 vs 2초 tick).
+                    if (seg < 30f) metricDistanceM += seg.toDouble()
+                }
+                metricLastLat = location.latitude
+                metricLastLon = location.longitude
+                metricHasLastGps = true
+                if (location.hasSpeed()) {
+                    metricSpeedSum += location.speed
+                    metricSpeedSamples++
+                }
 
                 // 디버그 박스 갱신 (DEBUG 빌드만) + 파일 로그 (전체 빌드)
                 val dist = LocationTracker.distanceBetween(
@@ -1391,6 +1555,21 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     Log.d("SafeWalkNav", "Guidance: $message")
                     appendNavLog("Guidance: $message")
 
+                    // 정량 지표 — guidanceMessage 패턴으로 안내 종류 카운트.
+                    when {
+                        message.contains("치우쳤습니다") -> metricLeanCount++
+                        message.contains("휘어집니다") || message.contains("꺾습니다") -> metricCurveCount++
+                        message.contains("횡단보도가 있습니다") ||
+                                message.contains("휴대폰을 세로로") -> metricCrosswalkAnnounceCount++
+                        message.contains("재탐색") ||
+                                message.contains("다시 탐색") -> metricRerouteCount++
+                    }
+
+                    // 나침반 화면의 메인 텍스트도 같이 갱신 — 사용자가 시각으로도 확인 가능.
+                    if (::tvCompassGuidance.isInitialized) {
+                        tvCompassGuidance.text = message
+                    }
+
                     if (BuildConfig.DEBUG) {
                         tvDebugGuidance.text = "guidance=$message"
                     }
@@ -1422,15 +1601,47 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     lastValidatedAt = 0L
                     lastTransitionAt = 0L
                     flickerLockoutUntil = 0L
+                    metricZoneEnterCount++   // 정량 지표 — zone 진입 카운트
                     Log.d("SafeWalkNav", "Crosswalk zone ENTER | TrafficLight AI=ON")
                     appendNavLog("Crosswalk zone ENTER | TrafficLight AI=ON")
                     updateAiDebugResult("AI ON | waiting frame")
+                    // 화면 모드 전환 — 나침반 → 카메라 (NAVIGATING 중일 때만)
+                    if (appState == AppState.NAVIGATING) {
+                        speakTTS("횡단보도가 가까워졌습니다. 휴대폰을 세로로 들어주세요.")
+                        applyNavigatingMode(inZone = true)
+                    }
                 } else if (!inZone && wasIn) {
                     Log.d("SafeWalkNav", "Crosswalk zone EXIT | TrafficLight AI=OFF")
                     appendNavLog("Crosswalk zone EXIT | TrafficLight AI=OFF")
                     updateAiDebugResult("AI OFF")
+                    // 화면 모드 전환 — 카메라 → 나침반 (NAVIGATING 중일 때만)
+                    if (appState == AppState.NAVIGATING) {
+                        speakTTS("횡단보도를 지나갔습니다. 휴대폰을 평평하게 들고 계속 진행하세요.")
+                        applyNavigatingMode(inZone = false)
+                    }
                 }
                 updateDebugInfo()
+            }
+        }
+
+        // 도로 진행 방향 (targetBearing) StateFlow — 2초 GPS tick 주기로 갱신됨.
+        // 나침반 화면의 초록 화살표가 이 값을 따라가게 한다.
+        // (사용자 방향 흰 화살표는 orientationListener 가 더 자주 갱신하므로
+        //  여기선 도로 방향이 바뀔 때만 추가 invalidate.)
+        lifecycleScope.launch {
+            navigationManager.targetBearing.collectLatest { roadBearing ->
+                if (::compassView.isInitialized) {
+                    compassView.setHeading(currentAzimuth, roadBearing)
+                }
+            }
+        }
+
+        // 목적지까지 남은 거리 — 나침반 화면 하단 보조 정보로 표시.
+        lifecycleScope.launch {
+            navigationManager.distanceToDestination.collectLatest { dist ->
+                if (!::tvCompassSubInfo.isInitialized) return@collectLatest
+                tvCompassSubInfo.text = if (dist == Float.MAX_VALUE) ""
+                else "목적지까지 ${dist.toInt()}m"
             }
         }
 
@@ -1830,6 +2041,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             speakTTS(flickerMsg)
             vibrateWarning()                    // 강한 staccato 진동
             flickerLockoutUntil = now + FLICKER_LOCKOUT_MS
+            metricFlickerCount++                // 정량 지표
 
             // state 정리 — 락아웃 동안 streak / candidate 갱신 안 되게.
             // lastConfirmedColor 는 일단 -1 로 — 락아웃 종료 후 보수적 재시작.
@@ -1869,12 +2081,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 message = "빨간불입니다. 정지하세요."
                 withVibrate = previousColor == 1   // 초록→빨강 전환 시 진동 추가
                 action = if (previousColor == 1) "ANNOUNCED_TRANSITION_G_TO_R" else "ANNOUNCED_RED"
+                if (previousColor == 1) metricMlGreenToRedCount++ else metricMlRedCount++
             }
             confirmedColor == 1 && previousColor == 0 -> {
                 // 빨강 → 초록 직접 전환 인식! 유일하게 "건너세요" 안내하는 케이스.
                 message = "방금 초록불로 바뀌었습니다. 안전을 확인하고 건너세요."
                 withVibrate = true   // 강한 주의 환기
                 action = "ANNOUNCED_TRANSITION_R_TO_G"
+                metricMlTransitionCount++
             }
             confirmedColor == 1 -> {
                 // 정적 초록불 (첫 인식 / timeout 후 재인식 — 전환 못 봄).
@@ -1882,6 +2096,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 message = "초록불입니다. 일단 멈춰서 다음 신호를 기다리세요."
                 withVibrate = false
                 action = "ANNOUNCED_STATIC_GREEN"
+                metricMlGreenStaticCount++
             }
             else -> return
         }
