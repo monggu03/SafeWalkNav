@@ -193,11 +193,22 @@ class TrafficLightDetector(context: Context) {
             if (maxScore < threshold) continue
             rawAboveThreshold++
 
-            // bbox 정규화 (INPUT_SIZE → 0.0~1.0)
-            val cx = output[0][i] / INPUT_SIZE
-            val cy = output[1][i] / INPUT_SIZE
-            val w = output[2][i] / INPUT_SIZE
-            val h = output[3][i] / INPUT_SIZE
+            // bbox 스케일 자동 감지 (FIX 2026-05-29):
+            //   - Ultralytics 표준 TFLite export: bbox 가 입력 픽셀 좌표 (0~INPUT_SIZE) → /INPUT_SIZE 로 정규화
+            //   - 일부 export 옵션 / 우리 P2 hybrid 모델: 이미 0~1 정규화 → 그대로 사용
+            //   원래 코드는 무조건 /INPUT_SIZE 했는데 새 모델은 이미 0~1 이라 마이크로 사이즈 (0.0008…)
+            //   가 되어 모든 bbox 가 box=0x0% 로 표시되고 6% 필터에 다 떨어지는 버그가 있었음.
+            //   현재 anchor 의 raw 값 중 최댓값이 1.5 넘으면 픽셀 단위로 간주 (0~640 스케일은 최대 640).
+            val rawCx = output[0][i]
+            val rawCy = output[1][i]
+            val rawW = output[2][i]
+            val rawH = output[3][i]
+            val maxRaw = maxOf(maxOf(rawCx, rawCy), maxOf(rawW, rawH))
+            val scale = if (maxRaw > 1.5f) 1f / INPUT_SIZE else 1f
+            val cx = rawCx * scale
+            val cy = rawCy * scale
+            val w = rawW * scale
+            val h = rawH * scale
 
             candidates += TrafficLightDetection(
                 classId = maxClass,

@@ -49,6 +49,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.safewalknav.location.LocationTracker
+import com.example.safewalknav.ml.BoundingBoxOverlay
 import com.example.safewalknav.ml.TrafficLightAnalyzer
 import com.example.safewalknav.ml.TrafficLightDetection
 import com.example.safewalknav.ml.TrafficLightDetector
@@ -223,11 +224,72 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var trafficLightDetector: TrafficLightDetector? = null
     private var analysisExecutor: ExecutorService? = null
 
-    // 안내 디바운스 — 같은 색이 연속 검출돼도 SIGNAL_SPEAK_INTERVAL_MS 마다 1번만 안내.
-    // 색이 변하면 (예: 빨강 → 초록) 즉시 안내.
-    private var lastSpokenSignalColor: Int = -1   // -1 = 없음, 0 = red, 1 = green
-    private var lastSpokenSignalAt: Long = 0L
-    private val SIGNAL_SPEAK_INTERVAL_MS = 5000L
+    // ==================== 발표/시연용 바운딩박스 오버레이 (DEBUG only) ====================
+    // PreviewView 위에 한 겹 add 해서 모델이 검출한 신호등 위치를 빨강/초록 사각형으로 표시.
+    // Release 빌드에서는 add 자체를 안 한다 — 실 사용자(시각장애인)에겐 의미 없으므로.
+    private var boundingBoxOverlay: BoundingBoxOverlay? = null
+
+    // ⚠️ 시연/테스트용 토글 — true 면 횡단보도 zone gate 를 우회해서 ML 추론 + 안내가 항상 작동.
+    // 강의실/카페에서 신호등 사진/영상 비추면서 인식 정확도/박스 시각화/TTS 발화를 종합 점검할 때 사용.
+    //
+    // ❗ 외출 운영 빌드 전에 반드시 false 로 되돌릴 것. true 인 채로 외출하면:
+    //   - GPS 없는 실내/지하/터널에서도 카메라 영상에 신호등 비슷한 게 잡히면 TTS 발화 (혼란)
+    //   - 배터리/CPU 사용량 ↑ (333ms 마다 매 프레임 추론)
+    //   - walk_*.log 에 TL_DIAG 가 zone 무관하게 폭증
+    //
+    // 안전망:
+    //   - 안정성 필터(3 frame) + 색 변경 시에만 TTS 정책이 살아있으므로 정적인 신호등 사진에 대고 TTS 가 폭주하진 않음
+    //   - bbox 6% 미만 필터도 그대로 적용 — 진짜 작은 noise 는 그래도 걸러짐
+    //   - DEBUG 빌드 전제 (release 빌드는 디버그 박스 안 보이므로 사실상 영향 적음)
+    private val TEST_MODE_FORCE_ML_ON = true
+
+    // 시연용 박스 표시 임계값 — 이 값 이상의 confidence 만 BoundingBoxOverlay 에 그린다.
+    // DEBUG 빌드에서 진단 모드(threshold 0.3)로 추론 중이라 noise 박스도 검출 결과에 섞이는데,
+    // 그걸 화면에 다 그리면 신호등 외 빨간 점/표지판/간판 같은 false positive 도 박스로 보임.
+    // 0.6 정도면 진짜 신호등만 시연 화면에 깔끔하게 보임. 진단 로그(TL_DIAG)는 그대로 모든 추론 기록.
+    // 시연 환경에 따라 0.5 (관대) ~ 0.7 (엄격) 사이로 조정 가능.
+    private val OVERLAY_MIN_CONFIDENCE = 0.6f
+
+    // 신호등 안전 정책 state machine — PR-SAFETY (2026-05-29)
+    //
+    // 정책:
+    //   1. 빨간불 → "정지하세요" (안전 critical)
+    //   2. 정적 초록불 (전환 못 본 상태) → "일단 멈춰서 다음 신호를 기다리세요"
+    //      ❗ "건너세요" 절대 안 함. 사용자가 신호 시작점 타이밍 모르므로 다음 주기 대기.
+    //   3. 빨강→초록 전환 (직접 인식) → "방금 초록불로 바뀌었습니다. 안전을 확인하고 건너세요"
+    //      ✅ 유일하게 건너기를 안내하는 케이스. 강한 진동 동반.
+    //
+    // 안정성 필터:
+    //   - 3 frame 연속 같은 색이 validated 검출돼야 confirm (오분류 흔들림 방지, 약 1초 지연)
+    //
+    // 발화 빈도:
+    //   - 색 변경 시에만 TTS (반복 X)
+    //   - HEARTBEAT_INTERVAL_MS 마다 짧은 톤 — 시스템 살아있음 신호
+    //
+    // 검출 타임아웃:
+    //   - DETECTION_TIMEOUT_MS 이상 validated 검출 없으면 state reset.
+    //     이유: 사용자가 잠시 카메라 돌렸다가 다시 신호등 향하면 그 사이 신호가 바뀌었을 수 있음 →
+    //     이전 lastConfirmedColor 를 신뢰하지 않음.
+    private var currentColorCandidate: Int = -1   // 현재 안정성 필터에서 추적 중인 색
+    private var colorStreak: Int = 0              // 연속 검출 카운트
+    private var lastConfirmedColor: Int = -1      // 3-frame 확정 통과한 마지막 색
+    private var lastHeartbeatAt: Long = 0L        // 마지막 heartbeat 톤 시각
+    private var lastValidatedAt: Long = 0L        // 마지막 validated 검출 시각 (timeout 판정용)
+    private val STABILITY_FRAMES = 3
+    private val HEARTBEAT_INTERVAL_MS = 15_000L
+    private val DETECTION_TIMEOUT_MS = 10_000L
+
+    // Flicker(점멸) 감지 — 한국 보행 신호 종료 직전 약 5~15초간 깜빡이는 phase 대응.
+    // 깜빡임 중에 "방금 초록불로 바뀌었습니다, 건너세요" 발화는 안전상 매우 위험 — 사용자가 건너기
+    // 시작하면 곧 빨강으로 바뀌어 위험. 그래서 transition 직후 또 transition 이 빠르게 일어나면
+    // "신호 깜빡입니다, 멈추세요" 로 전환하고 일정 시간 안내 락아웃.
+    private var lastTransitionAt: Long = 0L
+    private var flickerLockoutUntil: Long = 0L
+    private val MIN_PHASE_DURATION_MS = 4_000L   // 정상 신호 phase 는 최소 이 시간 지속
+    // 한국 보행 신호 정상 phase 는 보통 5초 이상이므로 4초 임계가 안전.
+    // 2026-05-29 walk_20260529_125126.log 분석에서 gap 3.1~3.08초 transition 이
+    // 정상으로 처리되어 점멸 phase 일부를 놓치는 케이스 발견 → 3000 → 4000 으로 상향.
+    private val FLICKER_LOCKOUT_MS = 6_000L      // flicker 감지 후 추가 안내 차단 기간
 
     // 횡단보도 zone 게이팅 — NavigationManager.isInCrosswalkZone (TMap waypoint 기반) 정확히 추적.
     // GPS update 마다 NavigationManager 가 isOnCrosswalkSegment() 로 판정 → state flow emit.
@@ -1351,9 +1413,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 val wasIn = inCrosswalkZone
                 inCrosswalkZone = inZone
                 if (inZone && !wasIn) {
-                    // 진입 시점 — 디바운스 리셋해서 첫 검출 즉시 안내
-                    lastSpokenSignalColor = -1
-                    lastSpokenSignalAt = 0L
+                    // 진입 시점 — 신호등 안전 state machine 리셋해서 깨끗한 상태로 시작.
+                    // 안정성 streak, 마지막 confirmed 색, heartbeat 시각, flicker 락아웃 모두 초기화.
+                    currentColorCandidate = -1
+                    colorStreak = 0
+                    lastConfirmedColor = -1
+                    lastHeartbeatAt = 0L
+                    lastValidatedAt = 0L
+                    lastTransitionAt = 0L
+                    flickerLockoutUntil = 0L
                     Log.d("SafeWalkNav", "Crosswalk zone ENTER | TrafficLight AI=ON")
                     appendNavLog("Crosswalk zone ENTER | TrafficLight AI=ON")
                     updateAiDebugResult("AI ON | waiting frame")
@@ -1460,6 +1528,21 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         cameraPreviewContainer.removeAllViews()
         cameraPreviewContainer.addView(pv)
 
+        // 발표/시연용 바운딩박스 오버레이 — DEBUG 빌드에서만 PreviewView 위에 한 겹 add.
+        // onTrafficLightDetected 가 setDetections() 로 검출 결과를 푸시 → 카메라 영상 위에 빨강/초록 박스.
+        // Release 빌드에서는 add 안 함 — 실 사용자(시각장애인)에게 의미 없으므로 GPU/메모리 절약.
+        if (BuildConfig.DEBUG) {
+            val overlay = BoundingBoxOverlay(this).apply {
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            }
+            cameraPreviewContainer.addView(overlay)
+            boundingBoxOverlay = overlay
+            appendNavLog("BoundingBoxOverlay attached (DEBUG 빌드 시연용)")
+        }
+
         // 검출기/executor 초기화 (재사용)
         if (trafficLightDetector == null) {
             try {
@@ -1501,7 +1584,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         executor,
                         TrafficLightAnalyzer(
                             detector = detector,
-                            isActive = { inCrosswalkZone },   // 횡단보도 zone 밖 → ML 추론 스킵
+                            // 횡단보도 zone 밖 → ML 추론 스킵. 단 TEST_MODE_FORCE_ML_ON=true 면 항상 추론.
+                            isActive = { val bool = inCrosswalkZone || TEST_MODE_FORCE_ML_ON
+                                bool
+                            },
                         ) { detections ->
                             runOnUiThread { onTrafficLightDetected(detections) }
                         }
@@ -1525,19 +1611,41 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     /**
-     * 신호등 검출 결과 처리.
-     * - 검출 0건: 안내 안 하지만 진단 통계는 walk 로그에 기록 (zone 안일 때만).
-     * - 검출 ≥1건: 가장 큰 박스 (가장 가까운 신호등) 채택 → 디바운스 후 TTS
-     *   · 같은 색 연속: SIGNAL_SPEAK_INTERVAL_MS 마다 한 번만 안내
-     *   · 색 변경 (빨강 ↔ 초록): 즉시 안내
+     * 신호등 검출 결과 처리 (PR-SAFETY 2026-05-29 — state machine 기반).
      *
-     * 진단: zone 안에서 매 inference 의 단계별 통과 개수를 walk_*.log 에 기록한다.
-     *   TL_DIAG zone=true|false | raw=N | aboveTh=K | validated=M | nearest=label/conf/box |
-     *           peakConf=X.XX (R=Y.YY G=Z.ZZ) | inferenceMs=W | action=...
-     * 이 줄만 보면 어디서 막혔는지 즉시 식별 가능.
+     * 단계:
+     *   (0) raw detection 들 → BoundingBoxOverlay (시연용, OVERLAY_MIN_CONFIDENCE 필터)
+     *   (1) detections.isEmpty / zone gate
+     *   (2) 6% bbox 필터 → validated
+     *   (3) Detection 타임아웃 체크 → state reset 여부
+     *   (4) 안정성 필터: 3 frame 연속 같은 색이어야 confirm
+     *   (5) confirmed 색 처리:
+     *       · 이전 confirmed 와 같음 → TTS 없음, HEARTBEAT_INTERVAL_MS 마다 짧은 톤만
+     *       · 다름 → 색 변경 또는 첫 confirm → TTS 발화
+     *           - 빨강: "빨간불입니다. 정지하세요."
+     *           - 초록 (이전이 빨강): "방금 초록불로 바뀌었습니다. 안전을 확인하고 건너세요." ← 유일 "건너세요"
+     *           - 초록 (그 외): "초록불입니다. 일단 멈춰서 다음 신호를 기다리세요."
+     *
+     * 진단: 매 inference 의 단계별 통과 / 차단 사유를 walk_*.log 에 기록.
+     *   TL_DIAG zone=… raw=N aboveTh=K peakConf=X.XX (R=Y G=Z) th=… inferMs=…
+     *   TL_DIAG  └─ <REASON> …
+     *     where REASON ∈ {ALL_TOO_SMALL, STATE_RESET, STABILITY_PENDING, SAME_COLOR_QUIET,
+     *                     HEARTBEAT, ANNOUNCED_RED, ANNOUNCED_STATIC_GREEN,
+     *                     ANNOUNCED_TRANSITION_R_TO_G, ANNOUNCED_TRANSITION_G_TO_R}
      */
     private fun onTrafficLightDetected(detections: List<TrafficLightDetection>) {
         val stats = trafficLightDetector?.lastStats
+
+        // ──── 발표/시연용 바운딩박스 오버레이 갱신 ────
+        // OVERLAY_MIN_CONFIDENCE 이상의 검출만 그린다 — 진단 임계(0.3)에 잡힌 noise 박스
+        // (빨간 점/표지판/간판 등) 가 화면을 덮는 걸 방지. 진단 로그(TL_DIAG)는 그대로 모두 기록.
+        // 6% bbox 필터 / cooldown 같은 TTS 후처리는 의도적으로 적용 안 함 — "모델이 신뢰도 높게
+        // 잡은 객체는 무엇인가" 를 시연에 정직하게 보여주기 위함.
+        // empty 리스트가 들어가도 setDetections 가 알아서 박스를 지운다.
+        // boundingBoxOverlay 자체가 DEBUG 빌드에서만 attach 되므로 release 빌드에서는 자동으로 no-op.
+        boundingBoxOverlay?.setDetections(
+            detections.filter { it.confidence >= OVERLAY_MIN_CONFIDENCE }
+        )
 
         // ──── 진단 통계 헤더 (zone 진입 후 매 inference 기록) ────
         // zone=false 일 땐 spam 방지 위해 기록 안 함. zone=true 인데 detections=0 면 모델이 신호등을
@@ -1567,7 +1675,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         updateAiDebugResult("$aiResultLine | action=CHECKING")
 
         // zone 안에서만 파일 로깅 — 평소 보행 중엔 spam 방지.
-        if (inCrosswalkZone) {
+        // 테스트 모드면 zone 무관하게 로깅 (인식 정확도 검증을 위해 모든 추론 라인 필요).
+        if (inCrosswalkZone || TEST_MODE_FORCE_ML_ON) {
             appendNavLog(statsLine)
         }
 
@@ -1586,7 +1695,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // 0차 필터: 횡단보도 zone 진입했을 때만 안내.
         // NavigationManager.isInCrosswalkZone (TMap waypoint pointType=CROSSWALK + GPS 위치 판정) 기반.
         // ML 추론은 백그라운드에서 계속 돌지만 zone 밖에선 결과 무시.
-        if (!inCrosswalkZone) return
+        // 단 TEST_MODE_FORCE_ML_ON=true 면 zone 무관하게 TTS 발화 + 디바운스/박스필터 진행 (인식 정확도 테스트용).
+        if (!inCrosswalkZone && !TEST_MODE_FORCE_ML_ON) return
 
         // 1차 필터: 너무 작은 박스 제외 (멀리 있는 noise / 빨간 점 noise 차단)
         // 신호등은 보통 화면 너비/높이의 6% 이상 차지. 그보다 작으면 noise 가능성 높음.
@@ -1613,51 +1723,197 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         val nearest = validated.maxByOrNull { it.bbox.area } ?: return
+        val detectedColor = nearest.classId
 
         val now = System.currentTimeMillis()
-        val sameColor = nearest.classId == lastSpokenSignalColor
-        val withinCooldown = now - lastSpokenSignalAt < SIGNAL_SPEAK_INTERVAL_MS
-        if (sameColor && withinCooldown) {
-            // 디바운스 중 — 안내 안 함, 진단 라인에 reason 추가 + 디버그 UI 만 갱신
+
+        // ──── (a0) Flicker 락아웃 — 깜빡임 감지된 이후 안내 자체를 차단 ────
+        // 한국 보행 신호 종료 직전 점멸 phase 에서 transition 이 1~3초 간격으로 반복되는 패턴을
+        // 잡아 "건너세요" 류 발화를 막는다. lockout 동안 state 도 동결 (streak 갱신 X).
+        if (flickerLockoutUntil > 0L && now < flickerLockoutUntil) {
+            val remainingMs = flickerLockoutUntil - now
             appendNavLog(
-                "TL_DIAG  └─ COOLDOWN nearest=${nearest.label} ${(nearest.confidence * 100).toInt()}% " +
-                        "validated=${validated.size}/${detections.size}"
+                "TL_DIAG  └─ FLICKER_LOCKOUT remaining=${remainingMs}ms current=${nearest.label}"
             )
             if (BuildConfig.DEBUG) {
-                tvDebugGuidance.text = "TL (cooldown): ${nearest.label} ${(nearest.confidence * 100).toInt()}%"
+                tvDebugGuidance.text = "TL flicker lockout ${remainingMs / 1000}s"
                 updateAiDebugResult(
-                    "$aiResultLine | action=COOLDOWN label=${nearest.label} " +
-                            "conf=${(nearest.confidence * 100).toInt()}% " +
-                            "box=${(nearest.bbox.width * 100).toInt()}x${(nearest.bbox.height * 100).toInt()}%"
+                    "$aiResultLine | action=FLICKER_LOCKOUT remaining=${remainingMs}ms"
+                )
+            }
+            return
+        }
+        if (flickerLockoutUntil > 0L && now >= flickerLockoutUntil) {
+            // 락아웃 종료 — state 깨끗이 reset 해서 다음 frame 부터 보수적으로 재인식.
+            // lastConfirmedColor 도 -1 로 reset 해야 락아웃 직후 GREEN 이 "transition" 으로 잘못
+            // 잡혀 "건너세요" 발화되는 일을 막을 수 있음.
+            appendNavLog("TL_DIAG  └─ FLICKER_LOCKOUT_END (state reset)")
+            currentColorCandidate = -1
+            colorStreak = 0
+            lastConfirmedColor = -1
+            flickerLockoutUntil = 0L
+        }
+
+        // ──── (a) Detection 타임아웃 → state reset ────
+        // validated 검출이 DETECTION_TIMEOUT_MS 이상 끊겼다가 다시 들어오면 이전 lastConfirmedColor 신뢰 X.
+        // 사용자가 잠시 카메라를 다른 데 돌렸다가 다시 신호등 비추는 사이 신호가 바뀌었을 가능성.
+        if (lastValidatedAt > 0 && now - lastValidatedAt > DETECTION_TIMEOUT_MS) {
+            appendNavLog("TL_DIAG  └─ STATE_RESET (gap=${(now - lastValidatedAt) / 1000}s, prev=${classLabel(lastConfirmedColor)})")
+            currentColorCandidate = -1
+            colorStreak = 0
+            lastConfirmedColor = -1
+        }
+        lastValidatedAt = now
+
+        // ──── (b) 안정성 필터 — 3 frame 연속 같은 색이어야 confirm ────
+        if (detectedColor == currentColorCandidate) {
+            colorStreak++
+        } else {
+            currentColorCandidate = detectedColor
+            colorStreak = 1
+        }
+
+        if (colorStreak < STABILITY_FRAMES) {
+            appendNavLog(
+                "TL_DIAG  └─ STABILITY_PENDING candidate=${nearest.label} streak=$colorStreak/$STABILITY_FRAMES " +
+                        "conf=${(nearest.confidence * 100).toInt()}% " +
+                        "box=${(nearest.bbox.width * 100).toInt()}x${(nearest.bbox.height * 100).toInt()}%"
+            )
+            if (BuildConfig.DEBUG) {
+                tvDebugGuidance.text = "TL stability: ${nearest.label} ${(nearest.confidence * 100).toInt()}% (streak $colorStreak/$STABILITY_FRAMES)"
+                updateAiDebugResult(
+                    "$aiResultLine | action=STABILITY_PENDING label=${nearest.label} " +
+                            "streak=$colorStreak/$STABILITY_FRAMES"
                 )
             }
             return
         }
 
-        lastSpokenSignalColor = nearest.classId
-        lastSpokenSignalAt = now
+        // ──── (c) 안정성 통과 — confirmed ────
+        val confirmedColor = currentColorCandidate
+        val previousColor = lastConfirmedColor
 
-        val message = when (nearest.classId) {
-            0 -> "빨간불입니다. 정지하세요."
-            1 -> "초록불입니다."
+        // (c-1) 같은 색 지속 → TTS 무발화, HEARTBEAT_INTERVAL_MS 마다 짧은 톤만
+        if (confirmedColor == previousColor) {
+            val heartbeatDue = now - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS
+            if (heartbeatDue) {
+                playToneAlert()
+                lastHeartbeatAt = now
+                appendNavLog(
+                    "TL_DIAG  └─ HEARTBEAT color=${classLabel(confirmedColor)} (tone only, no TTS)"
+                )
+                if (BuildConfig.DEBUG) {
+                    updateAiDebugResult("$aiResultLine | action=HEARTBEAT label=${nearest.label}")
+                }
+            } else {
+                val nextIn = (HEARTBEAT_INTERVAL_MS - (now - lastHeartbeatAt)) / 1000
+                appendNavLog(
+                    "TL_DIAG  └─ SAME_COLOR_QUIET (next heartbeat in ${nextIn}s)"
+                )
+                if (BuildConfig.DEBUG) {
+                    updateAiDebugResult(
+                        "$aiResultLine | action=QUIET label=${nearest.label} next_tone=${nextIn}s"
+                    )
+                }
+            }
+            return
+        }
+
+        // (c-2) 색이 변경됨 (또는 첫 confirm)
+
+        // ── (c-2a) Flicker 감지 — 직전 transition 후 MIN_PHASE_DURATION_MS 미만이면 점멸로 간주 ──
+        // previousColor != -1 조건은 첫 confirm 제외 (첫 confirm 은 항상 정상 안내).
+        // 점멸 phase 에서 "건너세요" 발화 막는 핵심 안전 로직.
+        if (previousColor != -1 && lastTransitionAt > 0L && now - lastTransitionAt < MIN_PHASE_DURATION_MS) {
+            val gapMs = now - lastTransitionAt
+            val flickerMsg = "신호가 깜빡입니다. 멈춰서 다음 신호를 기다리세요."
+            speakTTS(flickerMsg)
+            vibrateWarning()                    // 강한 staccato 진동
+            flickerLockoutUntil = now + FLICKER_LOCKOUT_MS
+
+            // state 정리 — 락아웃 동안 streak / candidate 갱신 안 되게.
+            // lastConfirmedColor 는 일단 -1 로 — 락아웃 종료 후 보수적 재시작.
+            lastConfirmedColor = -1
+            currentColorCandidate = -1
+            colorStreak = 0
+            lastTransitionAt = now
+            lastHeartbeatAt = now
+
+            Log.d("SafeWalkNav", "TL FLICKER detected — gap=${gapMs}ms, lockout ${FLICKER_LOCKOUT_MS}ms")
+            appendNavLog(
+                "TL_DIAG  └─ FLICKER_DETECTED prev=${classLabel(previousColor)} new=${classLabel(confirmedColor)} " +
+                        "gap=${gapMs}ms (min=${MIN_PHASE_DURATION_MS}ms) lockout=${FLICKER_LOCKOUT_MS}ms"
+            )
+
+            if (BuildConfig.DEBUG) {
+                tvDebugGuidance.text = "TL FLICKER (gap=${gapMs}ms) — lockout ${FLICKER_LOCKOUT_MS / 1000}s"
+                updateAiDebugResult(
+                    "$aiResultLine | action=FLICKER gap=${gapMs}ms lockout=${FLICKER_LOCKOUT_MS}ms"
+                )
+            }
+            return
+        }
+
+        // (c-2b) 정상 transition (또는 첫 confirm) → TTS 발화
+        lastConfirmedColor = confirmedColor
+        lastHeartbeatAt = now
+        lastTransitionAt = now
+
+        val message: String
+        val withVibrate: Boolean
+        val action: String
+
+        when {
+            confirmedColor == 0 -> {
+                // 빨강 — 신규 또는 초록→빨강 전환
+                message = "빨간불입니다. 정지하세요."
+                withVibrate = previousColor == 1   // 초록→빨강 전환 시 진동 추가
+                action = if (previousColor == 1) "ANNOUNCED_TRANSITION_G_TO_R" else "ANNOUNCED_RED"
+            }
+            confirmedColor == 1 && previousColor == 0 -> {
+                // 빨강 → 초록 직접 전환 인식! 유일하게 "건너세요" 안내하는 케이스.
+                message = "방금 초록불로 바뀌었습니다. 안전을 확인하고 건너세요."
+                withVibrate = true   // 강한 주의 환기
+                action = "ANNOUNCED_TRANSITION_R_TO_G"
+            }
+            confirmedColor == 1 -> {
+                // 정적 초록불 (첫 인식 / timeout 후 재인식 — 전환 못 봄).
+                // ❗ "건너세요" 절대 안 함. 다음 주기 대기 안내.
+                message = "초록불입니다. 일단 멈춰서 다음 신호를 기다리세요."
+                withVibrate = false
+                action = "ANNOUNCED_STATIC_GREEN"
+            }
             else -> return
         }
-        speakTTS(message)
-        Log.d("SafeWalkNav", "TL announced: $message (conf=${nearest.confidence}, box=${nearest.bbox.width}x${nearest.bbox.height})")
-        appendNavLog("TL_DIAG  └─ ANNOUNCED $message (conf=${"%.2f".format(nearest.confidence)}, box=${"%.2f".format(nearest.bbox.width)}x${"%.2f".format(nearest.bbox.height)}, validated=${validated.size}/${detections.size})")
 
-        // 색 변경 시 진동 한 번
-        if (!sameColor) vibrateShort()
+        speakTTS(message)
+        if (withVibrate) vibrateShort()
+
+        Log.d("SafeWalkNav", "TL: $action — $message (conf=${nearest.confidence}, prev=$previousColor)")
+        appendNavLog(
+            "TL_DIAG  └─ $action prev=${classLabel(previousColor)} new=${classLabel(confirmedColor)} " +
+                    "conf=${"%.2f".format(nearest.confidence)} " +
+                    "box=${"%.2f".format(nearest.bbox.width)}x${"%.2f".format(nearest.bbox.height)} " +
+                    "validated=${validated.size}/${detections.size}"
+        )
 
         if (BuildConfig.DEBUG) {
             tvDebugGuidance.text =
-                "TL: ${nearest.label} ${(nearest.confidence * 100).toInt()}% (${validated.size}/${detections.size} det)"
+                "TL: $action ${(nearest.confidence * 100).toInt()}% (${validated.size}/${detections.size} det)"
             updateAiDebugResult(
-                "$aiResultLine | action=ANNOUNCED label=${nearest.label} " +
+                "$aiResultLine | action=$action label=${nearest.label} " +
                         "conf=${(nearest.confidence * 100).toInt()}% " +
                         "box=${(nearest.bbox.width * 100).toInt()}x${(nearest.bbox.height * 100).toInt()}%"
             )
         }
+    }
+
+    /** classId → 사람이 읽기 쉬운 라벨 (로그용). */
+    private fun classLabel(classId: Int): String = when (classId) {
+        0 -> "RED"
+        1 -> "GREEN"
+        -1 -> "NONE"
+        else -> "?($classId)"
     }
 
     private fun stopCamera() {
@@ -1667,10 +1923,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
         cameraProvider = null
         cameraPreviewContainer.removeAllViews()
+        // removeAllViews() 가 오버레이 View 자체는 제거하지만 reference 는 명시적으로 비워 GC 친화적으로.
+        boundingBoxOverlay = null
 
-        // 검출 디바운스 리셋 — 다음 NAVIGATING 진입 시 첫 신호등 검출 즉시 안내
-        lastSpokenSignalColor = -1
-        lastSpokenSignalAt = 0L
+        // 신호등 안전 state machine 리셋 — 다음 NAVIGATING 진입 시 깨끗한 상태로 시작
+        currentColorCandidate = -1
+        colorStreak = 0
+        lastConfirmedColor = -1
+        lastHeartbeatAt = 0L
+        lastValidatedAt = 0L
+        lastTransitionAt = 0L
+        flickerLockoutUntil = 0L
 
         // 횡단보도 zone 은 NavigationManager.isInCrosswalkZone state flow 가 자동 관리 —
         // 여기서 명시적 reset 불필요. NAVIGATING 종료 시 navigationManager.stopNavigation() 호출되며
