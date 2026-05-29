@@ -21,6 +21,8 @@ object MessageBuilder {
         val dir = when (annotation.direction) {
             TurnDirection.LEFT -> "왼쪽"
             TurnDirection.RIGHT -> "오른쪽"
+            TurnDirection.UTURN -> "뒤쪽"
+            TurnDirection.STRAIGHT -> return ""
             TurnDirection.NONE -> return ""
         }
         return when (annotation.type) {

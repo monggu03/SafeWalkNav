@@ -30,7 +30,7 @@ enum class PathSegmentType {
 }
 
 /** 회전/곡선의 진행 방향. */
-enum class TurnDirection { LEFT, RIGHT, NONE }
+enum class TurnDirection { LEFT, RIGHT, STRAIGHT, UTURN, NONE }
 
 /**
  * 경로 위 한 구간에 대한 사전 분석 결과.
