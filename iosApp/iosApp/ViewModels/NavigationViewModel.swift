@@ -48,6 +48,8 @@ final class NavigationViewModel: ObservableObject {
         let coordinate: CLLocationCoordinate2D
         let pointType: String
         let description: String
+        let isVirtual: Bool
+        let curveDirection: String?
     }
     @Published private(set) var waypointPins: [WaypointPin] = []
 
@@ -478,22 +480,35 @@ final class NavigationViewModel: ObservableObject {
                 id: i,
                 coordinate: CLLocationCoordinate2D(latitude: wp.lat, longitude: wp.lon),
                 pointType: wp.pointType,
-                description: wp.description_
+                description: wp.description_,
+                isVirtual: wp.isVirtual,
+                curveDirection: wp.curveDirection
             )
         }
         if pins.count != waypointPins.count {
             waypointPins = pins
         }
 
-        // annotation 마커
+        // annotation 마커.
+        // route.waypoints 는 가상점이 섞인 expanded 리스트라 ann.startWaypointIndex(원본 기준)와
+        // 인덱스 체계가 다르다. routePoints 는 가상점 영향이 없으므로 startRoutePointIndex 가
+        // 채워진 annotation 은 그 좌표를 우선 사용한다.
         let anns = navigationManager.annotations.value as? [PathAnnotation] ?? []
         let markers: [AnnotationMarker] = anns.compactMap { ann in
-            let startIdx = Int(ann.startWaypointIndex)
-            guard startIdx >= 0, startIdx < route.waypoints.count else { return nil }
-            let wp = route.waypoints[startIdx]
+            let rpIdx = Int(ann.startRoutePointIndex)
+            let coord: CLLocationCoordinate2D
+            if rpIdx >= 0, rpIdx < route.routePoints.count {
+                let rp = route.routePoints[rpIdx]
+                coord = CLLocationCoordinate2D(latitude: rp.lat, longitude: rp.lon)
+            } else {
+                let wpIdx = Int(ann.startWaypointIndex)
+                guard wpIdx >= 0, wpIdx < route.waypoints.count else { return nil }
+                let wp = route.waypoints[wpIdx]
+                coord = CLLocationCoordinate2D(latitude: wp.lat, longitude: wp.lon)
+            }
             return AnnotationMarker(
-                id: startIdx,
-                coordinate: CLLocationCoordinate2D(latitude: wp.lat, longitude: wp.lon),
+                id: Int(ann.startWaypointIndex),
+                coordinate: coord,
                 type: ann.type.name,
                 direction: ann.direction.name,
                 totalAngle: ann.totalAngle

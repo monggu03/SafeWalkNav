@@ -170,6 +170,11 @@ class NavigationManager(
     // 곡선 방향 리마인더 — 마지막에 발화한 방향("LEFT"/"RIGHT"). 곡선이 바뀌면 카운터 주기와 무관하게 즉시 발화.
     private var lastCurveReminderDirection: String? = null
 
+    // 곡선당 "○○ 방향" 발화 횟수 카운터 (곡선 진입 시 0으로 리셋).
+    private var curveAnnounceCount = 0
+    // 직전 가상 waypoint 통과 시점의 currentWaypointIndex (곡선 경계 감지용).
+    private var lastVirtualWpIndex = -1
+
     // 디버그용 — iOS 에서 관찰 가능하게 StateFlow 로 노출
     private val _annotations = MutableStateFlow<List<PathAnnotation>>(emptyList())
     val annotations: StateFlow<List<PathAnnotation>> = _annotations.asStateFlow()
@@ -616,6 +621,8 @@ class NavigationManager(
         virtualPassCount = 0
         lastCurveReminderTime = 0L
         lastCurveReminderDirection = null
+        curveAnnounceCount = 0
+        lastVirtualWpIndex = -1
         spatialBeeper.stop()
         _annotations.value = emptyList()
         _announcementLog.value = emptyList()
@@ -652,6 +659,8 @@ class NavigationManager(
         virtualPassCount = 0
         lastCurveReminderTime = 0L
         lastCurveReminderDirection = null
+        curveAnnounceCount = 0
+        lastVirtualWpIndex = -1
         spatialBeeper.stop()
         _annotations.value = emptyList()
 
@@ -1885,25 +1894,11 @@ class NavigationManager(
     /**
      * 가상 waypoint 통과 시 호출.
      *
-     * 동작:
-     *   1. 이상적 진행 방향 = 통과한 가상 점 → 다음 waypoint(가상 포함) 의 bearing
-     *   2. 사용자가 두 점 사이 라인에서 얼마나 옆으로 벗어났는지(부호 있는 수직 거리) 계산
-     *   3. 이탈 정도에 따라 비프(LOW/HIGH/연속) 또는 음성으로 단계적 안내
-     *   4. (NEW 2026-05-26) 곡선 구간이면 진행 중 방향 리마인더("오른쪽으로 휘어집니다") 주기 발화
-     *
-     * sign 규약(`computeSignedCrossTrack`):
-     *   - 양수 = 사용자가 경로의 왼쪽에 있음 → 오른쪽으로 가야 함 → pan = +1f (오른쪽 채널)
-     *   - 음수 = 사용자가 경로의 오른쪽에 있음 → 왼쪽으로 가야 함 → pan = -1f (왼쪽 채널)
-     *
-     * "잘 가고 있을 때" (이탈 < curveDeviationLowM) 무음에 가깝게 유지 — 3번째 통과마다만 중앙 톤.
-     * 음성으로 전환되는 임계(>= curveDeviationCriticalM) 에서는 NavigationManager.speak() 사용.
-     *
-     * 곡선 방향 리마인더 (NEW):
-     *   - 통과한 가상 waypoint 의 curveDirection 이 채워져 있을 때만 동작 (곡선 구간 한정)
-     *   - virtualPassCount % curveReminderEveryNVirtuals == 0 (기본 3개마다, ≈15m)
-     *   - 시간 쿨다운(기본 8초) 으로 같은 멘트 연속 발화 방지
-     *   - 이탈 상태와 독립적으로 발화 — GPS sideways pass 로 통과 판정이 누락될 가능성 대응
-     *   - 곡선 방향 전환(LEFT↔RIGHT) 시에는 카운터 주기를 무시하고 즉시 발화
+     * (2026-05-30 버전):
+     *   - 비프음 제거. 곡선 방향을 짧은 음성("오른쪽 방향"/"왼쪽 방향")으로 안내.
+     *   - 곡선당 최대 curveMaxAnnouncementsPerCurve(기본 3)회까지만 발화.
+     *   - 이탈(cross-track ≥ curveDeviationCriticalM=5m) 시 방향 없이 "이탈하셨습니다".
+     *     이탈 발화한 통과에서는 곡선 방향 발화를 생략(이중 발화 방지).
      */
     private fun handleVirtualWaypointPassed(
         passed: Waypoint,
@@ -1912,9 +1907,10 @@ class NavigationManager(
         @Suppress("UNUSED_PARAMETER") userBearing: Float,
     ) {
         val route = currentRoute ?: return
-        // 통과 직후엔 currentWaypointIndex 가 다음 점을 가리킴.
         val nextWp = route.waypoints.getOrNull(currentWaypointIndex) ?: return
+        virtualPassCount++
 
+        // (1) 이탈 보정 — 비프 제거, 음성만. 5m 이상이면 방향 없이 "이탈하셨습니다".
         val crossM = computeSignedCrossTrack(
             currentLat = userLat,
             currentLon = userLon,
@@ -1924,69 +1920,30 @@ class NavigationManager(
             ),
             currentRoutePointIndex = 0,
         )
-        val deviationM = kotlin.math.abs(crossM)
-
-        // pan: 사용자가 가야 할 쪽으로 채널 분배.
-        // crossM > 0 (사용자가 왼쪽에 있음) → 오른쪽으로 끌어와야 함 → pan +1f
-        val pan = if (crossM > 0f) +1f else -1f
-
-        virtualPassCount++
-
-        // ─── (1) 이탈 정도에 따른 비프/음성 안내 (기존 로직 유지) ───
-        // 진단 로그 — deviation 이 어느 분기로 떨어지는지 + spatialBeeper 인스턴스 타입 확인.
-        // (iosImpl 콜백이 안 박혀 있어도 KMP 측 클래스 이름은 "SpatialBeeper" 로 동일하게 찍히므로,
-        //  iosImpl null 여부 자체는 본 로그로 판단 불가 — 분기 진입 + 무음 여부와 함께 해석할 것.)
-        val branchLabel = when {
-            deviationM < navigatorConfig.curveDeviationLowM -> "LOW-cadenced(${virtualPassCount % 3 == 0})"
-            deviationM < navigatorConfig.curveDeviationHighM -> "LOW"
-            deviationM < navigatorConfig.curveDeviationCriticalM -> "HIGH2"
-            else -> "VOICE"
-        }
-        println("[VBEEP] idx=$currentWaypointIndex passed=(${passed.lat},${passed.lon}) " +
-                "deviation=${deviationM}m crossM=$crossM pan=$pan virtPassCount=$virtualPassCount " +
-                "beeperImpl=${spatialBeeper::class.simpleName} branch=$branchLabel")
-
-        when {
-            deviationM < navigatorConfig.curveDeviationLowM -> {
-                // 잘 가는 중 — 3번에 한 번만 중앙 LOW 톤으로 "확인음".
-                if (virtualPassCount % 3 == 0) {
-                    spatialBeeper.playBeep(0f, BeepTone.LOW, 1)
-                }
-            }
-            deviationM < navigatorConfig.curveDeviationHighM -> {
-                spatialBeeper.playBeep(pan, BeepTone.LOW, 1)
-            }
-            deviationM < navigatorConfig.curveDeviationCriticalM -> {
-                spatialBeeper.playBeep(pan, BeepTone.HIGH, 2)
-            }
-            else -> {
-                // 심각한 이탈 — 음성으로 명시적으로 안내.
-                val side = if (crossM > 0f) "오른쪽" else "왼쪽"
-                speak("${side}으로 이동하세요")
-            }
+        if (kotlin.math.abs(crossM) >= navigatorConfig.curveDeviationCriticalM) {
+            speak("이탈하셨습니다")
+            return
         }
 
-        // ─── (2) 곡선 방향 리마인더 (NEW 2026-05-26) ───
-        // curveDirection 이 채워진 가상 점만 대상 — 직선 구간 가상 점은 제외.
+        // (2) 곡선 방향 음성 — "○○ 방향", 곡선당 최대 N회
         val curveDir = passed.curveDirection ?: return
-
-        // 곡선이 바뀌면(LEFT→RIGHT 등) 카운터 주기와 무관하게 즉시 발화 허용.
-        // 동일 방향 연속 곡선은 카운터 주기로 제어.
-        val directionChanged = (curveDir != lastCurveReminderDirection)
-        val onCadence = (virtualPassCount % navigatorConfig.curveReminderEveryNVirtuals == 0)
-        if (!directionChanged && !onCadence) return
-
-        // 시간 쿨다운 — 카운터 주기가 짧아도 8초 이내엔 같은 멘트 안 나감.
-        val now = currentTimeMillis()
-        if (now - lastCurveReminderTime < navigatorConfig.curveReminderCooldownMs) return
-
         val side = when (curveDir) {
             "RIGHT" -> "오른쪽"
-            "LEFT" -> "왼쪽"
-            else -> return  // NONE 또는 미지값은 발화 안 함
+            "LEFT"  -> "왼쪽"
+            else    -> return
         }
-        speak("${side}으로 휘어집니다")
-        lastCurveReminderTime = now
+
+        // 곡선 경계 감지: 직전 가상 통과와 인덱스 차가 1 초과(=실 waypoint가 끼임)거나
+        // 방향이 바뀌면 새 곡선 → 카운터 리셋.
+        val isNewCurve = (currentWaypointIndex - lastVirtualWpIndex) > 1 ||
+                curveDir != lastCurveReminderDirection
+        if (isNewCurve) curveAnnounceCount = 0
+        lastVirtualWpIndex = currentWaypointIndex
+
+        if (curveAnnounceCount < navigatorConfig.curveMaxAnnouncementsPerCurve) {
+            speak("${side} 방향")
+            curveAnnounceCount++
+        }
         lastCurveReminderDirection = curveDir
     }
 
