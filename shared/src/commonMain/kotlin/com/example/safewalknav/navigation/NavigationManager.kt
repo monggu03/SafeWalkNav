@@ -193,6 +193,7 @@ class NavigationManager(
     private var wasInCrosswalkZone = false
     private var lastCrosswalkAnnouncedWpIdx = -1
     private var lastSignalPresenceAnnouncedWpIdx = -1
+    private var lastSignalDirectionAnnouncedWpIdx = -1
 
     //클래스 변수 추가
     private var lastSignalApiCallTime = 0L
@@ -349,6 +350,7 @@ class NavigationManager(
         wasInCrosswalkZone = false
         lastCrosswalkAnnouncedWpIdx = -1
         lastSignalPresenceAnnouncedWpIdx = -1
+        lastSignalDirectionAnnouncedWpIdx = -1
         _isNavigating.value = true
         _arrivalState.value = ArrivalState.FAR
         _distanceToDestination.value = Float.MAX_VALUE
@@ -588,6 +590,54 @@ class NavigationManager(
         speak("신호등이 있습니다.", forceRepeat = true)
     }
 
+    private fun announceSignalDirectionIfNeeded(
+        crosswalkZoneInfo: CrosswalkZoneInfo,
+        currentLat: Double,
+        currentLon: Double,
+        userBearing: Float,
+    ) {
+        val route = currentRoute ?: return
+        val crosswalkIdx = crosswalkZoneInfo.crosswalkIndex
+            ?: findNearbyCrosswalkWaypointIndex(route)
+            ?: return
+        if (crosswalkIdx == lastSignalDirectionAnnouncedWpIdx) return
+
+        val crosswalkWp = route.waypoints.getOrNull(crosswalkIdx) ?: return
+        val routeBearing = computeRouteBearingAhead(15f) ?: userBearing
+        val signal = TrafficSignalMatcher.findBestSignalForCrosswalk(
+            currentLat = currentLat,
+            currentLon = currentLon,
+            crosswalkLat = crosswalkWp.lat,
+            crosswalkLon = crosswalkWp.lon,
+            routeBearing = routeBearing,
+            signals = trafficSignals,
+        ) ?: return
+
+        lastSignalDirectionAnnouncedWpIdx = crosswalkIdx
+        val directionReferenceBearing = if (latestCompassHeading >= 0f) {
+            latestCompassHeading
+        } else {
+            userBearing
+        }
+        val clockDirection = getClockDirection(
+            currentLat = currentLat,
+            currentLon = currentLon,
+            targetLat = signal.lat,
+            targetLon = signal.lon,
+            userBearing = directionReferenceBearing,
+        )
+        speak("신호등은 ${clockDirection} 방향으로 추정됩니다. 휴대폰을 해당 방향으로 향해 주세요.", forceRepeat = true)
+    }
+
+    private fun findNearbyCrosswalkWaypointIndex(route: TMapRoute): Int? {
+        val searchStart = maxOf(0, currentWaypointIndex - 1)
+        val searchEnd = minOf(currentWaypointIndex + 4, route.waypoints.size)
+        for (i in searchStart until searchEnd) {
+            if (isCrosswalkWaypoint(route.waypoints[i])) return i
+        }
+        return null
+    }
+
     fun stopNavigation() {
         _isNavigating.value = false
         currentRoute = null
@@ -605,6 +655,7 @@ class NavigationManager(
         wasInCrosswalkZone = false
         lastCrosswalkAnnouncedWpIdx = -1
         lastSignalPresenceAnnouncedWpIdx = -1
+        lastSignalDirectionAnnouncedWpIdx = -1
         cachedNearbyPOIs = emptyList()
         cachedAddress = null
         arrivalInfoLoaded = false
@@ -644,6 +695,7 @@ class NavigationManager(
         wasInCrosswalkZone = false
         lastCrosswalkAnnouncedWpIdx = -1
         lastSignalPresenceAnnouncedWpIdx = -1
+        lastSignalDirectionAnnouncedWpIdx = -1
         consecutiveDeviationCount = 0
         consecutiveRerouteCount = 0
         pathAnnotations = emptyList()
@@ -755,6 +807,7 @@ class NavigationManager(
         // 횡단보도가 있는지 모르기 때문. 매 update 마다 호출되므로 transition 만 잡는다.
         if (isInCrossWalkZone && !wasInCrosswalkZone) {
             announceCrosswalkDirection(route, currentLat, currentLon, userBearing, speed)
+            announceSignalDirectionIfNeeded(crosswalkZoneInfo, currentLat, currentLon, userBearing)
         }
         if (isInCrossWalkZone) {
             announceSignalPresenceIfNeeded(crosswalkZoneInfo, currentLat, currentLon)
