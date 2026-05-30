@@ -51,6 +51,15 @@ data class NavigatorConfig(
     // curveReminderCooldownMs = 8000 → 같은 멘트가 8초 이내 반복되지 않도록 시간 쿨다운 안전장치.
     val curveReminderEveryNVirtuals: Int = 3,
     val curveReminderCooldownMs: Long = 8_000L,
+
+    // 곡선당 "○○ 방향" 음성 최대 발화 횟수. 같은 곡선 안에서 N회까지만 안내.
+    val curveMaxAnnouncementsPerCurve: Int = 3,
+
+    // 완만 곡선 승급 기준 (CURVE promotion).
+    // TURN으로 잡힌 구간이라도 routePoints상 |peak / total| 이 값 미만이면(=각도가
+    // 한 점에 몰리지 않고 분산됨) 완만한 곡선으로 보고 CURVE로 승급한다.
+    // 1.0에 가까울수록 직각 코너(한 점에서 다 꺾임). ⚠️ 초기값 0.6은 잠정 — 실측 튜닝 필요.
+    val gentleCurvePeakRatio: Double = 0.6,
 ) {
     companion object {
         /**
