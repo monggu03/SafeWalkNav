@@ -7,8 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		EC46FBF32FA5267B006A262F /* shared.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EC46FBF22FA5267B006A262F /* shared.framework */; };
-		EC46FBF42FA5267B006A262F /* shared.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = EC46FBF22FA5267B006A262F /* shared.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		EC46FBF32FA5267B006A262F /* shared.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EC46FBF22FA5267B006A262F /* shared.framework */; platformFilters = (xros, ); };
+		EC46FBF42FA5267B006A262F /* shared.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = EC46FBF22FA5267B006A262F /* shared.framework */; platformFilters = (xros, ); settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
