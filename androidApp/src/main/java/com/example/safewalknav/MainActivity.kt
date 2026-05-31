@@ -417,6 +417,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var hasAccel = false
     private var hasMag = false
     private var currentAzimuth = 0f
+
+    // GPS+자이로 상보 필터용 — 보행 중 자이로 각속도를 NavigationManager 로 전달.
+    // 월드 up 축(중력 반대) 회전 성분만 뽑아 yaw rate 로 변환 → 자력계 무관(자기 간섭 면역).
+    private var gyroscope: Sensor? = null
+    private var gravitySensor: Sensor? = null
+    private val gravityValues = FloatArray(3)
+    private var hasGravity = false
     private val magnetometerAvailable: Boolean
         get() = magnetometer != null
 
@@ -493,6 +500,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     event.values.copyInto(magValues, 0, 0, 3)
                     hasMag = true
                 }
+
+                Sensor.TYPE_GRAVITY -> {
+                    event.values.copyInto(gravityValues, 0, 0, 3)
+                    hasGravity = true
+                    return  // 자력계 azimuth 재계산 분기로 내려갈 필요 없음
+                }
+
+                Sensor.TYPE_GYROSCOPE -> {
+                    handleGyro(event)
+                    return
+                }
             }
             if (hasAccel && hasMag) {
                 val now = System.currentTimeMillis()
@@ -533,6 +551,33 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    }
+
+    /**
+     * TYPE_GYROSCOPE 이벤트 → 월드 yaw 각속도(deg/s, 시계 방향 +) 로 변환해 NavigationManager 에 전달.
+     *
+     * 변환:
+     *   - gyro(rad/s, 디바이스 x/y/z) 를 중력 단위벡터(=월드 up)에 정사영 → up 축 각속도.
+     *     이는 디바이스 자세와 무관하게 "사용자가 좌우로 도는 속도" 를 준다(자력계 불필요).
+     *   - up 축 회전은 위에서 볼 때 반시계(+)라 bearing 시계 방향(+) 규약으로 부호 반전.
+     *   - dt 는 NavigationManager 가 timestamp(ns→ms) 로 계산.
+     */
+    private fun handleGyro(event: SensorEvent) {
+        if (!hasGravity) return
+        if (!::navigationManager.isInitialized) return
+
+        val gx = event.values[0]; val gy = event.values[1]; val gz = event.values[2]
+        val ax = gravityValues[0]; val ay = gravityValues[1]; val az = gravityValues[2]
+        val gMag = Math.sqrt((ax * ax + ay * ay + az * az).toDouble())
+        if (gMag < 1e-3) return
+
+        // up 단위벡터에 자이로 정사영 = up 축 각속도(rad/s, CCW-from-above +)
+        val worldUpRate = (gx * ax + gy * ay + gz * az) / gMag
+        // bearing 은 시계 방향이 +(오른쪽). up축 CCW(+)와 반대이므로 부호 반전.
+        val yawRateDegPerSec = (-Math.toDegrees(worldUpRate)).toFloat()
+        val tsMillis = event.timestamp / 1_000_000L  // elapsedRealtime ns → ms (dt 계산용)
+
+        navigationManager.updateGyro(yawRateDegPerSec, tsMillis)
     }
 
     // ==================== Activity 라이프사이클 ====================
@@ -610,6 +655,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         magnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+        gyroscope = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+        gravitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
 
         vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
@@ -646,6 +693,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             sensorManager.registerListener(orientationListener, it, SensorManager.SENSOR_DELAY_UI)
         }
         magnetometer?.let {
+            sensorManager.registerListener(orientationListener, it, SensorManager.SENSOR_DELAY_UI)
+        }
+        // GPS+자이로 상보 필터 — 자이로는 빠른 응답이 핵심이라 GAME 딜레이(~50Hz),
+        // 중력은 방향 변화가 느려 UI 딜레이로 충분. 둘 다 같은 listener 로 받는다.
+        gyroscope?.let {
+            sensorManager.registerListener(orientationListener, it, SensorManager.SENSOR_DELAY_GAME)
+        }
+        gravitySensor?.let {
             sensorManager.registerListener(orientationListener, it, SensorManager.SENSOR_DELAY_UI)
         }
     }

@@ -2,6 +2,7 @@ package com.example.safewalknav.navigation
 
 import com.example.safewalknav.audio.BeepTone
 import com.example.safewalknav.audio.SpatialBeeper
+import com.example.safewalknav.navigation.geo.ComplementaryHeading
 import com.example.safewalknav.navigation.geo.KalmanHeading
 import com.example.safewalknav.navigation.geo.RouteBearingProfile
 import com.example.safewalknav.navigation.geo.alongTrackMeters
@@ -220,12 +221,30 @@ class NavigationManager(
     //클래스 변수 추가
     private var lastSignalApiCallTime = 0L
     private var lastSignalItstId: String? = null
-    private val signalApiCooldownMs = 60_000L
+private val signalApiCooldownMs = 60_000L
 
     // ========== Heading Smoothing (Circular Kalman Filter) ==========
     // 알고리즘 본체는 shared/commonMain/.../navigation/KalmanHeading.kt 에 분리됨.
     // 자세한 설명/파라미터는 그쪽 docstring 참조.
     private val kalmanHeading = KalmanHeading(stationarySpeed = STATIONARY_SPEED)
+
+    // ========== GPS + 자이로 상보 필터 (굽은 길 타이밍) ==========
+    // KalmanHeading 으로 평활화한 GPS bearing 을 절대 기준(correct)으로,
+    // 플랫폼이 보내는 자이로 yaw rate 를 1차 신호(predict)로 융합.
+    // 자력계 미사용 → 자기 간섭 영향 없음. 곡선 누적 회전으로 가상 waypoint 통과 타이밍 보강.
+    private val complementaryHeading = ComplementaryHeading(stationarySpeed = STATIONARY_SPEED)
+
+    // 자이로 융합 heading (predict/correct 결과). 플랫폼이 나침반 흰 화살표/디버그로 관찰.
+    private val _fusedHeading = MutableStateFlow(-1f)
+    val fusedHeading: StateFlow<Float> = _fusedHeading.asStateFlow()
+
+    // 직전 자이로 샘플 타임스탬프(ms). dt 계산용. 0 = 아직 없음.
+    private var lastGyroTimestampMs: Long = 0L
+
+    // 현재 활성 곡선 span 의 시작 진행 방위각(가상 waypoint 의 bearingToNext 기준). null = 곡선 밖.
+    // 가상 곡선 waypoint 를 처음 타겟으로 잡을 때 기록하고, complementaryHeading.resetCumulativeTurn() 도 같이 호출.
+    private var activeCurveStartBearing: Double? = null
+    private var activeCurveDirection: String? = null
 
     // ========== CSV 로그 (Heading 분석용) ==========
     // 실제 저장은 생성자에서 주입받은 headingLogger 가 담당. 기본값은 NoopHeadingLogger.
@@ -307,6 +326,36 @@ class NavigationManager(
                 }
             }
         }
+    }
+
+    /**
+     * 플랫폼(Android TYPE_GYROSCOPE+중력 / iOS CMDeviceMotion)이 계산한 월드 yaw 각속도를 받는다.
+     * 센서 tick(고빈도, ~10~50ms) 마다 호출 — GPS 500ms 보다 훨씬 자주 들어와 곡선 진입을 빠르게 감지.
+     *
+     * 동작:
+     *   1. 직전 샘플과의 dt 로 자이로를 적분(predict) → 융합 heading + 곡선 누적 회전 갱신.
+     *   2. 융합 heading 을 _fusedHeading 으로 노출(나침반/디버그용).
+     * 절대 보정(드리프트 리셋)은 GPS tick 에서 updateLocation 이 correct() 로 수행한다.
+     *
+     * 가상 waypoint 통과 판정에 쓰는 cumulativeTurnDeg 는 여기서 쌓이지만, 실제 index 전진은
+     * 단일 스레드인 GPS sync 경로(syncWaypointIndexForwardOnly)에서만 일어난다(스레드 안전).
+     *
+     * @param yawRateDegPerSec 월드 up 축 기준 각속도(시계 방향 +), deg/s.
+     * @param timestampMillis 샘플 시각(ms). dt 계산용.
+     */
+    fun updateGyro(yawRateDegPerSec: Float, timestampMillis: Long) {
+        if (!_isNavigating.value) return
+
+        val last = lastGyroTimestampMs
+        lastGyroTimestampMs = timestampMillis
+        if (last == 0L) return  // 첫 샘플 — dt 기준점만 잡고 적분은 다음부터.
+
+        // dt 클램프 — 센서 일시정지/리줌 시 큰 점프가 heading 을 튀게 하지 않도록 0~0.2s 로 제한.
+        val dtSec = ((timestampMillis - last).toFloat() / 1000f).coerceIn(0f, MAX_GYRO_DT_SEC)
+        if (dtSec <= 0f) return
+
+        val fused = complementaryHeading.predict(yawRateDegPerSec, dtSec)
+        if (fused >= 0f) _fusedHeading.value = fused
     }
 
     // ========== 경로 탐색 ==========
@@ -507,6 +556,13 @@ class NavigationManager(
 
         // Heading Kalman 상태 리셋
         kalmanHeading.reset()
+
+        // GPS+자이로 상보 필터 / 곡선 span 리셋
+        complementaryHeading.reset()
+        lastGyroTimestampMs = 0L
+        activeCurveStartBearing = null
+        activeCurveDirection = null
+        _fusedHeading.value = -1f
 
         // CSV 로그 시작 (logDirectory 미지정이면 no-op)
         openLogWriter()
@@ -722,6 +778,13 @@ class NavigationManager(
         // Heading Kalman 상태 리셋
         kalmanHeading.reset()
 
+        // GPS+자이로 상보 필터 / 곡선 span 리셋
+        complementaryHeading.reset()
+        lastGyroTimestampMs = 0L
+        activeCurveStartBearing = null
+        activeCurveDirection = null
+        _fusedHeading.value = -1f
+
         // CSV 로그 종료
         closeLogWriter()
     }
@@ -763,6 +826,13 @@ class NavigationManager(
         // Heading Kalman 상태 리셋
         kalmanHeading.reset()
 
+        // GPS+자이로 상보 필터 / 곡선 span 리셋
+        complementaryHeading.reset()
+        lastGyroTimestampMs = 0L
+        activeCurveStartBearing = null
+        activeCurveDirection = null
+        _fusedHeading.value = -1f
+
         // CSV 로그 종료
         closeLogWriter()
     }
@@ -780,6 +850,11 @@ class NavigationManager(
         // GPS accuracy 는 GpsLocation 변환 시점에 fallback(10f) 적용되므로 여기선 그대로 사용.
         val accuracy = location.accuracy
         val userBearing = updateSmoothedHeading(rawBearing, speed, accuracy)
+
+        // 자이로 융합 heading 의 절대 보정(드리프트 리셋) — Kalman 평활화 bearing 을 기준으로.
+        // predict 는 자이로 tick(updateGyro)에서, correct 는 여기 GPS tick 에서.
+        val fused = complementaryHeading.correct(userBearing, speed, accuracy)
+        if (fused >= 0f) _fusedHeading.value = fused
 
         // updateCompassHeading 에서 정지 상태 판정용으로 노출 — sensor tick 이 GPS 보다 자주 들어옴.
         latestSpeed = speed
@@ -1482,6 +1557,17 @@ class NavigationManager(
         const val START_ARRIVE_THRESHOLD_M = 10f
         // 출발지 유도 중 주기 안내 간격(ms).
         const val START_GUIDANCE_INTERVAL_MS = 4000L
+
+        // 자이로 적분 dt 상한(초) — 센서 일시정지/리줌 시 큰 점프로 heading 이 튀는 것 방지.
+        const val MAX_GYRO_DT_SEC = 0.2f
+        // 곡선 가상 waypoint 를 자이로로 조기 통과 판정할 때, 기대 누적 꺾임 대비 도달 비율.
+        // 0.8 = 기대 각도의 80% 만 꺾어도 통과 인정(GPS 위치 지연/지터에 앞서 비프 타이밍 확보).
+        const val GYRO_CURVE_PASS_FACTOR = 0.8f
+        // 자이로 조기 통과를 허용할 최소 기대 꺾임(도). 너무 작은 곡선은 GPS 판정에 맡김.
+        const val GYRO_CURVE_MIN_EXPECTED_DEG = 8f
+        // 자이로 조기 통과가 GPS 진행 위치(currentRoutePointIndex)보다 앞설 수 있는 최대 routePoint 수.
+        // 제자리 회전 등으로 자이로가 실제 위치보다 멀리 앞서가지 않게 하는 안전 레일.
+        const val GYRO_CURVE_MAX_RP_AHEAD = 8
     }
 
     /**
@@ -1629,6 +1715,19 @@ class NavigationManager(
         var lastVirtualPassedThisTick: Waypoint? = null
         while (currentWaypointIndex < waypoints.size) {
             val wp = waypoints[currentWaypointIndex]
+
+            // ── 곡선 span 상태 관리 + 자이로 조기 통과 (단일 스레드 GPS sync 경로에서만) ──
+            // 곡선 가상 waypoint 는 GPS 위치가 5m 점에 도달하기 전이라도, 자이로 누적 회전이
+            // 그 점까지의 기대 꺾임에 도달하면 통과로 인정 → 비프 타이밍을 GPS 500ms 보다 앞당김.
+            updateCurveSpanState(wp)
+            if (shouldGyroPassCurve(wp)) {
+                println("[GYRO-PASS] idx=$currentWaypointIndex 자이로 조기 통과 " +
+                        "turned=${complementaryHeading.cumulativeTurnDeg} rp=${wp.sourceRoutePointIdx} currentRP=$currentRoutePointIndex")
+                lastVirtualPassedThisTick = wp
+                currentWaypointIndex++
+                continue
+            }
+
             val distToWp = distanceBetween(
                 currentLat, currentLon, wp.lat, wp.lon
             )
@@ -1725,6 +1824,64 @@ class NavigationManager(
         if (lastVirtualPassedThisTick != null) {
             handleVirtualWaypointPassed(lastVirtualPassedThisTick, currentLat, currentLon, userBearing)
         }
+    }
+
+    /**
+     * 현재 타겟 waypoint 를 기준으로 곡선 span 상태를 갱신한다.
+     *
+     *   - 곡선 가상 waypoint(curveDirection != null)가 새 span 으로 진입하면
+     *     (span 미설정이거나 방향이 바뀌면) 그 점의 진행 방위각을 span 시작 기준으로 잡고
+     *     complementaryHeading 의 누적 회전을 0 으로 리셋한다.
+     *   - 곡선이 아닌 waypoint 가 타겟이 되면 span 을 해제한다.
+     *
+     * 매 tick 호출되지만 같은 span 안에서는 idempotent (리셋은 진입 시 1회뿐).
+     */
+    private fun updateCurveSpanState(wp: Waypoint) {
+        val dir = wp.curveDirection
+        if (dir == null || wp.bearingToNext == null) {
+            // 곡선 밖 — span 종료.
+            activeCurveStartBearing = null
+            activeCurveDirection = null
+            return
+        }
+        val isNewSpan = activeCurveStartBearing == null || activeCurveDirection != dir
+        if (isNewSpan) {
+            activeCurveDirection = dir
+            activeCurveStartBearing = wp.bearingToNext
+            complementaryHeading.resetCumulativeTurn()
+            println("[GYRO-SPAN] 곡선 진입 dir=$dir startBearing=${wp.bearingToNext} idx=$currentWaypointIndex")
+        }
+    }
+
+    /**
+     * 자이로 누적 회전만으로 현재 곡선 가상 waypoint 를 통과로 인정할지 판정.
+     *
+     * 조건(모두 충족):
+     *   1. 곡선 span 활성 + wp 가 곡선 가상 waypoint(bearingToNext 보유).
+     *   2. span 시작 방위각 대비 이 wp 까지의 기대 꺾임(expected)이 GYRO_CURVE_MIN_EXPECTED_DEG 이상.
+     *   3. 보행 중(latestSpeed >= MIN_WALKING_SPEED_MPS) — 제자리 회전으로 통과되지 않게.
+     *   4. wp 가 GPS 진행 위치보다 너무 앞서지 않음(sourceRoutePointIdx ≤ currentRP + GYRO_CURVE_MAX_RP_AHEAD).
+     *   5. 누적 회전 부호가 기대 방향과 같고, |누적| ≥ |기대| × GYRO_CURVE_PASS_FACTOR.
+     *
+     * 부호 규약이 플랫폼에서 뒤집혀 들어오면 5번이 영영 충족 안 돼 GPS 판정으로 안전 폴백(오발화 없음).
+     */
+    private fun shouldGyroPassCurve(wp: Waypoint): Boolean {
+        if (!complementaryHeading.isInitialized) return false
+        val startBearing = activeCurveStartBearing ?: return false
+        val wpBearing = wp.bearingToNext ?: return false
+        if (latestSpeed < MIN_WALKING_SPEED_MPS) return false
+        if (wp.sourceRoutePointIdx >= 0 &&
+            wp.sourceRoutePointIdx > currentRoutePointIndex + GYRO_CURVE_MAX_RP_AHEAD
+        ) return false
+
+        val expected = angleDiff(wpBearing.toFloat(), startBearing.toFloat())  // 부호 있는 기대 꺾임
+        if (abs(expected) < GYRO_CURVE_MIN_EXPECTED_DEG) return false
+
+        val turned = complementaryHeading.cumulativeTurnDeg                     // 부호 있는 실제 누적
+        val sameDir = (expected >= 0f && turned > 0f) || (expected < 0f && turned < 0f)
+        if (!sameDir) return false
+
+        return abs(turned) >= abs(expected) * GYRO_CURVE_PASS_FACTOR
     }
 
     private fun findClosestRoutePointIndex(

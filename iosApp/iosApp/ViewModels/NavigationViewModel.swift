@@ -107,6 +107,9 @@ final class NavigationViewModel: ObservableObject {
     // 활성 Coordinator 보관 — strong 참조가 사라지지 않게 ViewModel 이 들고 있는다.
     private var onboardingCoordinator: AutoOnboardingCoordinator?
 
+    // 보행 중 자이로를 NavigationManager 로 흘려보내는 피더(GPS+자이로 상보 필터).
+    private let gyroFeeder: GyroHeadingFeeder
+
     // MARK: - Init
     init(
         tts: TtsManager,
@@ -120,6 +123,7 @@ final class NavigationViewModel: ObservableObject {
         self.headingProvider = headingProvider
         self.stt = stt
         self.navigationManager = navigationManager
+        self.gyroFeeder = GyroHeadingFeeder(navigationManager: navigationManager)
 
         print("🟢 [INIT] NavigationViewModel 생성됨")
         bindLocationToNavigation()
@@ -206,6 +210,8 @@ final class NavigationViewModel: ObservableObject {
 
             if success.boolValue {
                 headingProvider.setBaseHeading()
+                // 보행 중 자이로 융합 시작 — updateGyro 는 isNavigating 동안에만 내부 처리.
+                gyroFeeder.start()
                 await runAutoOnboarding()
             } else {
                 self.errorMessage = (navigationManager.lastError as String?) ?? "경로를 찾을 수 없습니다"
@@ -251,6 +257,7 @@ final class NavigationViewModel: ObservableObject {
 
         navigationManager.stopNavigation()
         headingProvider.clearBaseHeading()
+        gyroFeeder.stop()
         tts.stop()
 
         NavLogFile.shared.close()
@@ -382,6 +389,10 @@ final class NavigationViewModel: ObservableObject {
                     let newIsNavigating = newIsNavigatingObj.boolValue
                     if newIsNavigating != self.isNavigating {
                         self.isNavigating = newIsNavigating
+                        // 도착 등으로 내비가 내부적으로 종료되면 자이로 센서도 정리.
+                        if !newIsNavigating {
+                            self.gyroFeeder.stop()
+                        }
                     }
                 }
 
