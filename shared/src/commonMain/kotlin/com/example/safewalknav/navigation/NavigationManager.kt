@@ -41,11 +41,34 @@ import com.example.safewalknav.navigation.walking.CrosswalkZoneInfo
 import com.example.safewalknav.navigation.walking.findCrosswalkZoneInfo
 import com.example.safewalknav.navigation.walking.isCrosswalkWaypoint
 import com.example.safewalknav.navigation.walking.isOnCrosswalkSegment
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlin.math.abs
 
+/**
+ * A-3 일회성 안내 이벤트.
+ * 연속 안내(_guidanceMessage StateFlow)와 분리된 채널로 흐른다.
+ */
+data class NavAnnouncement(
+    val message: String,
+    val forceRepeat: Boolean,
+)
+
+/**
+ * A-3 이벤트 구독 핸들. Swift 가 직접 collect 할 수 없는 SharedFlow 대신 콜백 등록을
+ * 사용하므로 stop 시 cancel() 로 해제한다.
+ *
+ * 이름이 Combine.Cancellable 과 겹칠 수 있어 Swift 측에서는 `shared.Cancellable` 로
+ * 명시 또는 모호하지 않으면 그대로 사용한다.
+ */
+interface Cancellable {
+    fun cancel()
+}
 
 /**
  * 내비게이션 매니저
@@ -146,6 +169,20 @@ class NavigationManager(
     // 안내 메시지
     private val _guidanceMessage = MutableStateFlow("")
     val guidanceMessage: StateFlow<String> = _guidanceMessage.asStateFlow()
+
+    // --- A-3: 일회성 안내 전용 이벤트 채널 ---
+    // 매 GPS tick 마다 _guidanceMessage 가 "약 N미터 직진" 으로 덮어써져 회전/굽은길/횡단보도
+    // 등 일회성 안내가 iOS 200ms 폴링에 잡히지 않던 문제를 분리 채널로 해결한다.
+    // replay=0: 새 구독자는 과거 이벤트 받지 않음, 16 버퍼 + DROP_OLDEST 로 emit 손실 방지.
+    private val _navEvents = MutableSharedFlow<NavAnnouncement>(
+        replay = 0,
+        extraBufferCapacity = 16,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val navEvents: SharedFlow<NavAnnouncement> = _navEvents.asSharedFlow()
+    // Swift 가 SharedFlow.collect 를 직접 호출할 수 없으므로 콜백 패턴으로 브리지.
+    // CoroutineScope 가 NavigationManager 에 없어 collect 대신 직접 invoke 한다.
+    private var navEventListener: ((NavAnnouncement) -> Unit)? = null
 
     // 디버그 메시지
     private val _debugMessage = MutableStateFlow("")
@@ -599,8 +636,8 @@ class NavigationManager(
             baseMessage
         }
 
-        // forceRepeat — 직전과 같은 메시지여도(드물지만) 발화되도록.
-        speak(message, forceRepeat = true)
+        // A-3: 일회성 이벤트 채널로 발화. _guidanceMessage 덮어쓰기에 영향받지 않음.
+        announceEvent(message, forceRepeat = true)
     }
 
     private fun hasNearbyTrafficSignal(
@@ -626,7 +663,8 @@ class NavigationManager(
         if (!hasNearbyTrafficSignal(currentLat, currentLon)) return
 
         lastSignalPresenceAnnouncedWpIdx = crosswalkIdx
-        speak("신호등이 있습니다.", forceRepeat = true)
+        // A-3: 일회성 이벤트 채널.
+        announceEvent("신호등이 있습니다.", forceRepeat = true)
     }
 
     private fun announceSignalDirectionIfNeeded(
@@ -665,7 +703,8 @@ class NavigationManager(
             targetLon = signal.lon,
             userBearing = directionReferenceBearing,
         )
-        speak("신호등은 ${clockDirection} 방향으로 추정됩니다. 휴대폰을 해당 방향으로 향해 주세요.", forceRepeat = true)
+        // A-3: 일회성 이벤트 채널.
+        announceEvent("신호등은 ${clockDirection} 방향으로 추정됩니다. 휴대폰을 해당 방향으로 향해 주세요.", forceRepeat = true)
     }
 
     private fun findNearbyCrosswalkWaypointIndex(route: TMapRoute): Int? {
@@ -1895,7 +1934,8 @@ class NavigationManager(
                     "${distToNext.toInt()}미터 앞 ${nextWaypoint.description}"
                 }
 
-                speak(message)
+                // A-3: 일회성 사전안내 — 연속 안내(_guidanceMessage)에 잡아먹히지 않게 이벤트 채널로.
+                announceEvent(message, forceRepeat = false)
                 // 사전 안내가 나왔으면 직진 타이머 리셋 (중복 방지)
                 lastStraightGuidanceTime = currentTimeMillis()
             }
@@ -2068,7 +2108,8 @@ class NavigationManager(
         lastVirtualWpIndex = currentWaypointIndex
 
         if (curveAnnounceCount < navigatorConfig.curveMaxAnnouncementsPerCurve) {
-            speak("${side} 방향")
+            // A-3: 가상 wp 통과 시점 1회 곡선 방향 리마인더 — 일회성.
+            announceEvent("${side} 방향", forceRepeat = false)
             curveAnnounceCount++
         }
         lastCurveReminderDirection = curveDir
@@ -2114,7 +2155,8 @@ class NavigationManager(
         ) ?: return
 
         announcedAnnotationIds.add(candidate.startWaypointIndex)
-        speak(candidate.announceMessage)
+        // A-3: 회전/굽은길 사전안내는 일회성 이벤트 채널로 — 연속 안내 덮어쓰기 방지.
+        announceEvent(candidate.announceMessage, forceRepeat = false)
     }
 
     /**
@@ -2440,6 +2482,37 @@ class NavigationManager(
         val timestamp = currentTimeMillis()
         val entry = "[${timestamp % 100_000}] $message"
         _announcementLog.value = (_announcementLog.value + entry).takeLast(20)
+    }
+
+    /**
+     * A-3: 일회성 안내 전용. _guidanceMessage 를 건드리지 않는다.
+     * 연속 안내("약 N미터 직진") 가 같은 tick 안에서 덮어써도 이벤트 채널은 영향 없음.
+     */
+    private fun announceEvent(message: String, forceRepeat: Boolean) {
+        if (message.isBlank()) return
+        val event = NavAnnouncement(message, forceRepeat)
+        val ok = _navEvents.tryEmit(event)
+        println("[A3] announceEvent emit=$ok msg=$message")
+        navEventListener?.invoke(event)
+
+        // 발화 로그에는 일회성 이벤트도 같이 기록 — 디버그 패널 일관성 유지.
+        val timestamp = currentTimeMillis()
+        val entry = "[${timestamp % 100_000}] $message"
+        _announcementLog.value = (_announcementLog.value + entry).takeLast(20)
+    }
+
+    /**
+     * A-3: iOS 가 navEvents SharedFlow 를 직접 collect 할 수 없어 콜백으로 노출.
+     * 반환된 Cancellable 을 stopNavigation 시점에 cancel() 해 누수 방지.
+     * 단일 listener 만 등록 가능 — 새 구독이 들어오면 이전 구독을 덮어쓴다.
+     */
+    fun observeNavEvents(onEvent: (NavAnnouncement) -> Unit): Cancellable {
+        navEventListener = onEvent
+        return object : Cancellable {
+            override fun cancel() {
+                if (navEventListener === onEvent) navEventListener = null
+            }
+        }
     }
 
     // ========== CSV 로그 위임 ==========
