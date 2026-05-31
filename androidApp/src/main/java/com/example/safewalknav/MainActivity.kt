@@ -40,6 +40,7 @@ import android.widget.Toast
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -54,6 +55,10 @@ import com.example.safewalknav.ml.BoundingBoxOverlay
 import com.example.safewalknav.ml.TrafficLightAnalyzer
 import com.example.safewalknav.ml.TrafficLightDetection
 import com.example.safewalknav.ml.TrafficLightDetector
+import com.google.firebase.analytics.FirebaseAnalytics
+import com.google.firebase.analytics.ktx.analytics
+import com.google.firebase.analytics.logEvent
+import com.google.firebase.ktx.Firebase
 import com.example.safewalknav.onboarding.AutoOnboardingCoordinator
 import java.io.File
 import java.text.SimpleDateFormat
@@ -190,6 +195,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var navLogFile: File? = null
     private val tsFormat = SimpleDateFormat("HH:mm:ss.SSS")
 
+    // ==================== Firebase Analytics 클라우드 집계 (2026-05-29) ====================
+    // 외출별 walk_log 는 디바이스 로컬에 저장되지만, Firebase 는 다중 사용자/다중 외출을
+    // 한 곳에 통합 집계해서 대시보드 그래프로 보여준다. capstone 발표 슬라이드에 그래프 캡처
+    // 인용 가능. 백엔드 진로 측면에서도 BaaS 통합 사례.
+    //
+    // 커스텀 이벤트 5종:
+    //   navigation_start      — 외출 시작 (목적지/거리/waypoint 수/횡단보도 수)
+    //   crosswalk_zone_enter  — 횡단보도 zone 진입
+    //   traffic_light_announced — ML 신호등 안내 (color/transition_type/confidence)
+    //   flicker_detected      — 점멸 phase 감지 (gap_ms)
+    //   navigation_arrival    — 도착 (소요시간/거리/lean 카운트/ML 카운트)
+    private val firebaseAnalytics: FirebaseAnalytics by lazy { Firebase.analytics }
+
     // ==================== 외출 정량 평가 지표 (실 테스트용, 2026-05-29) ====================
     // startNavLog 시점에 모두 reset, closeNavLog 시점에 walk_log 끝에 SUMMARY 블록으로 출력.
     // Capstone 발표 / 시각장애인 사용자 테스트 분석 / 슬라이드 정량 인용용.
@@ -297,6 +315,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // PR-UX2: 미리보기 use case
     // PR-AI: ImageAnalysis use case 추가 — TrafficLightDetector 로 보행자 신호등 색 검출
     private var cameraProvider: ProcessCameraProvider? = null
+    private var camera: Camera? = null
+    private var hasNearbyTrafficSignalForCamera = false
+    private val TRAFFIC_SIGNAL_CAMERA_ZOOM_RATIO = 2f
 
     // ==================== 신호등 검출 (PR-AI) ====================
 
@@ -359,7 +380,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var lastConfirmedColor: Int = -1      // 3-frame 확정 통과한 마지막 색
     private var lastHeartbeatAt: Long = 0L        // 마지막 heartbeat 톤 시각
     private var lastValidatedAt: Long = 0L        // 마지막 validated 검출 시각 (timeout 판정용)
-    private val STABILITY_FRAMES = 3
+    private val RED_STABILITY_FRAMES = 2
+    private val GREEN_STABILITY_FRAMES = 3
     private val HEARTBEAT_INTERVAL_MS = 15_000L
     private val DETECTION_TIMEOUT_MS = 10_000L
 
@@ -439,7 +461,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             gpsDialogDeniedTime = System.currentTimeMillis()
             if (ttsReady && !welcomePlayed) {
                 welcomePlayed = true
-                speakTTS("SafeWalkNav입니다. GPS가 꺼져 있어 위치를 확인할 수 없습니다. 설정에서 GPS를 켜주세요.")
+                speakTTS("SafeWalk입니다. GPS가 꺼져 있어 위치를 확인할 수 없습니다. 설정에서 GPS를 켜주세요.")
             }
         }
     }
@@ -779,6 +801,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             compassContainer.visibility = View.VISIBLE
             stopCamera()
         }
+    }
+
+    private fun applyTrafficSignalCameraZoom() {
+        val camera = camera ?: return
+        val targetZoom = if (hasNearbyTrafficSignalForCamera) TRAFFIC_SIGNAL_CAMERA_ZOOM_RATIO else 1f
+        val zoomState = camera.cameraInfo.zoomState.value
+        val clampedZoom = if (zoomState != null) {
+            targetZoom.coerceIn(zoomState.minZoomRatio, zoomState.maxZoomRatio)
+        } else {
+            targetZoom
+        }
+        camera.cameraControl.setZoomRatio(clampedZoom)
+        appendNavLog("Camera zoom=${"%.1f".format(clampedZoom)} signalNearby=$hasNearbyTrafficSignalForCamera")
     }
 
     private fun updateDebugInfo() {
@@ -1145,6 +1180,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         val mark = if (wp.pointType == "CROSSWALK" || wp.turnType in 211..217) "🚦" else "  "
                         appendNavLog("$mark [$i] type=${wp.pointType} turn=${wp.turnType} road=${wp.roadType} dist=${wp.distance} desc=${wp.description.take(80)}")
                     }
+                    // Firebase Analytics — 외출 시작 이벤트
+                    firebaseAnalytics.logEvent("navigation_start") {
+                        param("destination_name", selected.name)
+                        param("total_distance_m", route.totalDistance.toLong())
+                        param("waypoint_count", route.waypoints.size.toLong())
+                        param("crosswalk_count", crosswalks.toLong())
+                    }
                 }
 
                 // ──── 초기 방향 안내 (AutoOnboardingCoordinator) ────
@@ -1218,6 +1260,22 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      */
     private fun finishNavigation(arrivedName: String) {
         appendNavLog("finishNavigation: 도착 — $arrivedName")
+        // Firebase Analytics — 도착 이벤트 (closeNavLog 전에 호출, 그래야 metric 카운터가 살아있음)
+        val durationSec = if (metricStartMs > 0) (System.currentTimeMillis() - metricStartMs) / 1000 else 0L
+        val totalMlAnnounces = metricMlRedCount + metricMlGreenStaticCount +
+                metricMlTransitionCount + metricMlGreenToRedCount
+        firebaseAnalytics.logEvent("navigation_arrival") {
+            param("destination_name", arrivedName)
+            param("duration_sec", durationSec)
+            param("distance_m", metricDistanceM.toLong())
+            param("lean_count", metricLeanCount.toLong())
+            param("curve_count", metricCurveCount.toLong())
+            param("crosswalk_announce_count", metricCrosswalkAnnounceCount.toLong())
+            param("reroute_count", metricRerouteCount.toLong())
+            param("zone_enter_count", metricZoneEnterCount.toLong())
+            param("ml_announce_total", totalMlAnnounces.toLong())
+            param("flicker_count", metricFlickerCount.toLong())
+        }
         closeNavLog()
         trackingJob?.cancel()
         stopAutoRepeat()
@@ -1326,6 +1384,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     "GPS_TICK lat=${"%.5f".format(location.latitude)} lon=${"%.5f".format(location.longitude)} " +
                             "$accuracyText spd=$speedText dest=${dist.toInt()}m | $debugSnapshot"
                 )
+
+                // IMU + GPS Kalman heading 융합 진단 — 2026-05-31 추가.
+                // NavigationManager.fuseImuAndGps 가 매 sensor tick (~16Hz) 호출되며
+                // latestFusionDebug 를 갱신하지만, walk_log 에는 GPS tick 주기(500ms~2s)로만 기록해
+                // 파일 크기 폭주 방지. 외출 후 walk_log 에서 HEADING_FUSION 라인 grep 으로 융합 동작 검증.
+                val fusionDebug = navigationManager.latestFusionDebug
+                if (fusionDebug.isNotEmpty()) {
+                    appendNavLog("HEADING_FUSION $fusionDebug")
+                }
 
                 if (BuildConfig.DEBUG) {
                     tvDebugGuidance.text =
@@ -1605,6 +1672,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     Log.d("SafeWalkNav", "Crosswalk zone ENTER | TrafficLight AI=ON")
                     appendNavLog("Crosswalk zone ENTER | TrafficLight AI=ON")
                     updateAiDebugResult("AI ON | waiting frame")
+                    // Firebase Analytics — 횡단보도 zone 진입 이벤트
+                    firebaseAnalytics.logEvent("crosswalk_zone_enter") {
+                        param("session_start_ms", metricStartMs)
+                        param("zone_enter_count_in_session", metricZoneEnterCount.toLong())
+                    }
                     // 화면 모드 전환 — 나침반 → 카메라 (NAVIGATING 중일 때만)
                     if (appState == AppState.NAVIGATING) {
                         speakTTS("횡단보도가 가까워졌습니다. 휴대폰을 세로로 들어주세요.")
@@ -1621,6 +1693,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     }
                 }
                 updateDebugInfo()
+            }
+        }
+
+        lifecycleScope.launch {
+            navigationManager.hasNearbyTrafficSignal.collectLatest { hasSignal ->
+                hasNearbyTrafficSignalForCamera = hasSignal
+                applyTrafficSignalCameraZoom()
             }
         }
 
@@ -1717,7 +1796,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      * 권한 없으면 silent skip — NAVIGATING 자체는 음성/진동/비콘으로 정상 동작.
      */
     private fun startCamera() {
-        if (cameraProvider != null) return   // 이미 작동 중
+        if (cameraProvider != null) {
+            applyTrafficSignalCameraZoom()
+            return
+        }   // 이미 작동 중
 
         if (ActivityCompat.checkSelfPermission(
                 this, Manifest.permission.CAMERA
@@ -1758,12 +1840,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (trafficLightDetector == null) {
             try {
                 trafficLightDetector = TrafficLightDetector(this).apply {
-                    // 디버그 빌드일 땐 진단 모드 ON — confidence 0.3 까지 잡아서 모델이 신호등을 보고 있는지
-                    // 임계값에 막혀 떨어진 건지 식별 가능하게 함. 운영 (release) 에선 자동으로 OFF.
-                    diagnosticMode = BuildConfig.DEBUG
+                    // 실측 중 TTS 판정은 운영 임계값(0.7)을 사용한다.
+                    // diagnosticMode=true 는 0.3 후보까지 TTS state machine 에 들어와 오발화 위험이 크다.
+                    diagnosticMode = false
                 }
-                Log.d("SafeWalkNav", "TrafficLightDetector loaded (diagnosticMode=${BuildConfig.DEBUG})")
-                appendNavLog("TrafficLightDetector loaded (diagnosticMode=${BuildConfig.DEBUG})")
+                Log.d("SafeWalkNav", "TrafficLightDetector loaded (diagnosticMode=false)")
+                appendNavLog("TrafficLightDetector loaded (diagnosticMode=false)")
             } catch (e: Exception) {
                 Log.e("SafeWalkNav", "Failed to load TrafficLightDetector", e)
                 appendNavLog("Failed to load TrafficLightDetector: ${e.message}")
@@ -1808,15 +1890,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
 
                 provider.unbindAll()
-                provider.bindToLifecycle(
+                camera = provider.bindToLifecycle(
                     this,
                     CameraSelector.DEFAULT_BACK_CAMERA,
                     *useCases.toTypedArray()
                 )
+                applyTrafficSignalCameraZoom()
                 Log.d("SafeWalkNav", "Camera bound (use cases: ${useCases.size})")
             } catch (e: Exception) {
                 Log.e("SafeWalkNav", "Camera bind failed", e)
                 cameraProvider = null
+                camera = null
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -1909,10 +1993,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // 단 TEST_MODE_FORCE_ML_ON=true 면 zone 무관하게 TTS 발화 + 디바운스/박스필터 진행 (인식 정확도 테스트용).
         if (!inCrosswalkZone && !TEST_MODE_FORCE_ML_ON) return
 
-        // 1차 필터: 너무 작은 박스 제외 (멀리 있는 noise / 빨간 점 noise 차단)
-        // 신호등은 보통 화면 너비/높이의 6% 이상 차지. 그보다 작으면 noise 가능성 높음.
-        val minBoxDimension = 0.06f
+        // 1차 필터: 너무 작은 박스 제외.
+        // 빨간불은 놓치는 비용이 크므로 초록불보다 작은 박스도 통과시킨다.
+        val minRedBoxDimension = 0.03f
+        val minGreenBoxDimension = 0.06f
         val validated = detections.filter { d ->
+            val minBoxDimension = if (d.classId == 0) minRedBoxDimension else minGreenBoxDimension
             d.bbox.width >= minBoxDimension && d.bbox.height >= minBoxDimension
         }
         if (validated.isEmpty()) {
@@ -1920,7 +2006,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val small = detections.first()
             appendNavLog(
                 "TL_DIAG  └─ ALL_TOO_SMALL nearest=${small.label} ${(small.confidence * 100).toInt()}% " +
-                        "box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}% (min=6%)"
+                        "box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}% " +
+                        "(minR=3%, minG=6%)"
             )
             if (BuildConfig.DEBUG) {
                 tvDebugGuidance.text = "TL noise 무시: ${small.label} ${(small.confidence * 100).toInt()}% box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}%"
@@ -1933,7 +2020,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             return
         }
 
-        val nearest = validated.maxByOrNull { it.bbox.area } ?: return
+        val nearest = selectTrafficLightForSpeech(validated) ?: return
         val detectedColor = nearest.classId
 
         val now = System.currentTimeMillis()
@@ -1976,7 +2063,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
         lastValidatedAt = now
 
-        // ──── (b) 안정성 필터 — 3 frame 연속 같은 색이어야 confirm ────
+        // ──── (b) 안정성 필터 — 빨간불은 더 빠르게, 초록불은 더 보수적으로 confirm ────
         if (detectedColor == currentColorCandidate) {
             colorStreak++
         } else {
@@ -1984,17 +2071,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             colorStreak = 1
         }
 
-        if (colorStreak < STABILITY_FRAMES) {
+        val requiredStabilityFrames = if (detectedColor == 0) RED_STABILITY_FRAMES else GREEN_STABILITY_FRAMES
+        if (colorStreak < requiredStabilityFrames) {
             appendNavLog(
-                "TL_DIAG  └─ STABILITY_PENDING candidate=${nearest.label} streak=$colorStreak/$STABILITY_FRAMES " +
+                "TL_DIAG  └─ STABILITY_PENDING candidate=${nearest.label} streak=$colorStreak/$requiredStabilityFrames " +
                         "conf=${(nearest.confidence * 100).toInt()}% " +
                         "box=${(nearest.bbox.width * 100).toInt()}x${(nearest.bbox.height * 100).toInt()}%"
             )
             if (BuildConfig.DEBUG) {
-                tvDebugGuidance.text = "TL stability: ${nearest.label} ${(nearest.confidence * 100).toInt()}% (streak $colorStreak/$STABILITY_FRAMES)"
+                tvDebugGuidance.text = "TL stability: ${nearest.label} ${(nearest.confidence * 100).toInt()}% (streak $colorStreak/$requiredStabilityFrames)"
                 updateAiDebugResult(
                     "$aiResultLine | action=STABILITY_PENDING label=${nearest.label} " +
-                            "streak=$colorStreak/$STABILITY_FRAMES"
+                            "streak=$colorStreak/$requiredStabilityFrames"
                 )
             }
             return
@@ -2042,6 +2130,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             vibrateWarning()                    // 강한 staccato 진동
             flickerLockoutUntil = now + FLICKER_LOCKOUT_MS
             metricFlickerCount++                // 정량 지표
+            // Firebase Analytics — Flicker(점멸) 감지 이벤트
+            firebaseAnalytics.logEvent("flicker_detected") {
+                param("gap_ms", gapMs)
+                param("prev_color", classLabel(previousColor))
+                param("new_color", classLabel(confirmedColor))
+            }
 
             // state 정리 — 락아웃 동안 streak / candidate 갱신 안 되게.
             // lastConfirmedColor 는 일단 -1 로 — 락아웃 종료 후 보수적 재시작.
@@ -2104,6 +2198,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         speakTTS(message)
         if (withVibrate) vibrateShort()
 
+        // Firebase Analytics — ML 신호등 안내 이벤트 (color + transition_type + confidence)
+        firebaseAnalytics.logEvent("traffic_light_announced") {
+            param("color", classLabel(confirmedColor))
+            param("transition_type", action)
+            param("confidence_pct", (nearest.confidence * 100).toLong())
+            param("box_width_pct", (nearest.bbox.width * 100).toLong())
+            param("box_height_pct", (nearest.bbox.height * 100).toLong())
+        }
+
         Log.d("SafeWalkNav", "TL: $action — $message (conf=${nearest.confidence}, prev=$previousColor)")
         appendNavLog(
             "TL_DIAG  └─ $action prev=${classLabel(previousColor)} new=${classLabel(confirmedColor)} " +
@@ -2123,6 +2226,20 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    /** TTS 판정용 대표 검출 선택. 안전상 빨간불 후보를 초록불보다 우선한다. */
+    private fun selectTrafficLightForSpeech(
+        detections: List<TrafficLightDetection>,
+    ): TrafficLightDetection? {
+        val red = detections
+            .filter { it.classId == 0 }
+            .maxWithOrNull(compareBy<TrafficLightDetection> { it.confidence }.thenBy { it.bbox.area })
+        if (red != null) return red
+
+        return detections.maxWithOrNull(
+            compareBy<TrafficLightDetection> { it.confidence }.thenBy { it.bbox.area }
+        )
+    }
+
     /** classId → 사람이 읽기 쉬운 라벨 (로그용). */
     private fun classLabel(classId: Int): String = when (classId) {
         0 -> "RED"
@@ -2137,6 +2254,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         } catch (_: Exception) {
         }
         cameraProvider = null
+        camera = null
         cameraPreviewContainer.removeAllViews()
         // removeAllViews() 가 오버레이 View 자체는 제거하지만 reference 는 명시적으로 비워 GC 친화적으로.
         boundingBoxOverlay = null
@@ -2253,7 +2371,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             // 화면 진입 시 읽어주고, 그 끝에 "두 번 탭하여 활성화" hint 가 자동 추가됨.
             // 우리 TTS 가 동시에 나오면 두 음성이 겹쳐서 혼란.
             if (!isTalkBackEnabled()) {
-                speakTTS("SafeWalkNav입니다. 내비게이션을 실행하시려면 화면을 2초간 길게 눌러주세요.")
+                speakTTS("SafeWalk입니다. 내비게이션을 실행하시려면 화면을 2초간 길게 눌러주세요.")
             }
         }
     }
