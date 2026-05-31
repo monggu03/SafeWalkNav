@@ -64,6 +64,44 @@ class MessageBuilderTest {
         assertTrue(msg.contains("크게"), "급회전 표현 빠짐: $msg")
     }
 
+    // ─── buildImminentAnnounce ───
+
+    @Test
+    fun `imminent - LEFT 면 지금 왼쪽으로`() {
+        val msg = MessageBuilder.buildImminentAnnounce(
+            ann(PathSegmentType.TURN, TurnDirection.LEFT),
+        )
+        assertEquals("지금 왼쪽으로", msg)
+    }
+
+    @Test
+    fun `imminent - RIGHT 면 지금 오른쪽으로`() {
+        val msg = MessageBuilder.buildImminentAnnounce(
+            ann(PathSegmentType.SHARP_TURN, TurnDirection.RIGHT),
+        )
+        assertEquals("지금 오른쪽으로", msg)
+    }
+
+    @Test
+    fun `imminent - direction NONE 이면 빈 문자열`() {
+        val msg = MessageBuilder.buildImminentAnnounce(
+            ann(PathSegmentType.CURVE, TurnDirection.NONE),
+        )
+        assertEquals("", msg)
+    }
+
+    @Test
+    fun `imminent - CURVE 와 SHARP_TURN 모두 같은 통일된 문구`() {
+        // 직전은 심각도 표현 빼고 통일.
+        val curve = MessageBuilder.buildImminentAnnounce(
+            ann(PathSegmentType.CURVE, TurnDirection.RIGHT),
+        )
+        val sharp = MessageBuilder.buildImminentAnnounce(
+            ann(PathSegmentType.SHARP_TURN, TurnDirection.RIGHT),
+        )
+        assertEquals(curve, sharp)
+    }
+
     // ─── buildInitialHeadingMessage ───
 
     @Test
