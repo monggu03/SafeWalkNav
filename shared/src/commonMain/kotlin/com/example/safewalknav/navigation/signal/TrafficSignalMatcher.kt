@@ -34,9 +34,9 @@ object TrafficSignalMatcher {
         crosswalkLon: Double,
         routeBearing: Float,
         signals: List<TrafficSignalLocation>,
-        crosswalkRadiusMeters: Float = 100f,
-        currentRadiusMeters: Float = 160f,
-        maxBearingDiffDegrees: Float = 120f,
+        crosswalkRadiusMeters: Float = 50f,
+        currentRadiusMeters: Float = 80f,
+        maxBearingDiffDegrees: Float = 90f,
     ): TrafficSignalLocation? {
         return signals
             .mapNotNull { signal ->
