@@ -456,11 +456,16 @@ final class NavigationViewModel: ObservableObject {
 
     private func handleNavEvent(_ ev: NavAnnouncement) {
         let msg = ev.message
-        print("[A3-iOS] recv msg=\(msg) forceRepeat=\(ev.forceRepeat)")
+        print("[A3-iOS] recv msg=\(msg) forceRepeat=\(ev.forceRepeat) interrupt=\(ev.interrupt)")
         guard !msg.isEmpty, !isOnboarding else { return }
-        // 이벤트 채널은 일회성 → 고우선. TtsManager 가 .high 도 큐잉만 하므로 끊지는 않음.
-        // forceRepeat 는 TtsManager 에 매핑되는 force 개념이 없어 현재는 무시(보고서 참고).
-        tts.speak(msg, priority: .high)
+        if ev.interrupt {
+            // 회전 직전(IMMINENT) 등 타이밍 생명선 안내 — 현재 발화·큐를 끊고 즉시.
+            tts.speakImmediately(msg)
+        } else {
+            // 이벤트 채널은 일회성 → 고우선. TtsManager 가 .high 도 큐잉만 하므로 끊지는 않음.
+            // forceRepeat 는 TtsManager 에 매핑되는 force 개념이 없어 현재는 무시(보고서 참고).
+            tts.speak(msg, priority: .high)
+        }
     }
 
     // MARK: - Side Effects

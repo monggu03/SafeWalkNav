@@ -20,6 +20,8 @@ import com.example.safewalknav.navigation.signal.TrafficIntersectionParser
 import com.example.safewalknav.navigation.signal.TrafficSignalLocation
 import com.example.safewalknav.navigation.signal.TrafficSignalMatcher
 import com.example.safewalknav.navigation.signal.TrafficSignalRemainingTimeParser
+import com.example.safewalknav.navigation.tbfw.AnnouncementStage
+import com.example.safewalknav.navigation.tbfw.MessageBuilder
 import com.example.safewalknav.navigation.tbfw.NavigatorConfig
 import com.example.safewalknav.navigation.tbfw.PathAnnotation
 import com.example.safewalknav.navigation.tbfw.RouteAnnotationLogger
@@ -57,10 +59,15 @@ import kotlin.math.sin
 /**
  * A-3 일회성 안내 이벤트.
  * 연속 안내(_guidanceMessage StateFlow)와 분리된 채널로 흐른다.
+ *
+ * @property interrupt true 면 iOS TTS 가 현재 발화·큐를 끊고 즉시 발화(선점).
+ *   회전 직전(IMMINENT) 발화 같은 타이밍 생명선 안내에서만 true. 기본값을 두지 않아
+ *   호출부가 의도를 명시하도록 강제(Swift interop 도 default 인자 인식 안 함).
  */
 data class NavAnnouncement(
     val message: String,
     val forceRepeat: Boolean,
+    val interrupt: Boolean,
 )
 
 /**
@@ -224,8 +231,9 @@ class NavigationManager(
     // 사용자 진행 거리 vs annotation 거리 비교로 사전 안내 시점을 잡는 데 사용.
     private var cumulativeDistances: List<Double> = emptyList()
 
-    // 이미 발화한 annotation 의 startWaypointIndex 집합. 중복 발화 방지.
-    private val announcedAnnotationIds = mutableSetOf<Int>()
+    // 이미 발화한 (startWaypointIndex, stage) 키 집합. 중복 발화 방지.
+    // stage 별로 dedup 하므로 같은 회전이라도 APPROACH 1회 + IMMINENT 1회 가능.
+    private val announcedKeys = mutableSetOf<Pair<Int, AnnouncementStage>>()
 
     // RouteAnnotator/announceDistance 등 TBFW 튜닝 상수 묶음 — 매번 생성하지 않고 인스턴스 보관.
     private val navigatorConfig = NavigatorConfig()
@@ -440,9 +448,12 @@ class NavigationManager(
         val fused = ((fusedRad * 180.0 / PI + 360.0) % 360.0).toFloat()
 
         // 진단 로그 — 융합 동작 검증용. 외출 후 walk_log 에서 fusion 가중치 추적 가능.
+        // K/N commonMain 은 String.format 미지원 — math.round 로 직접 2자리 반올림.
+        val speedR2 = kotlin.math.round(speed * 100.0) / 100.0
+        val gpsWR2 = kotlin.math.round(gpsWeight * 100.0) / 100.0
         val debug = "imu=${imuAzimuth.toInt()}° gps=${gpsKalmanHeading.toInt()}° " +
-                "speed=${"%.2f".format(speed)} acc=${gpsAccuracy.toInt()}m " +
-                "gpsW=${"%.2f".format(gpsWeight)} fused=${fused.toInt()}°"
+                "speed=${speedR2} acc=${gpsAccuracy.toInt()}m " +
+                "gpsW=${gpsWR2} fused=${fused.toInt()}°"
         println("[HEADING_FUSION] $debug")
         latestFusionDebug = debug
         return fused
@@ -621,10 +632,57 @@ class NavigationManager(
 
         // 누적 거리 / annotation 발화 추적은 확장된 waypoint 리스트 기준으로 다시 계산.
         cumulativeDistances = computeCumulativeDistances(currentRoute!!.waypoints)
-        announcedAnnotationIds.clear()
+        announcedKeys.clear()
         virtualPassCount = 0
         skipCandidateStartMs = 0L
         skipCandidateForIndex = -1
+
+        // ─── G0: distanceFromStartM 좌표계 정렬 ───
+        // RouteAnnotator 는 expand 이전 원본 waypoint chord합 으로 distanceFromStartM 을 채운다.
+        // 반면 cumulativeDistances 는 expand 이후 확장 chord합(≈호 길이) 기준이라,
+        // 곡선당 (arc − chord) 만큼의 시프트가 모든 annotation 의 gap 계산에 누적된다.
+        // 옵션 B: expand 직후 annotation 의 distanceFromStartM 만 확장 cumulative 로 재매핑.
+        //   인덱스(startWaypointIndex)·메시지·의미는 그대로. 거리만 정렬.
+        val originalWaypointCount = route.waypoints.size
+        val expandedForRemap = currentRoute!!.waypoints
+        val originalToExpandedIndex = IntArray(originalWaypointCount) { -1 }
+        var origCounter = 0
+        for (exp in expandedForRemap.indices) {
+            if (!expandedForRemap[exp].isVirtual) {
+                if (origCounter < originalWaypointCount) {
+                    originalToExpandedIndex[origCounter] = exp
+                }
+                origCounter++
+            }
+        }
+        require(origCounter == originalWaypointCount) {
+            "[G0] expand 후 비가상 waypoint 수 불일치: 비가상=$origCounter expected=$originalWaypointCount"
+        }
+        val beforeDistances = pathAnnotations.map { it.distanceFromStartM }
+        pathAnnotations = pathAnnotations.mapIndexed { i, ann ->
+            val expIdx = if (ann.startWaypointIndex in 0 until originalWaypointCount) {
+                originalToExpandedIndex[ann.startWaypointIndex]
+            } else -1
+            if (expIdx < 0 || expIdx >= cumulativeDistances.size) {
+                println("[G0] remap 실패 ann#$i startIdx=${ann.startWaypointIndex} → 원거리 유지")
+                ann
+            } else {
+                val newDist = cumulativeDistances[expIdx]
+                val before = beforeDistances[i]
+                val delta = newDist - before
+                // 부동소수 잡음 무시용 1자리 반올림 (commonMain 에 String.format 없음 → math.round 직접)
+                val beforeR = kotlin.math.round(before * 10.0) / 10.0
+                val afterR = kotlin.math.round(newDist * 10.0) / 10.0
+                val deltaR = kotlin.math.round(delta * 10.0) / 10.0
+                println(
+                    "[G0-CHECK] ann#$i type=${ann.type} startIdx=${ann.startWaypointIndex} " +
+                        "before=${beforeR}m after=${afterR}m Δ=+${deltaR}m"
+                )
+                ann.copy(distanceFromStartM = newDist)
+            }
+        }
+        // ──────────────────────────────────────────
+
         _annotations.value = pathAnnotations
         _announcementLog.value = emptyList()
 
@@ -737,7 +795,7 @@ class NavigationManager(
         }
 
         // A-3: 일회성 이벤트 채널로 발화. _guidanceMessage 덮어쓰기에 영향받지 않음.
-        announceEvent(message, forceRepeat = true)
+        announceEvent(message, forceRepeat = true, interrupt = false)
     }
 
     private fun announceSignalPresenceIfNeeded(
@@ -755,7 +813,7 @@ class NavigationManager(
 
         lastSignalPresenceAnnouncedWpIdx = crosswalkIdx
         // A-3: 일회성 이벤트 채널.
-        announceEvent("신호등이 있습니다.", forceRepeat = true)
+        announceEvent("신호등이 있습니다.", forceRepeat = true, interrupt = false)
     }
 
     private fun announceSignalDirectionIfNeeded(
@@ -787,7 +845,7 @@ class NavigationManager(
             userBearing = directionReferenceBearing,
         )
         // A-3: 일회성 이벤트 채널.
-        announceEvent("신호등은 ${clockDirection} 방향으로 추정됩니다. 휴대폰을 해당 방향으로 향해 주세요.", forceRepeat = true)
+        announceEvent("신호등은 ${clockDirection} 방향으로 추정됩니다. 휴대폰을 해당 방향으로 향해 주세요.", forceRepeat = true, interrupt = false)
     }
 
     private fun findSignalForCrosswalkZone(
@@ -858,7 +916,7 @@ class NavigationManager(
         consecutiveRerouteCount = 0
         pathAnnotations = emptyList()
         cumulativeDistances = emptyList()
-        announcedAnnotationIds.clear()
+        announcedKeys.clear()
         virtualPassCount = 0
         lastCurveReminderTime = 0L
         lastCurveReminderDirection = null
@@ -907,7 +965,7 @@ class NavigationManager(
         consecutiveRerouteCount = 0
         pathAnnotations = emptyList()
         cumulativeDistances = emptyList()
-        announcedAnnotationIds.clear()
+        announcedKeys.clear()
         virtualPassCount = 0
         lastCurveReminderTime = 0L
         lastCurveReminderDirection = null
@@ -2059,7 +2117,7 @@ class NavigationManager(
                 }
 
                 // A-3: 일회성 사전안내 — 연속 안내(_guidanceMessage)에 잡아먹히지 않게 이벤트 채널로.
-                announceEvent(message, forceRepeat = false)
+                announceEvent(message, forceRepeat = false, interrupt = false)
                 // 사전 안내가 나왔으면 직진 타이머 리셋 (중복 방지)
                 lastStraightGuidanceTime = currentTimeMillis()
             }
@@ -2233,7 +2291,7 @@ class NavigationManager(
 
         if (curveAnnounceCount < navigatorConfig.curveMaxAnnouncementsPerCurve) {
             // A-3: 가상 wp 통과 시점 1회 곡선 방향 리마인더 — 일회성.
-            announceEvent("${side} 방향", forceRepeat = false)
+            announceEvent("${side} 방향", forceRepeat = false, interrupt = false)
             curveAnnounceCount++
         }
         lastCurveReminderDirection = curveDir
@@ -2243,19 +2301,21 @@ class NavigationManager(
      * RouteAnnotator 가 미리 분석한 annotation 을 사용자 진행 거리 기준으로 발화한다.
      *
      * 발화 조건:
-     *   - 다음 waypoint 가 15m 이내면 waypoint 사전 안내와 충돌하므로 발화 보류.
-     *   - 사용자 누적 거리(userCumulativeDistance) 와 annotation 의 시작 거리
-     *     (distanceFromStartM) 차이가 type 별 triggerDist 이하일 때 발화.
-     *   - 같은 annotation 은 한 번만 발화 (announcedAnnotationIds 로 중복 방지).
+     *   - 2단 안내(2026-05-31): selectAnnouncementCandidate 가 [AnnouncementStage] 로 분기.
+     *       * APPROACH (예고, gap (imminent, triggerDist]) → "곧 …" — waypoint 게이트(5m) 적용.
+     *       * IMMINENT (직전, gap [0, imminent])           → "지금 …" — 게이트 우회 + 선점 발화.
+     *   - 음수 gap(이미 지난 회전)은 selector 에서 제외 — "지난 회전 발화" 0건 불변식 유지.
+     *   - dedup 키는 (startWaypointIndex, stage) — 같은 회전 APPROACH 1회 + IMMINENT 1회까지.
      *   - announceMessage 가 비어있지 않음 (STRAIGHT/NONE 은 빈 문자열).
      *
      * 직선 거리 대신 누적 거리를 쓰는 이유: 굽은 경로에서 직선 거리가 실제 진행 거리를
-     * 과소평가해 안내가 너무 늦게 나오는 문제가 있었다.
+     * 과소평가해 안내가 너무 늦게 나오는 문제가 있었다. (G0 정렬 후 같은 폴리라인 기준)
      *
      * triggerDist 는 annotation type 에 따라 다름:
-     *   SLIGHT_CURVE, CURVE, INTERNAL_CURVE → announceDistanceCurveM (5m)
-     *   SLIGHT_TURN, TURN                   → announceDistanceTurnM  (5m)
-     *   SHARP_TURN                          → announceDistanceSharpM (5m)
+     *   SLIGHT_CURVE, CURVE, INTERNAL_CURVE → announceDistanceCurveM (20m, A-2 후)
+     *   SLIGHT_TURN, TURN                   → announceDistanceTurnM  (25m, A-2 후)
+     *   SHARP_TURN                          → announceDistanceSharpM (30m, A-2 후)
+     * IMMINENT 윈도우는 announceDistance*M 안쪽의 imminentDistanceM(기본 5m).
      */
     private fun announceUpcomingAnnotation(
         currentLat: Double, currentLon: Double, speed: Float,
@@ -2264,23 +2324,46 @@ class NavigationManager(
         if (speed < 0.3f) return
 
         val route = currentRoute ?: return
-        if (currentWaypointIndex < route.waypoints.size) {
-            val wp = route.waypoints[currentWaypointIndex]
-            val distWp = distanceBetween(currentLat, currentLon, wp.lat, wp.lon)
-            if (distWp <= 15f) return
-        }
 
         val userCum = userCumulativeDistance(currentLat, currentLon, route)
-        val candidate = selectAnnouncementCandidate(
+        val pick = selectAnnouncementCandidate(
             annotations = pathAnnotations,
             userCumulativeDistance = userCum,
-            announcedIds = announcedAnnotationIds,
+            announcedKeys = announcedKeys,
             config = navigatorConfig,
         ) ?: return
 
-        announcedAnnotationIds.add(candidate.startWaypointIndex)
-        // A-3: 회전/굽은길 사전안내는 일회성 이벤트 채널로 — 연속 안내 덮어쓰기 방지.
-        announceEvent(candidate.announceMessage, forceRepeat = false)
+        // waypoint 사전 안내(5m) 충돌 게이트 — APPROACH 에만 적용.
+        // IMMINENT 는 본질상 gap≤5m → distWp 도 작을 수밖에 없어 게이트로 일괄 차단되면 안 됨.
+        if (pick.stage == AnnouncementStage.APPROACH &&
+            currentWaypointIndex < route.waypoints.size
+        ) {
+            val wp = route.waypoints[currentWaypointIndex]
+            val distWp = distanceBetween(currentLat, currentLon, wp.lat, wp.lon)
+            if (distWp <= 5f) return
+        }
+
+        val gapR1 = kotlin.math.round(pick.gapM * 10.0) / 10.0
+        println(
+            "[STAGE] emit idx=${pick.annotation.startWaypointIndex} type=${pick.annotation.type} " +
+                "stage=${pick.stage} gap=${gapR1}m"
+        )
+
+        // A-3: 회전 사전안내는 일회성 이벤트 채널로 — 연속 안내 덮어쓰기 방지.
+        when (pick.stage) {
+            AnnouncementStage.APPROACH -> announceEvent(
+                message = MessageBuilder.buildAnnotationAnnounce(pick.annotation),
+                forceRepeat = false,
+                interrupt = false,
+            )
+            AnnouncementStage.IMMINENT -> announceEvent(
+                // 직전은 타이밍 생명선 → iOS TTS 선점.
+                message = MessageBuilder.buildImminentAnnounce(pick.annotation),
+                forceRepeat = false,
+                interrupt = true,
+            )
+        }
+        announcedKeys.add(Pair(pick.annotation.startWaypointIndex, pick.stage))
     }
 
     /**
@@ -2611,12 +2694,15 @@ class NavigationManager(
     /**
      * A-3: 일회성 안내 전용. _guidanceMessage 를 건드리지 않는다.
      * 연속 안내("약 N미터 직진") 가 같은 tick 안에서 덮어써도 이벤트 채널은 영향 없음.
+     *
+     * @param interrupt iOS TTS 가 현재 발화·큐를 끊고 즉시 발화할지(선점). 회전 직전 같은
+     *   타이밍 생명선 안내에서만 true. 다른 일회성 이벤트는 false (큐잉).
      */
-    private fun announceEvent(message: String, forceRepeat: Boolean) {
+    private fun announceEvent(message: String, forceRepeat: Boolean, interrupt: Boolean) {
         if (message.isBlank()) return
-        val event = NavAnnouncement(message, forceRepeat)
+        val event = NavAnnouncement(message, forceRepeat, interrupt)
         val ok = _navEvents.tryEmit(event)
-        println("[A3] announceEvent emit=$ok msg=$message")
+        println("[A3] announceEvent emit=$ok interrupt=$interrupt msg=$message")
         navEventListener?.invoke(event)
 
         // 발화 로그에는 일회성 이벤트도 같이 기록 — 디버그 패널 일관성 유지.

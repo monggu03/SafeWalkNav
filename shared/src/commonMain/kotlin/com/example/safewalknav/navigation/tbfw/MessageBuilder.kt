@@ -14,7 +14,7 @@ package com.example.safewalknav.navigation.tbfw
 object MessageBuilder {
 
     /**
-     * RouteAnnotator 가 만든 PathAnnotation 한 건에 대한 음성 안내 문장.
+     * RouteAnnotator 가 만든 PathAnnotation 한 건에 대한 음성 안내 문장 (예고/APPROACH).
      * STRAIGHT 또는 direction == NONE 이면 빈 문자열을 돌려준다 (안내 안 함).
      */
     fun buildAnnotationAnnounce(annotation: PathAnnotation): String {
@@ -38,6 +38,21 @@ object MessageBuilder {
                 "곧 ${dir}으로 휘어집니다."
             PathSegmentType.STRAIGHT -> ""
         }
+    }
+
+    /**
+     * 직전(IMMINENT) 발화 — 회전 코앞(~5m 전) 에서 선점으로 짧게 알리는 문장.
+     *
+     * 심각도("크게" 등) 는 예고(APPROACH) 에서 이미 전달했으므로 직전은 통일된 "지금 {dir}으로" 만 사용.
+     * direction == NONE 이면 빈 문자열을 돌려준다.
+     */
+    fun buildImminentAnnounce(annotation: PathAnnotation): String {
+        val dir = when (annotation.direction) {
+            TurnDirection.LEFT -> "왼쪽"
+            TurnDirection.RIGHT -> "오른쪽"
+            TurnDirection.NONE -> return ""
+        }
+        return "지금 ${dir}으로"
     }
 
     /**
