@@ -3,10 +3,13 @@ package com.example.safewalknav.navigation
 import com.example.safewalknav.audio.BeepTone
 import com.example.safewalknav.audio.SpatialBeeper
 import com.example.safewalknav.navigation.geo.KalmanHeading
+import com.example.safewalknav.navigation.geo.RouteBearingProfile
+import com.example.safewalknav.navigation.geo.alongTrackMeters
 import com.example.safewalknav.navigation.geo.angleDiff
 import com.example.safewalknav.navigation.geo.bearing
 import com.example.safewalknav.navigation.geo.computeCumulativeDistances
 import com.example.safewalknav.navigation.geo.computeSignedCrossTrack
+import com.example.safewalknav.navigation.geo.cumulativeAlongRoute
 import com.example.safewalknav.navigation.geo.distanceBetween
 import com.example.safewalknav.navigation.geo.getClockDirection
 import com.example.safewalknav.navigation.platform.GpsLocation
@@ -77,6 +80,25 @@ class NavigationManager(
     // lean 안내 분기를 건너뛴다 — 도로 방향 없는 상태에서 0f 와 비교하면
     // 사용자 azimuth 와 항상 큰 차이가 나서 즉시 잘못된 발화가 일어남.
     private var hasRoadBearing = false
+
+    // ========== 폴리라인 평행 나침반 ==========
+    // 경로 폴리라인을 SEGMENT_INTERVAL_M 간격으로 나눈 구간별 방위각 프로파일.
+    // targetBearing(도로 방향 화살표)을 사용자가 현재 밟고 있는 구간에 평행하게 맞추는 데 사용.
+    // startNavigation 에서 채우고, computeParallelRoadBearing 이 읽는다.
+    private var routeBearingProfile: RouteBearingProfile? = null
+    // routePoints 각 점까지의 누적 거리 (m) — currentRoutePointIndex → distanceAlong 매핑용.
+    private var routePointCumulative: List<Double> = emptyList()
+
+    // ========== 출발지 유도 ==========
+    // 경로 출발지(startNavigation 의 start 좌표). 현재 위치가 이 점과 멀면 먼저 출발지로 안내.
+    private var routeStartLat = 0.0
+    private var routeStartLon = 0.0
+    // 첫 GPS fix 에서 출발지와의 거리 판정을 1회 수행하기 위한 플래그.
+    private var pendingStartCheck = false
+    // 출발지 유도 단계 진행 중 여부. true 동안에는 본 경로 추종 로직(이탈/waypoint 안내)을 건너뛴다.
+    private var isGuidingToStart = false
+    private val _isGuidingToStart = MutableStateFlow(false)
+    val isGuidingToStartState: StateFlow<Boolean> = _isGuidingToStart.asStateFlow()
 
     // 최근 GPS 속도 (m/s) — 정지 상태에선 IMU heading 비교 의미 없으므로
     // updateCompassHeading 에서 MIN_WALKING_SPEED_MPS 미만이면 walkingDiagnostic 건너뛴다.
@@ -328,6 +350,13 @@ class NavigationManager(
         destinationFrontLat = frontLat
         destinationFrontLon = frontLon
 
+        // 출발지 유도 — 경로 출발지 좌표 저장. 첫 GPS fix 에서 현재 위치와의 거리 판정.
+        routeStartLat = startLat
+        routeStartLon = startLon
+        pendingStartCheck = true
+        isGuidingToStart = false
+        _isGuidingToStart.value = false
+
         // 실제 보행 가능 좌표(입구)로 라우팅, 도착 판정은 실제 POI 좌표 기준
         val routeEndLat = frontLat ?: endLat
         val routeEndLon = frontLon ?: endLon
@@ -442,6 +471,11 @@ class NavigationManager(
         } else {
             route
         }
+
+        // 폴리라인 평행 나침반 프로파일 — 원본 routePoints(가상 waypoint 미포함) 기준으로 구축.
+        // 구간 분할은 폴리라인 좌표만 쓰므로 expandWithVirtualWaypoints 영향 없음.
+        routeBearingProfile = RouteBearingProfile.build(route.routePoints, SEGMENT_INTERVAL_M)
+        routePointCumulative = cumulativeAlongRoute(route.routePoints)
 
         // 누적 거리 / annotation 발화 추적은 확장된 waypoint 리스트 기준으로 다시 계산.
         cumulativeDistances = computeCumulativeDistances(currentRoute!!.waypoints)
@@ -678,6 +712,13 @@ class NavigationManager(
         requireStraightBeforeNextLean = false
         leanAccumulator = 0
 
+        // 폴리라인 평행 나침반 / 출발지 유도 상태 리셋
+        routeBearingProfile = null
+        routePointCumulative = emptyList()
+        pendingStartCheck = false
+        isGuidingToStart = false
+        _isGuidingToStart.value = false
+
         // Heading Kalman 상태 리셋
         kalmanHeading.reset()
 
@@ -712,6 +753,13 @@ class NavigationManager(
         currentTargetBearing = 0f
         leanAccumulator = 0
 
+        // 폴리라인 평행 나침반 / 출발지 유도 상태 리셋
+        routeBearingProfile = null
+        routePointCumulative = emptyList()
+        pendingStartCheck = false
+        isGuidingToStart = false
+        _isGuidingToStart.value = false
+
         // Heading Kalman 상태 리셋
         kalmanHeading.reset()
 
@@ -738,6 +786,11 @@ class NavigationManager(
 
         // CSV 로그 기록 (기존 로직에 영향 없음, writer 미초기화 시 no-op)
         writeLogRow(rawBearing, speed, accuracy, currentLat, currentLon)
+
+        // ──── 출발지 유도 단계 ────
+        // 현재 위치가 경로 출발지와 멀면 본 경로 추종 전에 먼저 출발지로 안내.
+        // true 를 돌려주면 이번 tick 은 여기서 종료(이탈 판정/waypoint 안내 등 건너뜀).
+        if (handleStartGuidanceIfNeeded(currentLat, currentLon, userBearing, speed)) return
 
         // 도착 판정은 실제 POI 또는 입구(frontLat) 중 더 가까운 쪽 기준
         val distToDest = distanceBetween(
@@ -783,7 +836,10 @@ class NavigationManager(
         // 비교해 25° 이상 벌어지면 LEFT/RIGHT_LEAN 누적 → 3회 도달 시 음성 보정 안내.
         // MainActivity.orientationListener → navigationManager.updateCompassHeading 경로가 이 값을
         // 읽어가므로 매 GPS tick 마다 최신 도로 방향으로 갱신해 둔다.
-        val roadBearingAhead = computeRouteBearingAhead(15f)
+        // 폴리라인 평행 우선 — 사용자가 현재 밟고 있는 구간의 접선 방위각.
+        // 프로파일이 없거나(짧은 경로 등) 계산 불가 시 기존 lookahead chord 로 폴백.
+        val roadBearingAhead = computeParallelRoadBearing(currentLat, currentLon)
+            ?: computeRouteBearingAhead(15f)
         if (roadBearingAhead != null) {
             currentTargetBearing = roadBearingAhead
             hasRoadBearing = true
@@ -1289,16 +1345,22 @@ class NavigationManager(
     private fun getClockDirSafe(
         currentLat: Double, currentLon: Double,
         userBearing: Float, speed: Float
+    ): String = clockDirectionToward(
+        currentLat, currentLon, destinationLat, destinationLon, userBearing, speed
+    )
+
+    /**
+     * 임의의 타겟 좌표에 대한 시계 방향 안내("3시 방향"). 정지 상태(speed<0.3)면 bearing 부정확 → "전방".
+     */
+    private fun clockDirectionToward(
+        currentLat: Double, currentLon: Double,
+        targetLat: Double, targetLon: Double,
+        userBearing: Float, speed: Float,
     ): String {
-        // 속도 0.3m/s 미만 = 거의 정지 → bearing 부정확
         return if (speed < 0.3f) {
             "전방"
         } else {
-            getClockDirection(
-                currentLat, currentLon,
-                destinationLat, destinationLon,
-                userBearing
-            ) + " 방향"
+            getClockDirection(currentLat, currentLon, targetLat, targetLon, userBearing) + " 방향"
         }
     }
 
@@ -1408,6 +1470,18 @@ class NavigationManager(
         const val BASE_REROUTE_COOLDOWN = 15_000L   // 기본 재탐색 쿨다운 (ms)
         const val MAX_REROUTE_COOLDOWN = 60_000L    // 최대 재탐색 쿨다운 (ms)
         // Kalman 파라미터는 KalmanHeading.kt 내부 companion object 로 이동.
+
+        // 폴리라인 평행 나침반 — 구간 분할 간격(m). 작을수록 곡선 추종 정밀, 잡음엔 민감.
+        const val SEGMENT_INTERVAL_M = 10.0
+        // 현재 위치보다 살짝 앞 구간 방위각을 읽어, 사용자가 향하는 방향을 가리키게 하는 lookahead(m).
+        const val PARALLEL_LOOKAHEAD_M = 3.0
+
+        // 출발지 유도 — 현재 위치가 출발지와 이 거리 이상 떨어지면 먼저 출발지로 안내(m).
+        const val START_GUIDANCE_THRESHOLD_M = 30f
+        // 출발지 도착 판정 거리(m). 이 안에 들면 본 경로 안내로 전환.
+        const val START_ARRIVE_THRESHOLD_M = 10f
+        // 출발지 유도 중 주기 안내 간격(ms).
+        const val START_GUIDANCE_INTERVAL_MS = 4000L
     }
 
     /**
@@ -2141,6 +2215,91 @@ class NavigationManager(
 
         val endPt = pts[endIdx]
         return bearing(startPt.lat, startPt.lon, endPt.lat, endPt.lon)
+    }
+
+    /**
+     * 폴리라인 평행 도로 방위각 — 사용자가 현재 밟고 있는 구간의 접선 방향.
+     *
+     * computeRouteBearingAhead 가 "현재~15m 앞" 의 chord(현) 방향이라 곡선에서 폴리라인과
+     * 어긋나는 반면, 이 함수는 routeBearingProfile 의 일정 간격 구간 방위각을 돌려주므로
+     * 나침반 화살표가 현재 길 방향과 평행하게 정렬된다.
+     *
+     * distanceAlong = (currentRoutePointIndex 까지 누적 거리) + (현재 위치를 현재 선분에 정사영한 거리).
+     * PARALLEL_LOOKAHEAD_M 만큼 앞 구간을 읽어 "사용자가 향하는 방향" 을 가리키게 한다.
+     *
+     * 프로파일이 비었거나 경로 정보가 부족하면 null → 호출부가 chord 방식으로 폴백.
+     */
+    private fun computeParallelRoadBearing(currentLat: Double, currentLon: Double): Float? {
+        val profile = routeBearingProfile ?: return null
+        if (profile.isEmpty) return null
+        val route = currentRoute ?: return null
+        val pts = route.routePoints
+        if (pts.size < 2 || routePointCumulative.size != pts.size) return null
+
+        val idx = currentRoutePointIndex.coerceIn(0, pts.size - 2)
+        val proj = alongTrackMeters(currentLat, currentLon, pts[idx], pts[idx + 1])
+        val distanceAlong = routePointCumulative[idx] + proj + PARALLEL_LOOKAHEAD_M
+        return profile.bearingAt(distanceAlong)
+    }
+
+    /**
+     * 출발지 유도 단계 처리.
+     *
+     * - 첫 GPS fix(pendingStartCheck) 에서 현재 위치와 경로 출발지의 거리를 판정.
+     *   START_GUIDANCE_THRESHOLD_M 이상이면 유도 단계 진입 후 안내 발화.
+     * - 유도 중에는 나침반(targetBearing)을 출발지 방향으로 맞추고, 주기적으로 시계 방향+거리 안내.
+     * - 출발지 근처(START_ARRIVE_THRESHOLD_M)에 들면 본 경로 안내로 전환.
+     *
+     * @return 이번 tick 을 출발지 유도로 소비했으면 true(호출부가 즉시 return). 아니면 false.
+     */
+    private fun handleStartGuidanceIfNeeded(
+        currentLat: Double, currentLon: Double,
+        userBearing: Float, speed: Float,
+    ): Boolean {
+        if (pendingStartCheck) {
+            pendingStartCheck = false
+            val distToStart = distanceBetween(currentLat, currentLon, routeStartLat, routeStartLon)
+            if (distToStart > START_GUIDANCE_THRESHOLD_M) {
+                isGuidingToStart = true
+                _isGuidingToStart.value = true
+                val dir = clockDirectionToward(
+                    currentLat, currentLon, routeStartLat, routeStartLon, userBearing, speed
+                )
+                lastSpokenMessage = ""
+                speak(
+                    "출발지가 ${distToStart.toInt()}미터 떨어져 있습니다. ${dir} 출발지로 안내합니다.",
+                    forceRepeat = true,
+                )
+                lastGuidanceTime = currentTimeMillis()
+            }
+        }
+
+        if (!isGuidingToStart) return false
+
+        val distToStart = distanceBetween(currentLat, currentLon, routeStartLat, routeStartLon)
+
+        // 나침반을 출발지 방향으로 — IMU heading 비교가 출발지 쪽으로 정렬되게.
+        currentTargetBearing = bearing(currentLat, currentLon, routeStartLat, routeStartLon)
+        hasRoadBearing = true
+
+        if (distToStart <= START_ARRIVE_THRESHOLD_M) {
+            isGuidingToStart = false
+            _isGuidingToStart.value = false
+            lastSpokenMessage = ""
+            speak("출발지에 도착했습니다. 경로 안내를 시작합니다.", forceRepeat = true)
+            // 이번 tick 은 여기서 종료 — 다음 GPS tick 부터 본 경로 추종이 정상 동작.
+            return true
+        }
+
+        val now = currentTimeMillis()
+        if (now - lastGuidanceTime >= START_GUIDANCE_INTERVAL_MS) {
+            lastGuidanceTime = now
+            val dir = clockDirectionToward(
+                currentLat, currentLon, routeStartLat, routeStartLon, userBearing, speed
+            )
+            speak("${dir} ${distToStart.toInt()}미터 앞 출발지로 이동하세요.", forceRepeat = true)
+        }
+        return true
     }
 
     /**
