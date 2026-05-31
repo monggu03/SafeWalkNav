@@ -88,6 +88,29 @@ final class TtsManager: NSObject, ObservableObject {
         lastSpeakTime = Date()
     }
 
+    /// 선점 발화 — 현재 발화와 큐를 끊고 즉시 출력.
+    /// 회전 직전(IMMINENT) "지금 …" 처럼 타이밍 생명선 안내에만 사용.
+    ///
+    /// 일반 speak() 와 차이:
+    ///   - 3초 중복 필터(shouldSkipDuplicate)를 우회 — 직전은 무조건 발화.
+    ///   - stopSpeaking(.immediate) 로 현재+큐 비움 (대기 안내가 있으면 같이 사라지는 점 인지).
+    func speakImmediately(_ text: String) {
+        guard !text.isEmpty else { return }
+
+        // 큐 전체 비우기 — 대기 중인 횡단보도 등 안내가 있으면 함께 사라진다.
+        synthesizer.stopSpeaking(at: .immediate)
+
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: "ko-KR")
+        utterance.rate = 0.5
+        utterance.pitchMultiplier = 1.0
+        utterance.volume = 1.0
+        synthesizer.speak(utterance)
+
+        lastSpokenText = text
+        lastSpeakTime = Date()
+    }
+
     /// 현재 음성 즉시 중단
     func stop() {
         if synthesizer.isSpeaking {

@@ -24,10 +24,22 @@ data class NavigatorConfig(
     val sharpThresholdDeg: Double = 70.0,
     val curveSignConsistencyRatio: Double = 0.75,
 
-    // 안내 시점 — 곡선/회전 시작 직전에 짧게 알린다.
-    val announceDistanceCurveM: Double = 5.0,
-    val announceDistanceTurnM: Double = 5.0,
-    val announceDistanceSharpM: Double = 5.0,
+    // 안내 시점 — 곡선/회전 시작 전에 lookahead 거리만큼 미리 알린다.
+    //
+    // 2026-05-31 (A-2 + G0 후) — 기본값 5.0 → 20/25/30m 로 확대.
+    //   사유: G0 정렬 전엔 윈도우가 좁아도 (arc−chord) 시프트로 사실상 다 놓쳤다.
+    //   G0 후엔 윈도우 = 순수 lookahead 가 되어 의도한 사전 안내가 가능하다.
+    //   보행 1.2m/s 기준 CURVE 20m ≈ 16s 전, TURN 25m ≈ 21s 전,
+    //   SHARP_TURN 30m ≈ 25s 전 예고. 시각장애 보행자 반응 시간 확보.
+    //   현장 튜닝 가능(NavigatorConfig 인스턴스 재구성).
+    val announceDistanceCurveM: Double = 20.0,
+    val announceDistanceTurnM: Double = 25.0,
+    val announceDistanceSharpM: Double = 30.0,
+
+    // 직전 안내(IMMINENT) 윈도우 — 회전 코앞에서 "지금 …" 으로 선점 발화하는 거리.
+    // 보행 1.2m/s 기준 5m ≈ 4초 전. 예고(announceDistance*M) 안쪽 윈도우라 겹치지 않게 경계 5m 는 IMMINENT 포함.
+    // 현장 튜닝 가능(NavigatorConfig 인스턴스 재구성).
+    val imminentDistanceM: Double = 5.0,
 
     // ─── 초기 방향 안내 ───
     val initialHeadingToleranceDeg: Double = 15.0,
@@ -51,6 +63,15 @@ data class NavigatorConfig(
     // curveReminderCooldownMs = 8000 → 같은 멘트가 8초 이내 반복되지 않도록 시간 쿨다운 안전장치.
     val curveReminderEveryNVirtuals: Int = 3,
     val curveReminderCooldownMs: Long = 8_000L,
+
+    // 곡선당 "○○ 방향" 음성 최대 발화 횟수. 같은 곡선 안에서 N회까지만 안내.
+    val curveMaxAnnouncementsPerCurve: Int = 3,
+
+    // 완만 곡선 승급 기준 (CURVE promotion).
+    // TURN으로 잡힌 구간이라도 routePoints상 |peak / total| 이 값 미만이면(=각도가
+    // 한 점에 몰리지 않고 분산됨) 완만한 곡선으로 보고 CURVE로 승급한다.
+    // 1.0에 가까울수록 직각 코너(한 점에서 다 꺾임). ⚠️ 초기값 0.6은 잠정 — 실측 튜닝 필요.
+    val gentleCurvePeakRatio: Double = 0.6,
 ) {
     companion object {
         /**
