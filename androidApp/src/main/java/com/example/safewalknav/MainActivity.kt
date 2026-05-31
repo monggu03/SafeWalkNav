@@ -40,6 +40,7 @@ import android.widget.Toast
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
@@ -297,6 +298,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // PR-UX2: 미리보기 use case
     // PR-AI: ImageAnalysis use case 추가 — TrafficLightDetector 로 보행자 신호등 색 검출
     private var cameraProvider: ProcessCameraProvider? = null
+    private var camera: Camera? = null
+    private var hasNearbyTrafficSignalForCamera = false
+    private val TRAFFIC_SIGNAL_CAMERA_ZOOM_RATIO = 2f
 
     // ==================== 신호등 검출 (PR-AI) ====================
 
@@ -359,7 +363,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var lastConfirmedColor: Int = -1      // 3-frame 확정 통과한 마지막 색
     private var lastHeartbeatAt: Long = 0L        // 마지막 heartbeat 톤 시각
     private var lastValidatedAt: Long = 0L        // 마지막 validated 검출 시각 (timeout 판정용)
-    private val STABILITY_FRAMES = 3
+    private val RED_STABILITY_FRAMES = 2
+    private val GREEN_STABILITY_FRAMES = 3
     private val HEARTBEAT_INTERVAL_MS = 15_000L
     private val DETECTION_TIMEOUT_MS = 10_000L
 
@@ -779,6 +784,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             compassContainer.visibility = View.VISIBLE
             stopCamera()
         }
+    }
+
+    private fun applyTrafficSignalCameraZoom() {
+        val camera = camera ?: return
+        val targetZoom = if (hasNearbyTrafficSignalForCamera) TRAFFIC_SIGNAL_CAMERA_ZOOM_RATIO else 1f
+        val zoomState = camera.cameraInfo.zoomState.value
+        val clampedZoom = if (zoomState != null) {
+            targetZoom.coerceIn(zoomState.minZoomRatio, zoomState.maxZoomRatio)
+        } else {
+            targetZoom
+        }
+        camera.cameraControl.setZoomRatio(clampedZoom)
+        appendNavLog("Camera zoom=${"%.1f".format(clampedZoom)} signalNearby=$hasNearbyTrafficSignalForCamera")
     }
 
     private fun updateDebugInfo() {
@@ -1624,6 +1642,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
         }
 
+        lifecycleScope.launch {
+            navigationManager.hasNearbyTrafficSignal.collectLatest { hasSignal ->
+                hasNearbyTrafficSignalForCamera = hasSignal
+                applyTrafficSignalCameraZoom()
+            }
+        }
+
         // 도로 진행 방향 (targetBearing) StateFlow — 2초 GPS tick 주기로 갱신됨.
         // 나침반 화면의 초록 화살표가 이 값을 따라가게 한다.
         // (사용자 방향 흰 화살표는 orientationListener 가 더 자주 갱신하므로
@@ -1717,7 +1742,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      * 권한 없으면 silent skip — NAVIGATING 자체는 음성/진동/비콘으로 정상 동작.
      */
     private fun startCamera() {
-        if (cameraProvider != null) return   // 이미 작동 중
+        if (cameraProvider != null) {
+            applyTrafficSignalCameraZoom()
+            return
+        }   // 이미 작동 중
 
         if (ActivityCompat.checkSelfPermission(
                 this, Manifest.permission.CAMERA
@@ -1758,12 +1786,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (trafficLightDetector == null) {
             try {
                 trafficLightDetector = TrafficLightDetector(this).apply {
-                    // 디버그 빌드일 땐 진단 모드 ON — confidence 0.3 까지 잡아서 모델이 신호등을 보고 있는지
-                    // 임계값에 막혀 떨어진 건지 식별 가능하게 함. 운영 (release) 에선 자동으로 OFF.
-                    diagnosticMode = BuildConfig.DEBUG
+                    // 실측 중 TTS 판정은 운영 임계값(0.7)을 사용한다.
+                    // diagnosticMode=true 는 0.3 후보까지 TTS state machine 에 들어와 오발화 위험이 크다.
+                    diagnosticMode = false
                 }
-                Log.d("SafeWalkNav", "TrafficLightDetector loaded (diagnosticMode=${BuildConfig.DEBUG})")
-                appendNavLog("TrafficLightDetector loaded (diagnosticMode=${BuildConfig.DEBUG})")
+                Log.d("SafeWalkNav", "TrafficLightDetector loaded (diagnosticMode=false)")
+                appendNavLog("TrafficLightDetector loaded (diagnosticMode=false)")
             } catch (e: Exception) {
                 Log.e("SafeWalkNav", "Failed to load TrafficLightDetector", e)
                 appendNavLog("Failed to load TrafficLightDetector: ${e.message}")
@@ -1808,15 +1836,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
 
                 provider.unbindAll()
-                provider.bindToLifecycle(
+                camera = provider.bindToLifecycle(
                     this,
                     CameraSelector.DEFAULT_BACK_CAMERA,
                     *useCases.toTypedArray()
                 )
+                applyTrafficSignalCameraZoom()
                 Log.d("SafeWalkNav", "Camera bound (use cases: ${useCases.size})")
             } catch (e: Exception) {
                 Log.e("SafeWalkNav", "Camera bind failed", e)
                 cameraProvider = null
+                camera = null
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -1909,10 +1939,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // 단 TEST_MODE_FORCE_ML_ON=true 면 zone 무관하게 TTS 발화 + 디바운스/박스필터 진행 (인식 정확도 테스트용).
         if (!inCrosswalkZone && !TEST_MODE_FORCE_ML_ON) return
 
-        // 1차 필터: 너무 작은 박스 제외 (멀리 있는 noise / 빨간 점 noise 차단)
-        // 신호등은 보통 화면 너비/높이의 6% 이상 차지. 그보다 작으면 noise 가능성 높음.
-        val minBoxDimension = 0.06f
+        // 1차 필터: 너무 작은 박스 제외.
+        // 빨간불은 놓치는 비용이 크므로 초록불보다 작은 박스도 통과시킨다.
+        val minRedBoxDimension = 0.03f
+        val minGreenBoxDimension = 0.06f
         val validated = detections.filter { d ->
+            val minBoxDimension = if (d.classId == 0) minRedBoxDimension else minGreenBoxDimension
             d.bbox.width >= minBoxDimension && d.bbox.height >= minBoxDimension
         }
         if (validated.isEmpty()) {
@@ -1920,7 +1952,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val small = detections.first()
             appendNavLog(
                 "TL_DIAG  └─ ALL_TOO_SMALL nearest=${small.label} ${(small.confidence * 100).toInt()}% " +
-                        "box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}% (min=6%)"
+                        "box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}% " +
+                        "(minR=3%, minG=6%)"
             )
             if (BuildConfig.DEBUG) {
                 tvDebugGuidance.text = "TL noise 무시: ${small.label} ${(small.confidence * 100).toInt()}% box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}%"
@@ -1933,7 +1966,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             return
         }
 
-        val nearest = validated.maxByOrNull { it.bbox.area } ?: return
+        val nearest = selectTrafficLightForSpeech(validated) ?: return
         val detectedColor = nearest.classId
 
         val now = System.currentTimeMillis()
@@ -1976,7 +2009,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
         lastValidatedAt = now
 
-        // ──── (b) 안정성 필터 — 3 frame 연속 같은 색이어야 confirm ────
+        // ──── (b) 안정성 필터 — 빨간불은 더 빠르게, 초록불은 더 보수적으로 confirm ────
         if (detectedColor == currentColorCandidate) {
             colorStreak++
         } else {
@@ -1984,17 +2017,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             colorStreak = 1
         }
 
-        if (colorStreak < STABILITY_FRAMES) {
+        val requiredStabilityFrames = if (detectedColor == 0) RED_STABILITY_FRAMES else GREEN_STABILITY_FRAMES
+        if (colorStreak < requiredStabilityFrames) {
             appendNavLog(
-                "TL_DIAG  └─ STABILITY_PENDING candidate=${nearest.label} streak=$colorStreak/$STABILITY_FRAMES " +
+                "TL_DIAG  └─ STABILITY_PENDING candidate=${nearest.label} streak=$colorStreak/$requiredStabilityFrames " +
                         "conf=${(nearest.confidence * 100).toInt()}% " +
                         "box=${(nearest.bbox.width * 100).toInt()}x${(nearest.bbox.height * 100).toInt()}%"
             )
             if (BuildConfig.DEBUG) {
-                tvDebugGuidance.text = "TL stability: ${nearest.label} ${(nearest.confidence * 100).toInt()}% (streak $colorStreak/$STABILITY_FRAMES)"
+                tvDebugGuidance.text = "TL stability: ${nearest.label} ${(nearest.confidence * 100).toInt()}% (streak $colorStreak/$requiredStabilityFrames)"
                 updateAiDebugResult(
                     "$aiResultLine | action=STABILITY_PENDING label=${nearest.label} " +
-                            "streak=$colorStreak/$STABILITY_FRAMES"
+                            "streak=$colorStreak/$requiredStabilityFrames"
                 )
             }
             return
@@ -2123,6 +2157,20 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    /** TTS 판정용 대표 검출 선택. 안전상 빨간불 후보를 초록불보다 우선한다. */
+    private fun selectTrafficLightForSpeech(
+        detections: List<TrafficLightDetection>,
+    ): TrafficLightDetection? {
+        val red = detections
+            .filter { it.classId == 0 }
+            .maxWithOrNull(compareBy<TrafficLightDetection> { it.confidence }.thenBy { it.bbox.area })
+        if (red != null) return red
+
+        return detections.maxWithOrNull(
+            compareBy<TrafficLightDetection> { it.confidence }.thenBy { it.bbox.area }
+        )
+    }
+
     /** classId → 사람이 읽기 쉬운 라벨 (로그용). */
     private fun classLabel(classId: Int): String = when (classId) {
         0 -> "RED"
@@ -2137,6 +2185,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         } catch (_: Exception) {
         }
         cameraProvider = null
+        camera = null
         cameraPreviewContainer.removeAllViews()
         // removeAllViews() 가 오버레이 View 자체는 제거하지만 reference 는 명시적으로 비워 GC 친화적으로.
         boundingBoxOverlay = null
