@@ -48,7 +48,11 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.sin
 
 /**
  * A-3 일회성 안내 이벤트.
@@ -128,6 +132,20 @@ class NavigationManager(
     private var latestSpeed: Float = 0f
     private val MIN_WALKING_SPEED_MPS = 0.3f
 
+    // 최근 GPS 정확도 (m). IMU+GPS heading 융합 가중치 계산에 사용.
+    // 작을수록(정확할수록) GPS 가중치 ↑. 30m 초과면 GPS bearing 신뢰 불가.
+    private var latestGpsAccuracy: Float = 999f
+    private val FUSION_MIN_SPEED = 0.5f       // 이 미만이면 IMU만 사용 (GPS bearing 잡음)
+    private val FUSION_FULL_SPEED = 2.0f      // 이 이상이면 GPS 가중치 최대
+    private val FUSION_MAX_ACCURACY = 30f     // 이 초과면 IMU만 사용 (GPS 신뢰 X)
+    private val FUSION_GPS_WEIGHT_MIN = 0.2f  // GPS 가중치 하한
+    private val FUSION_GPS_WEIGHT_MAX = 0.8f  // GPS 가중치 상한 (IMU 신호 최소 보존)
+
+    // 최근 fuseImuAndGps 호출 결과 진단 문자열. MainActivity 가 GPS tick 마다 읽어
+    // walk_log 에 HEADING_FUSION 라인으로 기록. 외출 후 외부에서 융합 가중치 추적 가능.
+    var latestFusionDebug: String = ""
+        private set
+
     // Settling — 첫 lean 발화 후 사용자가 보정해서 STRAIGHT 한 번 거치기 전엔
     // 재누적 안 함. 발화 직후 과보정 → 반대 LEAN → 즉시 반대 발화 사이클 방지.
     private var requireStraightBeforeNextLean: Boolean = false
@@ -165,6 +183,9 @@ class NavigationManager(
     // iOS: 동일 로직 적용 가능 (이지민 협업).
     private val _isInCrosswalkZone = MutableStateFlow(false)
     val isInCrosswalkZone: StateFlow<Boolean> = _isInCrosswalkZone
+
+    private val _hasNearbyTrafficSignal = MutableStateFlow(false)
+    val hasNearbyTrafficSignal: StateFlow<Boolean> = _hasNearbyTrafficSignal
 
     // 안내 메시지
     private val _guidanceMessage = MutableStateFlow("")
@@ -307,8 +328,20 @@ class NavigationManager(
             // 보행 중(speed >= 0.3 m/s) 일 때만 walkingDiagnostic 진입.
             if (latestSpeed < MIN_WALKING_SPEED_MPS) return
 
+            // ──── IMU + GPS Kalman heading 융합 (2026-05-31) ────
+            // 기존: IMU(자력계 fusion azimuth) 만으로 도로 방향과 비교 → 자기장 노이즈/휴대폰 자세에 민감
+            // 변경: GPS Kalman heading(실제 이동 방향, 민성님 KalmanHeading) 과 융합해 정확도 향상
+            //   - 속도 빠르고 GPS 정확도 좋으면 GPS 가중치 ↑ (실제 진행 방향 신뢰)
+            //   - 속도 느리거나 GPS 정확도 나쁘면 IMU 가중치 ↑ (현재 향한 방향 신뢰)
+            val fusedHeading = fuseImuAndGps(
+                imuAzimuth = azimuth,
+                gpsKalmanHeading = kalmanHeading.current,
+                speed = latestSpeed,
+                gpsAccuracy = latestGpsAccuracy,
+            )
+
             val targetBearing = currentTargetBearing
-            val status = walkingDiagnostic.analyzeLeanStatus(azimuth, targetBearing)
+            val status = walkingDiagnostic.analyzeLeanStatus(fusedHeading, targetBearing)
 
             // Settling — 직전 발화 후 사용자가 보정해서 STRAIGHT 한 번 거치기 전엔 재누적 안 함.
             // 발화 직후 사용자가 과보정하면 반대 방향 LEAN 이 5초 후 또 발화되는 핑퐁 사이클 방지.
@@ -349,6 +382,70 @@ class NavigationManager(
                 }
             }
         }
+    }
+
+    /**
+     * IMU(자력계+가속도 fusion azimuth) + GPS Kalman heading 융합.
+     *
+     * 동기:
+     *   IMU only: 자기장 노이즈/휴대폰 자세에 민감. 굽은 길에서 부정확.
+     *   GPS only: 저속/정지 시엔 잡음. 빠른 변화 추적 어려움.
+     *   → 두 source 의 장점을 가중 평균으로 합성하면 굽은 길에서도 robust.
+     *
+     * 가중치 산정:
+     *   speedWeight   : 속도 0.5 → 0.0, 2.0 → 1.0 (빠를수록 GPS 신뢰 ↑)
+     *   accuracyWeight: GPS accuracy 0m → 1.0, 30m → 0.0 (정확할수록 GPS 신뢰 ↑)
+     *   gpsWeight     : 두 가중치 곱, 0.2 ~ 0.8 범위로 clamp (IMU 신호 최소 보존)
+     *   imuWeight     : 1 - gpsWeight
+     *
+     * Edge cases:
+     *   - GPS Kalman 미초기화 → IMU only
+     *   - 정지 (speed < 0.5) → IMU only (GPS bearing 잡음)
+     *   - GPS accuracy > 30m → IMU only (GPS 신뢰 불가)
+     *
+     * Circular fusion:
+     *   wrap-around (350° + 10° = 0° 가 평균이 180° 가 되는 문제) 회피 위해 sin/cos 분해 후 atan2 합성.
+     */
+    private fun fuseImuAndGps(
+        imuAzimuth: Float,
+        gpsKalmanHeading: Float,
+        speed: Float,
+        gpsAccuracy: Float,
+    ): Float {
+        // Edge cases — GPS 못 믿을 상황이면 IMU only.
+        if (gpsKalmanHeading < 0f) return imuAzimuth                  // Kalman 미초기화
+        if (speed < FUSION_MIN_SPEED) return imuAzimuth               // 저속/정지
+        if (gpsAccuracy > FUSION_MAX_ACCURACY) return imuAzimuth      // GPS 정확도 너무 나쁨
+
+        // Speed weight: 0.5 m/s = 0, 2.0 m/s = 1.0, 그 사이 선형 보간
+        val speedWeight = ((speed - FUSION_MIN_SPEED) /
+                (FUSION_FULL_SPEED - FUSION_MIN_SPEED)).coerceIn(0f, 1f)
+
+        // Accuracy weight: 0m = 1.0, 30m = 0.0, 그 사이 선형 보간
+        val accuracyWeight = (1f - (gpsAccuracy / FUSION_MAX_ACCURACY)).coerceIn(0f, 1f)
+
+        // 두 가중치 곱 → 0.2 ~ 0.8 범위로 clamp.
+        // 최저 0.2: GPS 가 너무 무시되지 않게.
+        // 최고 0.8: IMU 신호도 최소 20% 는 보존 (휴대폰 회전 빠른 변화 감지).
+        val gpsWeight = (speedWeight * accuracyWeight)
+            .coerceIn(FUSION_GPS_WEIGHT_MIN, FUSION_GPS_WEIGHT_MAX)
+        val imuWeight = 1f - gpsWeight
+
+        // Circular fusion (sin/cos 분해 후 atan2 합성).
+        val gpsRad = gpsKalmanHeading.toDouble() * PI / 180.0
+        val imuRad = imuAzimuth.toDouble() * PI / 180.0
+        val fusedSin = sin(gpsRad) * gpsWeight + sin(imuRad) * imuWeight
+        val fusedCos = cos(gpsRad) * gpsWeight + cos(imuRad) * imuWeight
+        val fusedRad = atan2(fusedSin, fusedCos)
+        val fused = ((fusedRad * 180.0 / PI + 360.0) % 360.0).toFloat()
+
+        // 진단 로그 — 융합 동작 검증용. 외출 후 walk_log 에서 fusion 가중치 추적 가능.
+        val debug = "imu=${imuAzimuth.toInt()}° gps=${gpsKalmanHeading.toInt()}° " +
+                "speed=${"%.2f".format(speed)} acc=${gpsAccuracy.toInt()}m " +
+                "gpsW=${"%.2f".format(gpsWeight)} fused=${fused.toInt()}°"
+        println("[HEADING_FUSION] $debug")
+        latestFusionDebug = debug
+        return fused
     }
 
     // ========== 경로 탐색 ==========
@@ -425,10 +522,13 @@ class NavigationManager(
         _isNavigating.value = true
         _arrivalState.value = ArrivalState.FAR
         _distanceToDestination.value = Float.MAX_VALUE
+        _isInCrosswalkZone.value = false
+        _hasNearbyTrafficSignal.value = false
         // 새 경로 시작 — 도로 방향은 첫 GPS tick 들어올 때까지 미정.
         hasRoadBearing = false
         currentTargetBearing = 0f
         latestSpeed = 0f
+        latestGpsAccuracy = 999f
         requireStraightBeforeNextLean = false
         leanAccumulator = 0
 
@@ -629,7 +729,7 @@ class NavigationManager(
                 "${side}에 횡단보도가 있습니다. 신호를 확인하고 건너세요."
             }
         }
-        val message = if (hasNearbyTrafficSignal(currentLat, currentLon)) {
+        val message = if (findSignalForCrosswalkIndex(route, crosswalkIdx, currentLat, currentLon, userBearing) != null) {
             lastSignalPresenceAnnouncedWpIdx = crosswalkIdx
             "$baseMessage 신호등이 있습니다."
         } else {
@@ -640,27 +740,18 @@ class NavigationManager(
         announceEvent(message, forceRepeat = true)
     }
 
-    private fun hasNearbyTrafficSignal(
-        currentLat: Double,
-        currentLon: Double,
-        radiusMeters: Float = 80f,
-    ): Boolean {
-        return TrafficSignalMatcher.findNearestSignal(
-            currentLat = currentLat,
-            currentLon = currentLon,
-            signals = trafficSignals,
-            radiusMeters = radiusMeters,
-        ) != null
-    }
-
     private fun announceSignalPresenceIfNeeded(
         crosswalkZoneInfo: CrosswalkZoneInfo,
         currentLat: Double,
         currentLon: Double,
+        userBearing: Float,
     ) {
-        val crosswalkIdx = crosswalkZoneInfo.crosswalkIndex ?: return
+        val route = currentRoute ?: return
+        val crosswalkIdx = crosswalkZoneInfo.crosswalkIndex
+            ?: findNearbyCrosswalkWaypointIndex(route)
+            ?: return
         if (crosswalkIdx == lastSignalPresenceAnnouncedWpIdx) return
-        if (!hasNearbyTrafficSignal(currentLat, currentLon)) return
+        if (findSignalForCrosswalkIndex(route, crosswalkIdx, currentLat, currentLon, userBearing) == null) return
 
         lastSignalPresenceAnnouncedWpIdx = crosswalkIdx
         // A-3: 일회성 이벤트 채널.
@@ -679,16 +770,8 @@ class NavigationManager(
             ?: return
         if (crosswalkIdx == lastSignalDirectionAnnouncedWpIdx) return
 
-        val crosswalkWp = route.waypoints.getOrNull(crosswalkIdx) ?: return
-        val routeBearing = computeRouteBearingAhead(15f) ?: userBearing
-        val signal = TrafficSignalMatcher.findBestSignalForCrosswalk(
-            currentLat = currentLat,
-            currentLon = currentLon,
-            crosswalkLat = crosswalkWp.lat,
-            crosswalkLon = crosswalkWp.lon,
-            routeBearing = routeBearing,
-            signals = trafficSignals,
-        ) ?: return
+        val signal = findSignalForCrosswalkIndex(route, crosswalkIdx, currentLat, currentLon, userBearing)
+            ?: return
 
         lastSignalDirectionAnnouncedWpIdx = crosswalkIdx
         val directionReferenceBearing = if (latestCompassHeading >= 0f) {
@@ -707,6 +790,38 @@ class NavigationManager(
         announceEvent("신호등은 ${clockDirection} 방향으로 추정됩니다. 휴대폰을 해당 방향으로 향해 주세요.", forceRepeat = true)
     }
 
+    private fun findSignalForCrosswalkZone(
+        crosswalkZoneInfo: CrosswalkZoneInfo,
+        currentLat: Double,
+        currentLon: Double,
+        userBearing: Float,
+    ): TrafficSignalLocation? {
+        val route = currentRoute ?: return null
+        val crosswalkIdx = crosswalkZoneInfo.crosswalkIndex
+            ?: findNearbyCrosswalkWaypointIndex(route)
+            ?: return null
+        return findSignalForCrosswalkIndex(route, crosswalkIdx, currentLat, currentLon, userBearing)
+    }
+
+    private fun findSignalForCrosswalkIndex(
+        route: TMapRoute,
+        crosswalkIdx: Int,
+        currentLat: Double,
+        currentLon: Double,
+        userBearing: Float,
+    ): TrafficSignalLocation? {
+        val crosswalkWp = route.waypoints.getOrNull(crosswalkIdx) ?: return null
+        val routeBearing = computeRouteBearingAhead(15f) ?: userBearing
+        return TrafficSignalMatcher.findBestSignalForCrosswalk(
+            currentLat = currentLat,
+            currentLon = currentLon,
+            crosswalkLat = crosswalkWp.lat,
+            crosswalkLon = crosswalkWp.lon,
+            routeBearing = routeBearing,
+            signals = trafficSignals,
+        )
+    }
+
     private fun findNearbyCrosswalkWaypointIndex(route: TMapRoute): Int? {
         val searchStart = maxOf(0, currentWaypointIndex - 1)
         val searchEnd = minOf(currentWaypointIndex + 4, route.waypoints.size)
@@ -723,6 +838,8 @@ class NavigationManager(
         currentRoutePointIndex = 0
         _arrivalState.value = ArrivalState.FAR
         _distanceToDestination.value = Float.MAX_VALUE
+        _isInCrosswalkZone.value = false
+        _hasNearbyTrafficSignal.value = false
         _guidanceMessage.value = "안내를 종료합니다"
         lastSpokenMessage = ""
         lastGuidanceTime = 0L
@@ -755,6 +872,7 @@ class NavigationManager(
         hasRoadBearing = false
         currentTargetBearing = 0f
         latestSpeed = 0f
+        latestGpsAccuracy = 999f
         requireStraightBeforeNextLean = false
         leanAccumulator = 0
 
@@ -778,6 +896,8 @@ class NavigationManager(
         currentWaypointIndex = 0
         currentRoutePointIndex = 0
         _distanceToDestination.value = 0f
+        _isInCrosswalkZone.value = false
+        _hasNearbyTrafficSignal.value = false
         lastSpokenMessage = ""
         wasInCrosswalkZone = false
         lastCrosswalkAnnouncedWpIdx = -1
@@ -831,6 +951,7 @@ class NavigationManager(
 
         // updateCompassHeading 에서 정지 상태 판정용으로 노출 — sensor tick 이 GPS 보다 자주 들어옴.
         latestSpeed = speed
+        latestGpsAccuracy = accuracy
 
         // CSV 로그 기록 (기존 로직에 영향 없음, writer 미초기화 시 no-op)
         writeLogRow(rawBearing, speed, accuracy, currentLat, currentLon)
@@ -904,8 +1025,11 @@ class NavigationManager(
             currentWaypointIndex
         )
         val isInCrossWalkZone = crosswalkZoneInfo.isInZone
+        val hasNearbySignal = isInCrossWalkZone &&
+                findSignalForCrosswalkZone(crosswalkZoneInfo, currentLat, currentLon, userBearing) != null
         // 외부 (안드 ML 검출 게이팅 등) 가 collect 할 수 있게 state flow 갱신
         _isInCrosswalkZone.value = isInCrossWalkZone
+        _hasNearbyTrafficSignal.value = hasNearbySignal
 
         // zone 진입(false→true) 시점에 횡단 방향을 1회 안내 — 시각장애인이 어느 쪽에
         // 횡단보도가 있는지 모르기 때문. 매 update 마다 호출되므로 transition 만 잡는다.
@@ -914,7 +1038,7 @@ class NavigationManager(
             announceSignalDirectionIfNeeded(crosswalkZoneInfo, currentLat, currentLon, userBearing)
         }
         if (isInCrossWalkZone) {
-            announceSignalPresenceIfNeeded(crosswalkZoneInfo, currentLat, currentLon)
+            announceSignalPresenceIfNeeded(crosswalkZoneInfo, currentLat, currentLon, userBearing)
         }
         wasInCrosswalkZone = isInCrossWalkZone
 

@@ -83,6 +83,8 @@ dependencies {
     // Firebase BoM
     implementation(platform("com.google.firebase:firebase-bom:32.7.0"))
     implementation("com.google.firebase:firebase-analytics")
+    // KTX 확장 — Firebase.analytics + logEvent { param(...) } DSL 사용용 (2026-05-29 추가)
+    implementation("com.google.firebase:firebase-analytics-ktx")
 
     // Android Core
     implementation("androidx.core:core-ktx:1.12.0")
