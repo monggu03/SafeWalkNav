@@ -48,6 +48,8 @@ final class NavigationViewModel: ObservableObject {
         let coordinate: CLLocationCoordinate2D
         let pointType: String
         let description: String
+        let isVirtual: Bool
+        let curveDirection: String?
     }
     @Published private(set) var waypointPins: [WaypointPin] = []
 
@@ -96,6 +98,10 @@ final class NavigationViewModel: ObservableObject {
     private var pollingTask: Task<Void, Never>?
 
     private var lastSpokenGuidance: String = ""
+
+    // A-3: NavigationManager.observeNavEvents 의 핸들. stop 시 cancel() 로 listener 해제.
+    // Combine.Cancellable 과 이름이 겹치므로 shared 모듈로 명시한다.
+    private var navEventsCanceller: (any shared.Cancellable)?
 
     // 디버깅: polling 카운터 (로그 무한 출력 방지)
     private var pollCount: Int = 0
@@ -206,6 +212,7 @@ final class NavigationViewModel: ObservableObject {
 
             if success.boolValue {
                 headingProvider.setBaseHeading()
+                subscribeNavEvents()
                 await runAutoOnboarding()
             } else {
                 self.errorMessage = (navigationManager.lastError as String?) ?? "경로를 찾을 수 없습니다"
@@ -248,6 +255,10 @@ final class NavigationViewModel: ObservableObject {
         onboardingCoordinator?.stop()
         onboardingCoordinator = nil
         isOnboarding = false
+
+        // A-3: 일회성 이벤트 구독 해제 — listener 누수/다음 세션 중복 호출 방지.
+        navEventsCanceller?.cancel()
+        navEventsCanceller = nil
 
         navigationManager.stopNavigation()
         headingProvider.clearBaseHeading()
@@ -427,6 +438,36 @@ final class NavigationViewModel: ObservableObject {
         }
     }
 
+    // MARK: - A-3 Event Channel
+
+    /// 일회성 안내(회전/굽은길/횡단보도/신호/30m 사전안내) 이벤트 구독을 시작한다.
+    /// navigationManager.startNavigation 성공 시점에 호출, stopNavigation 에서 cancel.
+    private func subscribeNavEvents() {
+        // 직전 세션 구독이 살아 있으면 정리 후 새로 등록 (단일 listener 정책).
+        navEventsCanceller?.cancel()
+        navEventsCanceller = navigationManager.observeNavEvents { [weak self] ev in
+            // collect 콜백은 Default 디스패처에서 올 수 있으니 main 으로 hop 한 뒤 TTS/UI 접근.
+            DispatchQueue.main.async {
+                self?.handleNavEvent(ev)
+            }
+        }
+        print("[A3-iOS] subscribeNavEvents — listener 등록")
+    }
+
+    private func handleNavEvent(_ ev: NavAnnouncement) {
+        let msg = ev.message
+        print("[A3-iOS] recv msg=\(msg) forceRepeat=\(ev.forceRepeat) interrupt=\(ev.interrupt)")
+        guard !msg.isEmpty, !isOnboarding else { return }
+        if ev.interrupt {
+            // 회전 직전(IMMINENT) 등 타이밍 생명선 안내 — 현재 발화·큐를 끊고 즉시.
+            tts.speakImmediately(msg)
+        } else {
+            // 이벤트 채널은 일회성 → 고우선. TtsManager 가 .high 도 큐잉만 하므로 끊지는 않음.
+            // forceRepeat 는 TtsManager 에 매핑되는 force 개념이 없어 현재는 무시(보고서 참고).
+            tts.speak(msg, priority: .high)
+        }
+    }
+
     // MARK: - Side Effects
 
     private func handleGuidanceChange(_ message: String) {
@@ -478,22 +519,35 @@ final class NavigationViewModel: ObservableObject {
                 id: i,
                 coordinate: CLLocationCoordinate2D(latitude: wp.lat, longitude: wp.lon),
                 pointType: wp.pointType,
-                description: wp.description_
+                description: wp.description_,
+                isVirtual: wp.isVirtual,
+                curveDirection: wp.curveDirection
             )
         }
         if pins.count != waypointPins.count {
             waypointPins = pins
         }
 
-        // annotation 마커
+        // annotation 마커.
+        // route.waypoints 는 가상점이 섞인 expanded 리스트라 ann.startWaypointIndex(원본 기준)와
+        // 인덱스 체계가 다르다. routePoints 는 가상점 영향이 없으므로 startRoutePointIndex 가
+        // 채워진 annotation 은 그 좌표를 우선 사용한다.
         let anns = navigationManager.annotations.value as? [PathAnnotation] ?? []
         let markers: [AnnotationMarker] = anns.compactMap { ann in
-            let startIdx = Int(ann.startWaypointIndex)
-            guard startIdx >= 0, startIdx < route.waypoints.count else { return nil }
-            let wp = route.waypoints[startIdx]
+            let rpIdx = Int(ann.startRoutePointIndex)
+            let coord: CLLocationCoordinate2D
+            if rpIdx >= 0, rpIdx < route.routePoints.count {
+                let rp = route.routePoints[rpIdx]
+                coord = CLLocationCoordinate2D(latitude: rp.lat, longitude: rp.lon)
+            } else {
+                let wpIdx = Int(ann.startWaypointIndex)
+                guard wpIdx >= 0, wpIdx < route.waypoints.count else { return nil }
+                let wp = route.waypoints[wpIdx]
+                coord = CLLocationCoordinate2D(latitude: wp.lat, longitude: wp.lon)
+            }
             return AnnotationMarker(
-                id: startIdx,
-                coordinate: CLLocationCoordinate2D(latitude: wp.lat, longitude: wp.lon),
+                id: Int(ann.startWaypointIndex),
+                coordinate: coord,
                 type: ann.type.name,
                 direction: ann.direction.name,
                 totalAngle: ann.totalAngle

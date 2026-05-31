@@ -211,13 +211,47 @@ class RouteAnnotator(
         }
 
         // 4. 1차 + 기존 보조 + pair 보조 결과 병합.
-        // pair 는 상위 우선순위 annotation range 에 완전히 포함될 때만 제거한다.
-        val higherPriority = primary.annotations + existingSupplementary
-        val filteredPairs = pairSupplementary.filterNot { pair ->
-            higherPriority.any { higher -> containsRange(higher, pair) }
+        //
+        // 기본 원칙: pair 는 상위 우선순위 annotation range 에 완전히 포함되면 제거(TMap turn 우선).
+        // 예외(완만 곡선 승급, 2026-05-30):
+        //   TURN 으로 잡힌 구간 위에 겹친 pair 가 CURVE 로 판정됐고 routePoints 상
+        //   |peak / total| < gentleCurvePeakRatio (각도가 한 점에 몰리지 않고 분산됨) 면
+        //   해당 TURN 을 제거하고 pair(CURVE)로 교체한다 → 가상점이 생기게 함.
+        //   ⚠️ SHARP_TURN 과 직각 코너(peak≈total)는 절대 승급하지 않음(안전 우선).
+        val existingHi = primary.annotations + existingSupplementary
+
+        fun isGentle(pair: PathAnnotation): Boolean {
+            val total = abs(pair.totalAngle)
+            if (total < 1e-6) return false
+            return pair.type == PathSegmentType.CURVE &&
+                abs(pair.peakAngle) / total < config.gentleCurvePeakRatio
         }
-        val merged = (higherPriority + filteredPairs)
-            .sortedBy { it.startWaypointIndex }
+
+        // (a) TURN 으로 덮인 pair 중 "완만한 곡선" 만 승급 대상으로 식별. SHARP_TURN 제외.
+        val promotedPairs = pairSupplementary.filter { pair ->
+            isGentle(pair) && primary.annotations.any { hi ->
+                containsRange(hi, pair) && hi.type == PathSegmentType.TURN
+            }
+        }
+
+        // (b) 승급된 pair 에 덮였던 TURN annotation 제거 (CURVE 가 대체).
+        val supersededTurns = primary.annotations.filter { hi ->
+            hi.type == PathSegmentType.TURN &&
+                promotedPairs.any { p -> containsRange(hi, p) }
+        }.toSet()
+
+        // (c) 나머지 pair 는 기존대로: 상위에 완전 포함되면 버림.
+        val keptOtherPairs = pairSupplementary.filterNot { pair ->
+            pair in promotedPairs ||
+                existingHi.any { hi -> containsRange(hi, pair) }
+        }
+
+        val merged = (
+            (primary.annotations - supersededTurns) +
+                existingSupplementary +
+                promotedPairs +
+                keptOtherPairs
+            ).sortedBy { it.startWaypointIndex }
         return AnnotatedRoute(waypoints, merged)
     }
 

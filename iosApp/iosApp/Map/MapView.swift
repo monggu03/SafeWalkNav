@@ -70,11 +70,20 @@ struct MapView: View {
                     .stroke(.blue, lineWidth: 5)
             }
 
-            // 3. waypoint 핀 — pointType 별 색상.
-            //    CROSSWALK 노란색 / TURN 회색 / 기타 파란색.
-            ForEach(waypointPins) { pin in
+            // 3. 실제 waypoint 핀 (가상 제외) — pointType 별 색상.
+            ForEach(waypointPins.filter { !$0.isVirtual }) { pin in
                 Marker(pin.pointType, coordinate: pin.coordinate)
                     .tint(colorForWaypoint(pin.pointType))
+            }
+
+            // 3-b. 가상 waypoint — 작은 점. 곡선 방향으로 색 구분(왼=teal / 오른=green).
+            ForEach(waypointPins.filter { $0.isVirtual }) { pin in
+                Annotation("", coordinate: pin.coordinate) {
+                    Circle()
+                        .fill(pin.curveDirection == "LEFT" ? .teal : .green)
+                        .frame(width: 9, height: 9)
+                        .overlay(Circle().stroke(.white, lineWidth: 1.5))
+                }
             }
 
             // 4. annotation 마커 — type 별 색상.
@@ -120,8 +129,9 @@ struct MapView: View {
 
     private func colorForAnnotation(_ type: String) -> Color {
         switch type {
-        case "CURVE", "SLIGHT_CURVE", "INTERNAL_CURVE": return .purple
-        case "TURN", "SLIGHT_TURN", "SHARP_TURN":       return .pink
+        case "SHARP_TURN":                              return .red      // 급회전 — 최대 강조
+        case "TURN", "SLIGHT_TURN":                     return .orange   // 일반 회전
+        case "CURVE", "SLIGHT_CURVE", "INTERNAL_CURVE": return .purple   // 곡선
         default:                                        return .gray
         }
     }

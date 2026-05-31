@@ -12,12 +12,13 @@ import kotlin.test.assertTrue
  * NavigationManager 가 사용자 진행 거리에 따라 사전 안내 후보를 고르는 로직 단위 테스트.
  *
  * 검증 대상:
- *   1. selectAnnouncementCandidate 의 gap 윈도우 (0 ~ triggerDist)
+ *   1. selectAnnouncementCandidate 의 gap 윈도우 (0 ~ triggerDist) 와 단계 분기 (APPROACH / IMMINENT)
  *   2. type 별 triggerDist 차등 (sharp/turn/curve)
- *   3. announcedIds 중복 발화 차단
+ *   3. announcedKeys (idx, stage) 중복 발화 차단 — stage 별로 dedup
  *   4. 빈 announceMessage 인 annotation 스킵 (STRAIGHT 등)
  *   5. announceDistanceFor 기본값
  *   6. computeCumulativeDistances 누적 거리 계산
+ *   7. 음수 gap(지난 회전) 발화 금지 불변식
  */
 class AnnouncementSelectorTest {
 
@@ -46,86 +47,146 @@ class AnnouncementSelectorTest {
         val result = selectAnnouncementCandidate(
             annotations = emptyList(),
             userCumulativeDistance = 0.0,
-            announcedIds = emptySet(),
+            announcedKeys = emptySet(),
             config = config,
         )
         assertNull(result)
     }
 
     @Test
-    fun `gap 이 trigger 윈도우 안이면 그 annotation 반환`() {
-        // CURVE → triggerDist = 5m. distanceFromStart 100m, user 95m → gap=5m → 안내 대상.
+    fun `APPROACH - gap 이 imminent 와 trigger 사이면 APPROACH 단계로 반환`() {
+        // CURVE → triggerDist 20m, imminent 5m. distance 100m, user 90m → gap=10m → APPROACH.
+        val a = ann(startIdx = 3, distanceFromStartM = 100.0, type = PathSegmentType.CURVE)
+        val result = selectAnnouncementCandidate(
+            annotations = listOf(a),
+            userCumulativeDistance = 90.0,
+            announcedKeys = emptySet(),
+            config = config,
+        )
+        assertNotNull(result)
+        assertEquals(3, result.annotation.startWaypointIndex)
+        assertEquals(AnnouncementStage.APPROACH, result.stage)
+        assertEquals(10.0, result.gapM)
+    }
+
+    @Test
+    fun `IMMINENT - gap 이 imminent 이하면 IMMINENT 단계로 반환`() {
+        // CURVE → imminent 5m. distance 100m, user 96m → gap=4m → IMMINENT.
+        val a = ann(startIdx = 3, distanceFromStartM = 100.0, type = PathSegmentType.CURVE)
+        val result = selectAnnouncementCandidate(
+            annotations = listOf(a),
+            userCumulativeDistance = 96.0,
+            announcedKeys = emptySet(),
+            config = config,
+        )
+        assertNotNull(result)
+        assertEquals(AnnouncementStage.IMMINENT, result.stage)
+        assertEquals(4.0, result.gapM)
+    }
+
+    @Test
+    fun `경계 - gap이 정확히 imminentDistanceM이면 IMMINENT 쪽 포함`() {
+        // gap = 5.0 → IMMINENT (경계 imminent 포함 규칙).
         val a = ann(startIdx = 3, distanceFromStartM = 100.0, type = PathSegmentType.CURVE)
         val result = selectAnnouncementCandidate(
             annotations = listOf(a),
             userCumulativeDistance = 95.0,
-            announcedIds = emptySet(),
+            announcedKeys = emptySet(),
             config = config,
         )
         assertNotNull(result)
-        assertEquals(3, result.startWaypointIndex)
+        assertEquals(AnnouncementStage.IMMINENT, result.stage)
     }
 
     @Test
     fun `gap 이 trigger 보다 크면 아직 안내 안 함`() {
-        // CURVE → 5m. distance 100m, user 50m → gap=50m → 윈도우 밖.
+        // CURVE → 20m. distance 100m, user 50m → gap=50m → 윈도우 밖.
         val a = ann(startIdx = 3, distanceFromStartM = 100.0, type = PathSegmentType.CURVE)
         val result = selectAnnouncementCandidate(
             annotations = listOf(a),
             userCumulativeDistance = 50.0,
-            announcedIds = emptySet(),
+            announcedKeys = emptySet(),
             config = config,
         )
         assertNull(result)
     }
 
     @Test
-    fun `gap 이 음수면 - annotation 을 지나쳤으면 스킵`() {
-        // user 가 annotation 너머로 진행한 상태 — 더 이상 안내 안 함.
+    fun `gap 이 음수면 - 지난 회전은 절대 발화 안 함`() {
+        // 안전 불변식 — IMMINENT 가 "지난 회전"으로 잘못 뽑히면 사용자가 반대 방향 안내를 받음.
         val a = ann(startIdx = 3, distanceFromStartM = 100.0, type = PathSegmentType.CURVE)
         val result = selectAnnouncementCandidate(
             annotations = listOf(a),
             userCumulativeDistance = 120.0,
-            announcedIds = emptySet(),
+            announcedKeys = emptySet(),
             config = config,
         )
         assertNull(result)
     }
 
     @Test
-    fun `SHARP_TURN 도 5m 윈도우 안에서만 트리거`() {
-        // SHARP_TURN → 5m. distance 100m, user 95m → gap=5m → 윈도우 안.
+    fun `SHARP_TURN - 30m 윈도우 안 APPROACH 진입`() {
+        // SHARP_TURN → 30m. distance 100m, user 80m → gap=20m → APPROACH.
         val a = ann(startIdx = 5, distanceFromStartM = 100.0, type = PathSegmentType.SHARP_TURN)
         val result = selectAnnouncementCandidate(
             annotations = listOf(a),
-            userCumulativeDistance = 95.0,
-            announcedIds = emptySet(),
+            userCumulativeDistance = 80.0,
+            announcedKeys = emptySet(),
             config = config,
         )
         assertNotNull(result)
-        assertEquals(5, result.startWaypointIndex)
+        assertEquals(AnnouncementStage.APPROACH, result.stage)
     }
 
     @Test
-    fun `CURVE 는 20m gap 에서 아직 트리거 안 됨 - 5m 윈도우 밖`() {
-        // CURVE → 5m 윈도우. distance 100m, user 80m → gap 20m → 아직.
+    fun `CURVE 는 25m gap 에서 아직 트리거 안 됨 - 20m 윈도우 밖`() {
         val a = ann(startIdx = 5, distanceFromStartM = 100.0, type = PathSegmentType.CURVE)
         val result = selectAnnouncementCandidate(
             annotations = listOf(a),
-            userCumulativeDistance = 80.0,
-            announcedIds = emptySet(),
+            userCumulativeDistance = 75.0,
+            announcedKeys = emptySet(),
             config = config,
         )
         assertNull(result)
     }
 
     @Test
-    fun `이미 발화된 id 는 후보에서 제외`() {
+    fun `이미 APPROACH 발화된 idx stage 는 후보에서 제외 - 하지만 IMMINENT 는 통과`() {
+        // 회전당 예고 1회 + 직전 1회를 위한 핵심 동작. 예고가 idx 를 선점하면 안 됨.
         val a = ann(startIdx = 3, distanceFromStartM = 100.0, type = PathSegmentType.CURVE)
+        val approachAnnounced = setOf(Pair(3, AnnouncementStage.APPROACH))
+
+        // 사용자가 직전 윈도우(95m, gap=5m) 도달 — APPROACH 는 announced 이지만 IMMINENT 는 미발화.
         val result = selectAnnouncementCandidate(
             annotations = listOf(a),
             userCumulativeDistance = 95.0,
-            announcedIds = setOf(3),
+            announcedKeys = approachAnnounced,
+            config = config,
+        )
+        assertNotNull(result)
+        assertEquals(AnnouncementStage.IMMINENT, result.stage)
+    }
+
+    @Test
+    fun `APPROACH 단계에서 이미 발화된 idx APPROACH 는 차단`() {
+        // 같은 단계 중복 안내 방지.
+        val a = ann(startIdx = 3, distanceFromStartM = 100.0, type = PathSegmentType.CURVE)
+        val result = selectAnnouncementCandidate(
+            annotations = listOf(a),
+            userCumulativeDistance = 85.0,   // gap = 15m → APPROACH 윈도우.
+            announcedKeys = setOf(Pair(3, AnnouncementStage.APPROACH)),
+            config = config,
+        )
+        assertNull(result)
+    }
+
+    @Test
+    fun `IMMINENT 발화 후 같은 idx IMMINENT 재진입은 차단`() {
+        val a = ann(startIdx = 3, distanceFromStartM = 100.0, type = PathSegmentType.CURVE)
+        val result = selectAnnouncementCandidate(
+            annotations = listOf(a),
+            userCumulativeDistance = 97.0,
+            announcedKeys = setOf(Pair(3, AnnouncementStage.IMMINENT)),
             config = config,
         )
         assertNull(result)
@@ -142,7 +203,7 @@ class AnnouncementSelectorTest {
         val result = selectAnnouncementCandidate(
             annotations = listOf(a),
             userCumulativeDistance = 95.0,
-            announcedIds = emptySet(),
+            announcedKeys = emptySet(),
             config = config,
         )
         assertNull(result)
@@ -150,45 +211,61 @@ class AnnouncementSelectorTest {
 
     @Test
     fun `여러 annotation 중 윈도우 안인 첫 번째를 반환`() {
-        // 두 annotation 모두 윈도우 안 — firstOrNull 이므로 리스트 순서대로 첫 번째.
         val a1 = ann(startIdx = 3, distanceFromStartM = 50.0)
         val a2 = ann(startIdx = 7, distanceFromStartM = 55.0)
         val result = selectAnnouncementCandidate(
             annotations = listOf(a1, a2),
             userCumulativeDistance = 45.0,
-            announcedIds = emptySet(),
+            announcedKeys = emptySet(),
             config = config,
         )
         assertNotNull(result)
-        assertEquals(3, result.startWaypointIndex)
+        assertEquals(3, result.annotation.startWaypointIndex)
     }
 
     @Test
-    fun `첫 번째가 이미 발화됐으면 두 번째 후보 선택`() {
+    fun `첫 번째가 같은 stage 로 이미 발화됐으면 두 번째 후보 선택`() {
         val a1 = ann(startIdx = 3, distanceFromStartM = 50.0)
         val a2 = ann(startIdx = 7, distanceFromStartM = 55.0)
         val result = selectAnnouncementCandidate(
             annotations = listOf(a1, a2),
-            userCumulativeDistance = 50.0,
-            announcedIds = setOf(3),
+            userCumulativeDistance = 40.0,                          // gap1=10, gap2=15 → 둘 다 APPROACH 윈도우.
+            announcedKeys = setOf(Pair(3, AnnouncementStage.APPROACH)),
             config = config,
         )
         assertNotNull(result)
-        assertEquals(7, result.startWaypointIndex)
+        assertEquals(7, result.annotation.startWaypointIndex)
+    }
+
+    // ───────── 튜닝 가능한 imminentDistanceM ─────────
+
+    @Test
+    fun `imminentDistanceM 튜닝 - 7m 로 설정하면 7m 까지 IMMINENT`() {
+        val custom = config.copy(imminentDistanceM = 7.0)
+        val a = ann(startIdx = 3, distanceFromStartM = 100.0, type = PathSegmentType.CURVE)
+        val result = selectAnnouncementCandidate(
+            annotations = listOf(a),
+            userCumulativeDistance = 94.0,   // gap = 6m → 7m 윈도우 안 → IMMINENT.
+            announcedKeys = emptySet(),
+            config = custom,
+        )
+        assertNotNull(result)
+        assertEquals(AnnouncementStage.IMMINENT, result.stage)
     }
 
     // ───────── announceDistanceFor ─────────
 
     @Test
     fun `announceDistanceFor 기본값 확인`() {
-        assertEquals(5.0, announceDistanceFor(PathSegmentType.SHARP_TURN, config))
-        assertEquals(5.0, announceDistanceFor(PathSegmentType.TURN, config))
-        assertEquals(5.0, announceDistanceFor(PathSegmentType.SLIGHT_TURN, config))
-        assertEquals(5.0, announceDistanceFor(PathSegmentType.CURVE, config))
-        assertEquals(5.0, announceDistanceFor(PathSegmentType.SLIGHT_CURVE, config))
-        assertEquals(5.0, announceDistanceFor(PathSegmentType.INTERNAL_CURVE, config))
-        // STRAIGHT 도 안전 기본값 — 의미 없지만 fallback 으로 curve 거리.
-        assertEquals(5.0, announceDistanceFor(PathSegmentType.STRAIGHT, config))
+        // 2026-05-31 A-2 후 기본값: CURVE 20 / TURN 25 / SHARP_TURN 30. G0 정렬 위에 얹는 lookahead.
+        assertEquals(30.0, announceDistanceFor(PathSegmentType.SHARP_TURN, config))
+        assertEquals(25.0, announceDistanceFor(PathSegmentType.TURN, config))
+        assertEquals(25.0, announceDistanceFor(PathSegmentType.SLIGHT_TURN, config))
+        assertEquals(20.0, announceDistanceFor(PathSegmentType.CURVE, config))
+        assertEquals(20.0, announceDistanceFor(PathSegmentType.SLIGHT_CURVE, config))
+        assertEquals(20.0, announceDistanceFor(PathSegmentType.INTERNAL_CURVE, config))
+        // STRAIGHT 도 안전 기본값 — 의미 없지만 fallback 으로 curve 거리(=20m).
+        assertEquals(20.0, announceDistanceFor(PathSegmentType.STRAIGHT, config))
     }
 
     @Test
@@ -201,6 +278,11 @@ class AnnouncementSelectorTest {
         assertEquals(30.0, announceDistanceFor(PathSegmentType.SHARP_TURN, custom))
         assertEquals(12.0, announceDistanceFor(PathSegmentType.TURN, custom))
         assertEquals(10.0, announceDistanceFor(PathSegmentType.CURVE, custom))
+    }
+
+    @Test
+    fun `imminentDistanceM 기본값 5m`() {
+        assertEquals(5.0, config.imminentDistanceM)
     }
 
     // ───────── computeCumulativeDistances ─────────
@@ -242,7 +324,6 @@ class AnnouncementSelectorTest {
     @Test
     fun `INTERNAL_CURVE 범위 안 SHARP_TURN 은 발화 차단`() {
         // INTERNAL_CURVE [3..7] 안에 SHARP_TURN at 5 가 있는 케이스.
-        // 사용자가 안내 윈도우에 들어가도 SHARP_TURN 은 후보에서 제외돼야 함.
         val internalCurve = ann(
             startIdx = 3,
             distanceFromStartM = 50.0,
@@ -255,23 +336,20 @@ class AnnouncementSelectorTest {
             type = PathSegmentType.SHARP_TURN,
             message = "급좌회전합니다",
         )
-        // INTERNAL_CURVE trigger 5m, distance 50m, user 45m → gap 5m → 윈도우 안.
-        // 같은 범위 안 SHARP_TURN 보다 INTERNAL_CURVE 가 먼저 선택되어야 함.
+        // INTERNAL_CURVE trigger 20m, distance 50m, user 35m → gap 15m → APPROACH 윈도우 안.
         val result = selectAnnouncementCandidate(
             annotations = listOf(internalCurve, sharpTurn),
-            userCumulativeDistance = 45.0,
-            announcedIds = emptySet(),
+            userCumulativeDistance = 35.0,
+            announcedKeys = emptySet(),
             config = config,
         )
-        // 결과: INTERNAL_CURVE (startIdx=3) 가 선택됨. SHARP_TURN(startIdx=5)은 차단.
         assertNotNull(result)
-        assertEquals(3, result.startWaypointIndex)
-        assertEquals(PathSegmentType.INTERNAL_CURVE, result.type)
+        assertEquals(3, result.annotation.startWaypointIndex)
+        assertEquals(PathSegmentType.INTERNAL_CURVE, result.annotation.type)
     }
 
     @Test
     fun `INTERNAL_CURVE 범위 밖 SHARP_TURN 은 정상 발화`() {
-        // INTERNAL_CURVE [3..7], SHARP_TURN at 10 — 범위 밖이므로 차단 안 됨.
         val internalCurve = ann(
             startIdx = 3,
             distanceFromStartM = 50.0,
@@ -279,25 +357,23 @@ class AnnouncementSelectorTest {
         ).copy(endWaypointIndex = 7)
         val sharpTurn = ann(
             startIdx = 10,
-            distanceFromStartM = 200.0,  // 멀리 떨어진 별개 회전
+            distanceFromStartM = 200.0,
             type = PathSegmentType.SHARP_TURN,
         )
-        // INTERNAL_CURVE 발화 직후 announcedIds 에 추가됐다고 가정.
-        // 그 후 SHARP_TURN 윈도우에 도달했을 때 정상 발화돼야 함.
+        // SHARP_TURN APPROACH 윈도우(30m): user 175m → gap 25m.
         val result = selectAnnouncementCandidate(
             annotations = listOf(internalCurve, sharpTurn),
-            userCumulativeDistance = 195.0,  // SHARP_TURN 의 5m 윈도우 안
-            announcedIds = setOf(3),         // INTERNAL_CURVE 는 이미 발화됨
+            userCumulativeDistance = 175.0,
+            announcedKeys = setOf(Pair(3, AnnouncementStage.APPROACH), Pair(3, AnnouncementStage.IMMINENT)),
             config = config,
         )
         assertNotNull(result)
-        assertEquals(10, result.startWaypointIndex)
-        assertEquals(PathSegmentType.SHARP_TURN, result.type)
+        assertEquals(10, result.annotation.startWaypointIndex)
+        assertEquals(PathSegmentType.SHARP_TURN, result.annotation.type)
     }
 
     @Test
     fun `INTERNAL_CURVE 범위 안 TURN 과 SLIGHT_TURN 모두 차단`() {
-        // 한 INTERNAL_CURVE 안에 TURN 과 SLIGHT_TURN 이 같이 있는 케이스 — 둘 다 차단.
         val internalCurve = ann(
             startIdx = 0,
             distanceFromStartM = 100.0,
@@ -313,11 +389,10 @@ class AnnouncementSelectorTest {
             distanceFromStartM = 100.0,
             type = PathSegmentType.SLIGHT_TURN,
         )
-        // INTERNAL_CURVE 가 이미 발화됐다고 가정. TURN/SLIGHT_TURN 윈도우 도달 시 모두 차단.
         val result = selectAnnouncementCandidate(
             annotations = listOf(internalCurve, turn, slightTurn),
-            userCumulativeDistance = 95.0,
-            announcedIds = setOf(0),
+            userCumulativeDistance = 80.0,
+            announcedKeys = setOf(Pair(0, AnnouncementStage.APPROACH), Pair(0, AnnouncementStage.IMMINENT)),
             config = config,
         )
         assertNull(result, "TURN/SLIGHT_TURN 둘 다 차단되어야 함")
@@ -325,7 +400,6 @@ class AnnouncementSelectorTest {
 
     @Test
     fun `INTERNAL_CURVE 범위 안 CURVE 는 차단 안 됨`() {
-        // 정책은 TURN 계열만 차단. CURVE / SLIGHT_CURVE 는 영향 없음.
         val internalCurve = ann(
             startIdx = 0,
             distanceFromStartM = 100.0,
@@ -338,19 +412,17 @@ class AnnouncementSelectorTest {
         )
         val result = selectAnnouncementCandidate(
             annotations = listOf(internalCurve, nestedCurve),
-            userCumulativeDistance = 95.0,
-            announcedIds = setOf(0),  // INTERNAL_CURVE 발화됨
+            userCumulativeDistance = 85.0,
+            announcedKeys = setOf(Pair(0, AnnouncementStage.APPROACH), Pair(0, AnnouncementStage.IMMINENT)),
             config = config,
         )
-        // CURVE 가 선택됨 — 차단 정책은 TURN 계열에만 적용.
         assertNotNull(result)
-        assertEquals(3, result.startWaypointIndex)
-        assertEquals(PathSegmentType.CURVE, result.type)
+        assertEquals(3, result.annotation.startWaypointIndex)
+        assertEquals(PathSegmentType.CURVE, result.annotation.type)
     }
 
     @Test
     fun `INTERNAL_CURVE 가 없으면 기존 동작과 동일`() {
-        // 회귀 테스트 — INTERNAL_CURVE 가 리스트에 없으면 SHARP_TURN 정상 발화.
         val sharpTurn = ann(
             startIdx = 5,
             distanceFromStartM = 100.0,
@@ -358,12 +430,12 @@ class AnnouncementSelectorTest {
         )
         val result = selectAnnouncementCandidate(
             annotations = listOf(sharpTurn),
-            userCumulativeDistance = 95.0,
-            announcedIds = emptySet(),
+            userCumulativeDistance = 75.0,
+            announcedKeys = emptySet(),
             config = config,
         )
         assertNotNull(result)
-        assertEquals(5, result.startWaypointIndex)
+        assertEquals(5, result.annotation.startWaypointIndex)
     }
 
     private fun mkWaypoint(lat: Double, lon: Double): Waypoint = Waypoint(
