@@ -316,7 +316,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
     private var hasNearbyTrafficSignalForCamera = false
-    private val TRAFFIC_SIGNAL_CAMERA_ZOOM_RATIO = 2f
+    private val TRAFFIC_SIGNAL_CAMERA_ZOOM_RATIO = 3f
 
     // ==================== 신호등 검출 (PR-AI) ====================
 
@@ -368,7 +368,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     //
     // 발화 빈도:
     //   - 색 변경 시에만 TTS (반복 X)
-    //   - HEARTBEAT_INTERVAL_MS 마다 짧은 톤 — 시스템 살아있음 신호
+    //   - HEARTBEAT_INTERVAL_MS 마다 같은 색상 신호를 TTS 반복
     //
     // 검출 타임아웃:
     //   - DETECTION_TIMEOUT_MS 이상 validated 검출 없으면 state reset.
@@ -381,7 +381,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var lastValidatedAt: Long = 0L        // 마지막 validated 검출 시각 (timeout 판정용)
     private val RED_STABILITY_FRAMES = 2
     private val GREEN_STABILITY_FRAMES = 3
-    private val HEARTBEAT_INTERVAL_MS = 15_000L
+    private val HEARTBEAT_INTERVAL_MS = 10_000L
     private val DETECTION_TIMEOUT_MS = 10_000L
 
     // Flicker(점멸) 감지 — 한국 보행 신호 종료 직전 약 5~15초간 깜빡이는 phase 대응.
@@ -813,7 +813,68 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun updateAiDebugResult(message: String) {
         if (!BuildConfig.DEBUG) return
         if (!::tvDebugAiResult.isInitialized) return
-        tvDebugAiResult.text = message
+        tvDebugAiResult.text = summarizeAiDebug(message)
+        updateCompactDebugGuidance()
+    }
+
+    private fun summarizeAiDebug(message: String): String {
+        val action = Regex("action=([A-Z_]+)").find(message)?.groupValues?.getOrNull(1)
+        val label = Regex("label=([^\\s|]+)").find(message)?.groupValues?.getOrNull(1)
+        val confPct = Regex("conf=(\\d+)%").find(message)?.groupValues?.getOrNull(1)
+        val peakPct = Regex("peak=([0-9.]+)").find(message)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toFloatOrNull()
+            ?.let { (it * 100).toInt().toString() }
+        val color = when {
+            label?.contains("red", ignoreCase = true) == true -> "RED"
+            label?.contains("green", ignoreCase = true) == true -> "GREEN"
+            else -> null
+        }
+        val aiLine = when {
+            message.contains("AI OFF") -> "AI=OFF"
+            color != null -> "AI=$color ${(confPct ?: peakPct ?: "").let { if (it.isEmpty()) "" else "$it%" }}".trim()
+            message.contains("AI ON") -> "AI=ON"
+            else -> "AI=OFF"
+        }
+        return if (action != null && action != "CHECKING") {
+            "$aiLine\naction=$action"
+        } else {
+            aiLine
+        }
+    }
+
+    private fun updateCompactDebugGuidance() {
+        if (!BuildConfig.DEBUG) return
+        if (!::tvDebugGuidance.isInitialized) return
+
+        val debug = navigationManager.debugMessage.value
+        val crosswalkDist = Regex("crosswalkDist=(-?\\d+)m").find(debug)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.takeUnless { it == "-1" }
+        val state = Regex("crosswalkState=([^\\n|]+)").find(debug)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() && it != "NONE" }
+        val aiLines = if (::tvDebugAiResult.isInitialized) {
+            tvDebugAiResult.text.toString().lines().filter { it.isNotBlank() }
+        } else {
+            emptyList()
+        }
+
+        val lines = mutableListOf<String>()
+        lines.add("횡단보도=$inCrosswalkZone")
+        lines.add("crosswalkDist=${crosswalkDist?.let { "${it}m" } ?: "-"}")
+        if (state != null) lines.add("crosswalkState=$state")
+        lines.add("signal10m=$hasNearbyTrafficSignalForCamera")
+        if (aiLines.isNotEmpty()) {
+            lines.addAll(aiLines)
+        } else {
+            lines.add("AI=${if (inCrosswalkZone && hasNearbyTrafficSignalForCamera) "ON" else "OFF"}")
+        }
+        tvDebugGuidance.text = lines.joinToString("\n")
     }
 
     private fun isTalkBackEnabled(): Boolean {
@@ -1338,10 +1399,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
 
                 if (BuildConfig.DEBUG) {
-                    tvDebugGuidance.text =
-                        "${navigationManager.debugMessage.value}\n" +
-                                "GPS ${"%.5f".format(location.latitude)}, ${"%.5f".format(location.longitude)}" +
-                                " $accuracyText | dest=${dist.toInt()}m"
+                    updateCompactDebugGuidance()
                 }
             }
         }
@@ -1581,7 +1639,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     }
 
                     if (BuildConfig.DEBUG) {
-                        tvDebugGuidance.text = "guidance=$message"
+                        updateCompactDebugGuidance()
                     }
 
                     if (message.contains("이탈")) {
@@ -1597,6 +1655,32 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         // 횡단보도 zone 상태 추적 — TMap waypoint 의 pointType=CROSSWALK + GPS 위치 기반.
         // NavigationManager 가 매 GPS update 마다 갱신. ML 안내 게이팅에 사용.
+        lifecycleScope.launch {
+            navigationManager.navEvents.collectLatest { event ->
+                val message = event.message
+                if (message.isEmpty()) return@collectLatest
+
+                if (event.interrupt) {
+                    tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, message.hashCode().toString())
+                } else {
+                    speakTTS(message)
+                }
+                Log.d("SafeWalkNav", "NavEvent: $message")
+                appendNavLog("NavEvent: $message")
+
+                if (::tvCompassGuidance.isInitialized) {
+                    tvCompassGuidance.text = message
+                }
+                if (BuildConfig.DEBUG) {
+                    updateCompactDebugGuidance()
+                }
+                if (message.contains("신호등") || message.contains("횡단보도")) {
+                    vibrateMedium()
+                    playToneAlert()
+                }
+            }
+        }
+
         lifecycleScope.launch {
             navigationManager.isInCrosswalkZone.collectLatest { inZone ->
                 val wasIn = inCrosswalkZone
@@ -1636,6 +1720,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     }
                 }
                 updateDebugInfo()
+                updateCompactDebugGuidance()
             }
         }
 
@@ -1644,6 +1729,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 hasNearbyTrafficSignalForCamera = hasSignal
                 applyNavigatingMode(inCrosswalkZone)
                 applyTrafficSignalCameraZoom()
+                updateCompactDebugGuidance()
             }
         }
 
@@ -1683,8 +1769,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             lifecycleScope.launch {
                 navigationManager.debugMessage.collectLatest { msg ->
                     if (msg.isNotEmpty()) {
-                        // 여러 줄을 한 줄로 압축해서 좁은 디버그 박스에 표시
-                        tvDebugGuidance.text = msg.replace("\n", " | ")
+                        updateCompactDebugGuidance()
                     }
                 }
             }
@@ -1727,7 +1812,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         lifecycleScope.launch {
             navigationManager.debugMessage.collectLatest { message ->
                 if (BuildConfig.DEBUG && message.isNotEmpty()) {
-                    tvDebugGuidance.text = message
+                    updateCompactDebugGuidance()
                 }
             }
         }
@@ -1859,7 +1944,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      *   (3) Detection 타임아웃 체크 → state reset 여부
      *   (4) 안정성 필터: 3 frame 연속 같은 색이어야 confirm
      *   (5) confirmed 색 처리:
-     *       · 이전 confirmed 와 같음 → TTS 없음, HEARTBEAT_INTERVAL_MS 마다 짧은 톤만
+     *       · 이전 confirmed 와 같음 → HEARTBEAT_INTERVAL_MS 마다 같은 색상 TTS 반복
      *       · 다름 → 색 변경 또는 첫 confirm → TTS 발화
      *           - 빨강: "빨간불입니다. 정지하세요."
      *           - 초록 (이전이 빨강): "방금 초록불로 바뀌었습니다. 안전을 확인하고 건너세요." ← 유일 "건너세요"
@@ -1926,7 +2011,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             // 모델이 신호등을 못 봄 (또는 threshold 미달).
             // zone 안이라도 안내 안 함. 진단 라인은 이미 기록됨.
             if (BuildConfig.DEBUG) {
-                tvDebugGuidance.text = "ML: $statsLine"
+                updateCompactDebugGuidance()
                 updateAiDebugResult("$aiResultLine | action=NO_DET")
             }
             return
@@ -1955,7 +2040,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         "(minR=3%, minG=6%)"
             )
             if (BuildConfig.DEBUG) {
-                tvDebugGuidance.text = "TL noise 무시: ${small.label} ${(small.confidence * 100).toInt()}% box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}%"
+                updateCompactDebugGuidance()
                 updateAiDebugResult(
                     "$aiResultLine | action=SMALL label=${small.label} " +
                             "conf=${(small.confidence * 100).toInt()}% " +
@@ -1979,7 +2064,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 "TL_DIAG  └─ FLICKER_LOCKOUT remaining=${remainingMs}ms current=${nearest.label}"
             )
             if (BuildConfig.DEBUG) {
-                tvDebugGuidance.text = "TL flicker lockout ${remainingMs / 1000}s"
+                updateCompactDebugGuidance()
                 updateAiDebugResult(
                     "$aiResultLine | action=FLICKER_LOCKOUT remaining=${remainingMs}ms"
                 )
@@ -2024,7 +2109,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         "box=${(nearest.bbox.width * 100).toInt()}x${(nearest.bbox.height * 100).toInt()}%"
             )
             if (BuildConfig.DEBUG) {
-                tvDebugGuidance.text = "TL stability: ${nearest.label} ${(nearest.confidence * 100).toInt()}% (streak $colorStreak/$requiredStabilityFrames)"
+                updateCompactDebugGuidance()
                 updateAiDebugResult(
                     "$aiResultLine | action=STABILITY_PENDING label=${nearest.label} " +
                             "streak=$colorStreak/$requiredStabilityFrames"
@@ -2037,26 +2122,27 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val confirmedColor = currentColorCandidate
         val previousColor = lastConfirmedColor
 
-        // (c-1) 같은 색 지속 → TTS 무발화, HEARTBEAT_INTERVAL_MS 마다 짧은 톤만
+        // (c-1) 같은 색 지속 → HEARTBEAT_INTERVAL_MS 마다 같은 색상 TTS 반복
         if (confirmedColor == previousColor) {
             val heartbeatDue = now - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS
             if (heartbeatDue) {
-                playToneAlert()
+                val repeatMessage = repeatTrafficLightMessage(confirmedColor)
+                speakTrafficLightTTS(repeatMessage)
                 lastHeartbeatAt = now
                 appendNavLog(
-                    "TL_DIAG  └─ HEARTBEAT color=${classLabel(confirmedColor)} (tone only, no TTS)"
+                    "TL_DIAG  └─ REPEAT_TTS color=${classLabel(confirmedColor)} interval=${HEARTBEAT_INTERVAL_MS}ms"
                 )
                 if (BuildConfig.DEBUG) {
-                    updateAiDebugResult("$aiResultLine | action=HEARTBEAT label=${nearest.label}")
+                    updateAiDebugResult("$aiResultLine | action=REPEAT_TTS label=${nearest.label}")
                 }
             } else {
                 val nextIn = (HEARTBEAT_INTERVAL_MS - (now - lastHeartbeatAt)) / 1000
                 appendNavLog(
-                    "TL_DIAG  └─ SAME_COLOR_QUIET (next heartbeat in ${nextIn}s)"
+                    "TL_DIAG  └─ SAME_COLOR_QUIET (next repeat in ${nextIn}s)"
                 )
                 if (BuildConfig.DEBUG) {
                     updateAiDebugResult(
-                        "$aiResultLine | action=QUIET label=${nearest.label} next_tone=${nextIn}s"
+                        "$aiResultLine | action=QUIET label=${nearest.label} next_repeat=${nextIn}s"
                     )
                 }
             }
@@ -2071,7 +2157,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (previousColor != -1 && lastTransitionAt > 0L && now - lastTransitionAt < MIN_PHASE_DURATION_MS) {
             val gapMs = now - lastTransitionAt
             val flickerMsg = "신호가 깜빡입니다. 멈춰서 다음 신호를 기다리세요."
-            speakTTS(flickerMsg)
+            speakTrafficLightTTS(flickerMsg)
             vibrateWarning()                    // 강한 staccato 진동
             flickerLockoutUntil = now + FLICKER_LOCKOUT_MS
             metricFlickerCount++                // 정량 지표
@@ -2097,7 +2183,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             )
 
             if (BuildConfig.DEBUG) {
-                tvDebugGuidance.text = "TL FLICKER (gap=${gapMs}ms) — lockout ${FLICKER_LOCKOUT_MS / 1000}s"
+                updateCompactDebugGuidance()
                 updateAiDebugResult(
                     "$aiResultLine | action=FLICKER gap=${gapMs}ms lockout=${FLICKER_LOCKOUT_MS}ms"
                 )
@@ -2140,7 +2226,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             else -> return
         }
 
-        speakTTS(message)
+        speakTrafficLightTTS(message)
         if (withVibrate) vibrateShort()
 
         // Firebase Analytics — ML 신호등 안내 이벤트 (color + transition_type + confidence)
@@ -2161,8 +2247,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         )
 
         if (BuildConfig.DEBUG) {
-            tvDebugGuidance.text =
-                "TL: $action ${(nearest.confidence * 100).toInt()}% (${validated.size}/${detections.size} det)"
+            updateCompactDebugGuidance()
             updateAiDebugResult(
                 "$aiResultLine | action=$action label=${nearest.label} " +
                         "conf=${(nearest.confidence * 100).toInt()}% " +
@@ -2191,6 +2276,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         1 -> "GREEN"
         -1 -> "NONE"
         else -> "?($classId)"
+    }
+
+    private fun repeatTrafficLightMessage(classId: Int): String = when (classId) {
+        0 -> "빨간불입니다. 정지하세요."
+        1 -> "초록불입니다."
+        else -> "신호를 확인하세요."
     }
 
     private fun stopCamera() {
@@ -2323,6 +2414,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun speakTTS(message: String) {
         tts.speak(message, TextToSpeech.QUEUE_ADD, null, message.hashCode().toString())
+    }
+
+    private fun speakTrafficLightTTS(message: String) {
+        tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "traffic_light")
     }
 
     /**
