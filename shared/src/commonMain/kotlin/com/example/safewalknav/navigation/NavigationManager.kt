@@ -340,26 +340,21 @@ class NavigationManager(
     }
 
     /**
-     * IMU(자력계+가속도 fusion azimuth) + GPS Kalman heading 융합.
+     * 보행 중 lean 안내용 heading 결정.
      *
-     * 동기:
-     *   IMU only: 자기장 노이즈/휴대폰 자세에 민감. 굽은 길에서 부정확.
-     *   GPS only: 저속/정지 시엔 잡음. 빠른 변화 추적 어려움.
-     *   → 두 source 의 장점을 가중 평균으로 합성하면 굽은 길에서도 robust.
+     * 2026-05-31 설계 변경 — IMU(자력계+가속도 fusion)는 *움직일 때* 자기장 노이즈와
+     * 휴대폰 자세 변화로 오류가 큰 것이 외출 테스트에서 확인됨. 따라서 보행 중 lean 보정에는
+     * **GPS bearing 의 Kalman smoothed heading 만 사용**. IMU 는 fallback 으로만 유지.
      *
-     * 가중치 산정:
-     *   speedWeight   : 속도 0.5 → 0.0, 2.0 → 1.0 (빠를수록 GPS 신뢰 ↑)
-     *   accuracyWeight: GPS accuracy 0m → 1.0, 30m → 0.0 (정확할수록 GPS 신뢰 ↑)
-     *   gpsWeight     : 두 가중치 곱, 0.2 ~ 0.8 범위로 clamp (IMU 신호 최소 보존)
-     *   imuWeight     : 1 - gpsWeight
+     * 이 함수는 updateCompassHeading 에서 latestSpeed >= MIN_WALKING_SPEED_MPS(0.3) 조건
+     * 통과 후 호출되므로 호출 시점에 이미 *보행 중*. 정지 상태에선 호출 자체가 안 됨.
      *
-     * Edge cases:
-     *   - GPS Kalman 미초기화 → IMU only
-     *   - 정지 (speed < 0.5) → IMU only (GPS bearing 잡음)
-     *   - GPS accuracy > 30m → IMU only (GPS 신뢰 불가)
+     * 동작:
+     *   - 정상 (GPS Kalman 초기화 + GPS accuracy 양호) → GPS Kalman heading 사용 (IMU 무시)
+     *   - GPS Kalman 미초기화 (KalmanHeading 초기 1~2 frame) → IMU fallback
+     *   - GPS accuracy > 30m (도심 빌딩 밀집 등) → IMU fallback
      *
-     * Circular fusion:
-     *   wrap-around (350° + 10° = 0° 가 평균이 180° 가 되는 문제) 회피 위해 sin/cos 분해 후 atan2 합성.
+     * Note: 함수 이름은 호환성 위해 fuseImuAndGps 유지. 내부 동작은 GPS 우선.
      */
     private fun fuseImuAndGps(
         imuAzimuth: Float,
@@ -367,40 +362,29 @@ class NavigationManager(
         speed: Float,
         gpsAccuracy: Float,
     ): Float {
-        // Edge cases — GPS 못 믿을 상황이면 IMU only.
-        if (gpsKalmanHeading < 0f) return imuAzimuth                  // Kalman 미초기화
-        if (speed < FUSION_MIN_SPEED) return imuAzimuth               // 저속/정지
-        if (gpsAccuracy > FUSION_MAX_ACCURACY) return imuAzimuth      // GPS 정확도 너무 나쁨
-
-        // Speed weight: 0.5 m/s = 0, 2.0 m/s = 1.0, 그 사이 선형 보간
-        val speedWeight = ((speed - FUSION_MIN_SPEED) /
-                (FUSION_FULL_SPEED - FUSION_MIN_SPEED)).coerceIn(0f, 1f)
-
-        // Accuracy weight: 0m = 1.0, 30m = 0.0, 그 사이 선형 보간
-        val accuracyWeight = (1f - (gpsAccuracy / FUSION_MAX_ACCURACY)).coerceIn(0f, 1f)
-
-        // 두 가중치 곱 → 0.2 ~ 0.8 범위로 clamp.
-        // 최저 0.2: GPS 가 너무 무시되지 않게.
-        // 최고 0.8: IMU 신호도 최소 20% 는 보존 (휴대폰 회전 빠른 변화 감지).
-        val gpsWeight = (speedWeight * accuracyWeight)
-            .coerceIn(FUSION_GPS_WEIGHT_MIN, FUSION_GPS_WEIGHT_MAX)
-        val imuWeight = 1f - gpsWeight
-
-        // Circular fusion (sin/cos 분해 후 atan2 합성).
-        val gpsRad = gpsKalmanHeading.toDouble() * PI / 180.0
-        val imuRad = imuAzimuth.toDouble() * PI / 180.0
-        val fusedSin = sin(gpsRad) * gpsWeight + sin(imuRad) * imuWeight
-        val fusedCos = cos(gpsRad) * gpsWeight + cos(imuRad) * imuWeight
-        val fusedRad = atan2(fusedSin, fusedCos)
-        val fused = ((fusedRad * 180.0 / PI + 360.0) % 360.0).toFloat()
-
-        // 진단 로그 — 융합 동작 검증용. 외출 후 walk_log 에서 fusion 가중치 추적 가능.
+        // GPS Kalman 미초기화 → IMU fallback (KalmanHeading 초기 1~2 frame)
+        if (gpsKalmanHeading < 0f) {
+            val debug = "imu=${imuAzimuth.toInt()}° gps=N/A " +
+                    "speed=${"%.2f".format(speed)} acc=${gpsAccuracy.toInt()}m USED=IMU(fallback)"
+            println("[HEADING_FUSION] $debug")
+            latestFusionDebug = debug
+            return imuAzimuth
+        }
+        // GPS 정확도 너무 나쁨 → IMU fallback (빌딩 밀집/지하 출구 등)
+        if (gpsAccuracy > FUSION_MAX_ACCURACY) {
+            val debug = "imu=${imuAzimuth.toInt()}° gps=${gpsKalmanHeading.toInt()}° " +
+                    "speed=${"%.2f".format(speed)} acc=${gpsAccuracy.toInt()}m USED=IMU(gps_bad)"
+            println("[HEADING_FUSION] $debug")
+            latestFusionDebug = debug
+            return imuAzimuth
+        }
+        // 정상 보행 중 + GPS 신뢰 가능 → GPS Kalman heading 만 사용 (IMU 무시).
+        // IMU 움직임 노이즈가 굽은 길에서 잘못된 lean 안내를 유발하던 문제 해결.
         val debug = "imu=${imuAzimuth.toInt()}° gps=${gpsKalmanHeading.toInt()}° " +
-                "speed=${"%.2f".format(speed)} acc=${gpsAccuracy.toInt()}m " +
-                "gpsW=${"%.2f".format(gpsWeight)} fused=${fused.toInt()}°"
+                "speed=${"%.2f".format(speed)} acc=${gpsAccuracy.toInt()}m USED=GPS"
         println("[HEADING_FUSION] $debug")
         latestFusionDebug = debug
-        return fused
+        return gpsKalmanHeading
     }
 
     // ========== 경로 탐색 ==========
