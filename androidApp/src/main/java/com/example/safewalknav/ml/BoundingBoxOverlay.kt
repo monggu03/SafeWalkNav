@@ -123,7 +123,7 @@ class BoundingBoxOverlay @JvmOverloads constructor(
             canvas.drawRect(left, top, right, bottom, stroke)
 
             // 라벨 — 박스 좌상단 위에 배치 (위쪽 공간 없으면 박스 안 위쪽에 표시)
-            val label = "${if (isRed) "RED" else "GREEN"} ${(d.confidence * 100).toInt()}%"
+            val label = if (isRed) "빨간불" else "초록불"
             val textW = labelText.measureText(label)
             val textH = labelText.descent() - labelText.ascent()
             val padX = 6f * density
