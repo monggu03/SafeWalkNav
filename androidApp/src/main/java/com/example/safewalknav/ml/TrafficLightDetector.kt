@@ -41,12 +41,12 @@ class TrafficLightDetector(context: Context) {
 
     /**
      * Confidence threshold — 이 값 이상의 점수만 유효 검출로 인정.
-     * 0.7 로 비교적 엄격하게 — 시각장애인 안전 시나리오에선 false positive 가 false negative 보다 더 치명적.
-     * 학습 시 mAP50 0.9476, 진짜 신호등은 0.7+ 로 잡힘. 0.5~0.7 대는 noise 가능성 높아 제외.
+     * 기본 0.5 이상 점수만 통과시킨다.
+     * 학습 시 mAP50 0.9476 기준으로 실기기 민감도를 높이기 위해 0.7에서 낮췄다.
      *
      * 진단 모드 (diagnosticMode=true) 일 때는 [DIAGNOSTIC_CONFIDENCE_THRESHOLD] 가 대신 적용됨.
      */
-    var confidenceThreshold: Float = 0.7f
+    var confidenceThreshold: Float = 0.5f
 
     /** NMS IoU threshold — 같은 클래스 박스가 이 값 이상 겹치면 중복으로 제거. */
     var iouThreshold: Float = 0.45f
@@ -276,7 +276,7 @@ class TrafficLightDetector(context: Context) {
         private const val MODEL_FILENAME = "safewalknav_tl.tflite"
 
         /**
-         * 진단 모드일 때 적용되는 confidence threshold (0.3). 운영 임계 0.7 대비 충분히 낮춰
+         * 진단 모드일 때 적용되는 confidence threshold (0.3). 운영 임계 0.5 대비 충분히 낮춰
          * 모델이 신호등을 보고는 있지만 점수가 낮아 떨어진 케이스를 식별하기 위함.
          * 운영용으로 켜면 false positive 위험 — 진단 후 반드시 끌 것.
          */

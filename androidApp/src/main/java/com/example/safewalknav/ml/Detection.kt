@@ -41,7 +41,7 @@ data class BoundingBox(
  *
  * 해석 가이드:
  *   - peakConfidence 가 항상 낮음 (예: < 0.2) → 카메라가 신호등을 안 향하고 있을 가능성
- *   - peakConfidence 가 높음 (≥ 0.7) 인데 finalDetections=0 → NMS 또는 후처리 버그
+ *   - peakConfidence 가 높음 (≥ 0.5) 인데 finalDetections=0 → NMS 또는 후처리 버그
  *   - rawCandidatesAboveThreshold 가 많은데 finalDetections=0 → NMS 가 너무 공격적
  *   - peakConfRed/Green 한 쪽만 높음 → 색상 편향 가능성
  *
