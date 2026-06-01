@@ -46,7 +46,7 @@ class TrafficLightDetector(context: Context) {
      *
      * 진단 모드 (diagnosticMode=true) 일 때는 [DIAGNOSTIC_CONFIDENCE_THRESHOLD] 가 대신 적용됨.
      */
-    var confidenceThreshold: Float = 0.5f
+    var confidenceThreshold: Float = 0.4f
 
     /** NMS IoU threshold — 같은 클래스 박스가 이 값 이상 겹치면 중복으로 제거. */
     var iouThreshold: Float = 0.45f
