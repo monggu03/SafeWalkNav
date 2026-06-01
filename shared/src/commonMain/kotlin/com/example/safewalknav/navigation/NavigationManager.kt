@@ -362,8 +362,10 @@ class NavigationManager(
                     }
                 }
 
-                // 누적 카운트가 임계값(3)에 도달하면 안내 메시지 발화
-                if (kotlin.math.abs(leanAccumulator) >= 3) {
+                // 누적 카운트가 임계값(5)에 도달하면 안내 메시지 발화.
+                // 2026-05-31 외출 피드백 — 3 회 누적은 너무 빨라 잘못된 발화 폭주.
+                // 5 회 (≈ 0.3 초 지속 LEAN) 로 완화해 일시적 흔들림 무시.
+                if (kotlin.math.abs(leanAccumulator) >= 5) {
                     val message = if (leanAccumulator <= -3) {
                         "왼쪽으로 치우쳤습니다. 오른쪽으로 오세요."
                     } else {

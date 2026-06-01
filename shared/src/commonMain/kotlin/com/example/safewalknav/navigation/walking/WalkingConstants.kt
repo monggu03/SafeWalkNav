@@ -5,8 +5,10 @@ package com.example.safewalknav.navigation.walking
  */
 object NavigationConstants {
     // --- 보행 쏠림(Lean) 판단 기준 ---
-    const val LEAN_THRESHOLD = 25.0       // 쏠림으로 판단할 최소 각도 (degree)[cite: 1]
-    const val SHAKE_THRESHOLD = 13.0f     // 흔들기 감지 임계값 (m/s^2)[cite: 1]
+    // 2026-05-31 외출 피드백 — 25° 임계가 너무 빡세 자연스러운 보행 흔들림(특히 시각장애인은
+    // 흰지팡이 좌우 탐지로 더 큰 흔들림)을 lean 으로 잘못 판정하여 발화 폭주. 40° 로 완화.
+    const val LEAN_THRESHOLD = 40.0       // 쏠림으로 판단할 최소 각도 (degree)
+    const val SHAKE_THRESHOLD = 13.0f     // 흔들기 감지 임계값 (m/s^2)
 
     // --- 보행 진단(Diagnostic) 관련 ---[cite: 1]
     const val STABLE_WALKING_TIME = 2000L // 안정된 보행으로 판단하는 최소 시간 (ms)[cite: 1]
