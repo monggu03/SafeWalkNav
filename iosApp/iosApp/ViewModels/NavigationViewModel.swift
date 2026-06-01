@@ -422,7 +422,8 @@ final class NavigationViewModel: ObservableObject {
                 }
 
                 // 6. 횡단보도 감지
-                let newIsAtCrosswalk = parseCrosswalkFromDebugMessage()
+                let newIsAtCrosswalk =
+                    (self.navigationManager.isInCrosswalkZone.value as? KotlinBoolean)?.boolValue ?? false
                 if newIsAtCrosswalk != self.isAtCrosswalk {
                     print("🚦 [CROSSWALK] \(self.isAtCrosswalk) → \(newIsAtCrosswalk)")
                     self.isAtCrosswalk = newIsAtCrosswalk
