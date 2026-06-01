@@ -68,6 +68,12 @@ final class TrafficLightDetector: NSObject, ObservableObject {
     private var lastDetectionTime: Date = Date()
     private let noDetectionTimeout: TimeInterval = 5.0
 
+    // MARK: - 미탐지 단계 안내 (no-detection escalation)
+    private var noDetectionStage: Int = 0          // 0=안내 전, 1·2·3=해당 단계까지 안내함
+    private let noDetStage1: TimeInterval = 3.0    // 1단계: 좌→우 이동 안내
+    private let noDetStage2: TimeInterval = 6.0    // 2단계: 각도 바꿔 재시도
+    private let noDetStage3: TimeInterval = 9.0    // 3단계: 포기 + 주변 소리 주의, 이후 침묵
+
     // MARK: - Init
 
     /// 통합 앱에서 사용 시: TtsManager 주입
@@ -120,7 +126,8 @@ final class TrafficLightDetector: NSObject, ObservableObject {
             camera = telephoto
         } else if let wide = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) {
             try? wide.lockForConfiguration()
-            wide.videoZoomFactor = 2.0
+            let targetZoom: CGFloat = 3.0
+            wide.videoZoomFactor = min(targetZoom, wide.maxAvailableVideoZoomFactor)
             wide.unlockForConfiguration()
             camera = wide
         } else {
@@ -149,6 +156,8 @@ final class TrafficLightDetector: NSObject, ObservableObject {
     // MARK: - Public API
 
     func startDetection() {
+        noDetectionStage = 0          // 단계 초기화 — 깨끗하게 1단계부터
+        lastDetectionTime = Date()    // 경과 시간 0부터 — 진입 후 3초 뒤 1단계 안내
         DispatchQueue.global(qos: .userInitiated).async {
             self.captureSession.startRunning()
         }
@@ -191,6 +200,7 @@ final class TrafficLightDetector: NSObject, ObservableObject {
 
             if let det = bestDetection {
                 self.lastDetectionTime = Date()
+                self.noDetectionStage = 0      // 신호등 재탐지 → 미탐지 단계 초기화
                 self.confidence = det.confidence
 
                 switch det.label {
@@ -208,12 +218,25 @@ final class TrafficLightDetector: NSObject, ObservableObject {
                     self.confidence = 0
                 }
             } else {
-                if Date().timeIntervalSince(self.lastDetectionTime) > self.noDetectionTimeout {
-                    self.statusText = "신호등을 찾는 중..."
+                let elapsed = Date().timeIntervalSince(self.lastDetectionTime)
+                if elapsed >= self.noDetStage3 && self.noDetectionStage < 3 {
+                    self.noDetectionStage = 3
+                    self.statusText = "신호등 감지 안 됨"
                     self.signalColor = .gray
                     self.confidence = 0
-                    self.lastSpokenSignal = ""
                     self.detections = []
+                    self.speak("신호등이 감지되지 않습니다. 주변의 소리에 주의하세요.", signal: "none3")
+                    // 이후 침묵 — 재탐지 전까지 추가 발화 없음
+                } else if elapsed >= self.noDetStage2 && self.noDetectionStage < 2 {
+                    self.noDetectionStage = 2
+                    self.speak("각도를 바꿔서 다시 왼쪽에서 오른쪽으로 카메라를 이동해 주세요.", signal: "none2")
+                } else if elapsed >= self.noDetStage1 && self.noDetectionStage < 1 {
+                    self.noDetectionStage = 1
+                    self.statusText = "신호등이 보이지 않습니다"
+                    self.signalColor = .gray
+                    self.confidence = 0
+                    self.detections = []
+                    self.speak("신호등이 보이지 않습니다. 왼쪽에서 오른쪽으로 천천히 카메라를 이동해 주세요.", signal: "none1")
                 }
             }
         }
