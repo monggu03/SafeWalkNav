@@ -164,6 +164,21 @@ class RouteAnnotator(
         val primary = annotate(waypoints)
         if (waypoints.size < 2 || routePoints.size < 3) return primary
 
+        // [HybridMerge §5-2] primary 단계에서 생성된 TURN/SHARP_TURN/SLIGHT_TURN 후보 목록 출력.
+        // → 특정 waypoint(예: wp2) 의 회전이 primary 단계까지는 살아있었는지 확인용.
+        for (ann in primary.annotations) {
+            if (ann.type == PathSegmentType.TURN ||
+                ann.type == PathSegmentType.SHARP_TURN ||
+                ann.type == PathSegmentType.SLIGHT_TURN
+            ) {
+                println(
+                    "[HybridMerge] PRIMARY wp${ann.endWaypointIndex} " +
+                        "delta=${ann.totalAngle}° dir=${ann.direction.name} " +
+                        "type=${ann.type.name} included=true"
+                )
+            }
+        }
+
         // 2. 각 waypoint pair([i→i+1]) 단위로 routePoints 내부 곡선을 보조 검출.
         val cumulativeDistances = computeCumulativeDistances(waypoints)
         val pairSupplementary = mutableListOf<PathAnnotation>()
@@ -246,12 +261,61 @@ class RouteAnnotator(
                 existingHi.any { hi -> containsRange(hi, pair) }
         }
 
+        // [HybridMerge §5-3] 가장 중요한 진단 — 각 primary TURN 후보가 supplementary CURVE 와
+        // 어떻게 상호작용했는지 로그로 노출. overlap(H1) 과 signOpposite(H2) 가 동시에 true 인데도
+        // MERGE_INTO_CURVE 로 결정되면 흡수 원인이 확정된다.
+        val primaryTurns = primary.annotations.filter {
+            it.type == PathSegmentType.TURN ||
+                it.type == PathSegmentType.SHARP_TURN ||
+                it.type == PathSegmentType.SLIGHT_TURN
+        }
+        for (turn in primaryTurns) {
+            val turnIdx = turn.endWaypointIndex
+            for (curve in pairSupplementary) {
+                val overlap = turnIdx in curve.startWaypointIndex..curve.endWaypointIndex
+                val signOpposite = turn.direction != TurnDirection.NONE &&
+                    curve.direction != TurnDirection.NONE &&
+                    turn.direction != curve.direction
+                val curveContainedInTurn = containsRange(turn, curve)
+                val curveContainedInAnyHi = existingHi.any { containsRange(it, curve) }
+                val curvePromotedHere = curve in promotedPairs && curveContainedInTurn
+                val turnSuperseded = turn in supersededTurns
+                val curveKeptElsewhere = curve in keptOtherPairs
+                val action = when {
+                    !overlap -> "KEEP_BOTH"
+                    curvePromotedHere && turnSuperseded -> "MERGE_INTO_CURVE"
+                    curveContainedInTurn && !curvePromotedHere -> "DROP_CURVE"
+                    curveContainedInAnyHi && !curvePromotedHere -> "DROP_CURVE"
+                    curveKeptElsewhere -> "KEEP_BOTH"
+                    else -> "KEEP_BOTH"
+                }
+                println(
+                    "[HybridMerge] DECIDE " +
+                        "primary(wp$turnIdx ${turn.direction.name} ${turn.totalAngle}°) " +
+                        "vs curve(wpRange=[${curve.startWaypointIndex}..${curve.endWaypointIndex}] " +
+                        "${curve.direction.name} ${curve.totalAngle}°) " +
+                        "overlap=$overlap signOpposite=$signOpposite action=$action"
+                )
+            }
+        }
+
         val merged = (
             (primary.annotations - supersededTurns) +
                 existingSupplementary +
                 promotedPairs +
                 keptOtherPairs
             ).sortedBy { it.startWaypointIndex }
+
+        // [HybridMerge §5-4] 최종 annotation 목록 요약 — wp2 TURN 생존 여부를 단일 플래그로.
+        val wp2TurnPresent = merged.any {
+            it.endWaypointIndex == 2 && (
+                it.type == PathSegmentType.TURN ||
+                    it.type == PathSegmentType.SHARP_TURN ||
+                    it.type == PathSegmentType.SLIGHT_TURN
+                )
+        }
+        println("[HybridMerge] FINAL count=${merged.size} | wp2_turn_present=$wp2TurnPresent")
+
         return AnnotatedRoute(waypoints, merged)
     }
 
@@ -361,6 +425,15 @@ class RouteAnnotator(
             announceMessage = "",
             startRoutePointIndex = curveStartRpIdx,
             endRoutePointIndex = curveEndRpIdx,
+        )
+        // [HybridMerge §5-1] supplementary CURVE 후보 산출 직후.
+        // → 어떤 wpRange 의 CURVE 가 어떤 부호/누적값으로 생성됐는지 노출.
+        println(
+            "[HybridMerge] CURVE candidate: " +
+                "wpRange=[${partial.startWaypointIndex}..${partial.endWaypointIndex}] " +
+                "rpRange=[${partial.startRoutePointIndex}..${partial.endRoutePointIndex}] " +
+                "dir=${partial.direction.name} " +
+                "cumulative=${partial.totalAngle}° peak=${partial.peakAngle}°"
         )
         return partial.copy(announceMessage = MessageBuilder.buildAnnotationAnnounce(partial))
     }

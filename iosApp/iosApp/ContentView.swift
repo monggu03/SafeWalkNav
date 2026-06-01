@@ -26,7 +26,7 @@ struct ContentView: View {
     @State private var previousTab: Int = 0
     
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             NavigationTab()
                 .environmentObject(deps)
                 .environmentObject(navVM)
