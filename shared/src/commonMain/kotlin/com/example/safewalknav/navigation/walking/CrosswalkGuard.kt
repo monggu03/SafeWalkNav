@@ -108,8 +108,8 @@ fun findCrosswalkZoneInfo(
     )
 }
 
-private const val APPROACHING_RADIUS_M = 50f
+private const val APPROACHING_RADIUS_M = 10f
 private const val PASSED_RADIUS_M = 30f
-private const val NEARBY_RADIUS_M = 50f
+private const val NEARBY_RADIUS_M = 10f
 private const val LOOK_AHEAD = 5
 private const val LOOK_BACK = 3
