@@ -1053,6 +1053,7 @@ class NavigationManager(
             announceSignalDirectionIfNeeded(crosswalkZoneInfo, currentLat, currentLon, userBearing)
         }
         if (isInCrossWalkZone) {
+            announceSignalDirectionIfNeeded(crosswalkZoneInfo, currentLat, currentLon, userBearing)
             announceSignalPresenceIfNeeded(crosswalkZoneInfo, currentLat, currentLon, userBearing)
         }
         wasInCrosswalkZone = isInCrossWalkZone
