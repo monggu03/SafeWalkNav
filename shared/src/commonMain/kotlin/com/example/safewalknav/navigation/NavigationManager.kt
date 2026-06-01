@@ -314,11 +314,33 @@ class NavigationManager(
 
     fun updateCompassHeading(azimuth: Float, currentTime: Long) {
         latestCompassHeading = azimuth
-        _compassHeading.value = azimuth
+        _compassHeading.value = azimuth   // CompassView 흰 화살표 계속 작동
 
-        // 도로 방향 미갱신 상태에선 lean 비교 건너뛴다 — 첫 GPS tick 들어와서
-        // hasRoadBearing=true 가 될 때까지는 walkingDiagnostic 으로 가지 않음.
-        // 단 latestCompassHeading / _compassHeading 자체는 갱신해 CompassView 흰 화살표는 그대로 작동.
+        // ──────────────────────────────────────────────────────────────────────
+        // 2026-05-31 설계 결정 — IMU heading 기반 lean 안내 시스템 비활성화.
+        //
+        // 문제: IMU heading vs 도로 방향 비교 방식은 다음 본질적 한계로 폭주 발화 유발:
+        //   1. IMU azimuth 는 "휴대폰 향한 방향" 이지 "이동 방향" 이 아님 — 휴대폰 자세 변화/
+        //      자력계 노이즈(건물 근처)에 매우 민감.
+        //   2. 비교 기준인 도로 방향(폴리라인) 도 GPS 정확도 한계로 흔들림.
+        //   3. 시각장애인 흰지팡이 좌우 탐지 보행은 본질적으로 큰 좌우 흔들림 동반 — 이게
+        //      *정상* 보행 방식인데 lean 으로 잘못 판정.
+        //
+        // 대안: 굽은 길 보정은 handleVirtualWaypointPassed (가상 waypoint cross-track 기반)
+        //   이 담당. 사용자 *위치* 가 가상점 라인에서 5m+ 벗어나면 "이탈하셨습니다" 발화.
+        //   - 위치 기반 → IMU 노이즈 회피
+        //   - 5m 간격 가상점 (RouteAnnotator.expandWithVirtualWaypoints) → 곡선 추적 정밀
+        //   - 시각장애인 흰지팡이 흔들림 무시 (위치만 보므로)
+        //
+        // CompassView 의 흰 화살표(사용자 방향)는 _compassHeading 으로 그대로 갱신되므로
+        // 시각 표시는 영향 없음. 음성 발화만 차단.
+        //
+        // 향후 IMU heading 신뢰도가 높은 환경(실내/터널)에서 부분 재활성화 검토 가능 —
+        // 그래서 아래 walkingDiagnostic 로직은 제거하지 않고 dead branch 로 보존.
+        // ──────────────────────────────────────────────────────────────────────
+        return
+
+        @Suppress("UNREACHABLE_CODE")
         if (_isNavigating.value && hasRoadBearing) {
             // 정지/거의 정지 상태에선 IMU heading 비교 자체가 의미 없음.
             // 사용자가 멈춰 있으면 휴대폰을 두리번거리거나 자세 바꾸는 게 흔하고, 그게 진행 방향과 무관.
@@ -362,8 +384,10 @@ class NavigationManager(
                     }
                 }
 
-                // 누적 카운트가 임계값(3)에 도달하면 안내 메시지 발화
-                if (kotlin.math.abs(leanAccumulator) >= 3) {
+                // 누적 카운트가 임계값(5)에 도달하면 안내 메시지 발화.
+                // 2026-05-31 외출 피드백 — 3 회 누적은 너무 빨라 잘못된 발화 폭주.
+                // 5 회 (≈ 0.3 초 지속 LEAN) 로 완화해 일시적 흔들림 무시.
+                if (kotlin.math.abs(leanAccumulator) >= 5) {
                     val message = if (leanAccumulator <= -3) {
                         "왼쪽으로 치우쳤습니다. 오른쪽으로 오세요."
                     } else {
@@ -1053,6 +1077,7 @@ class NavigationManager(
             announceSignalDirectionIfNeeded(crosswalkZoneInfo, currentLat, currentLon, userBearing)
         }
         if (isInCrossWalkZone) {
+            announceSignalDirectionIfNeeded(crosswalkZoneInfo, currentLat, currentLon, userBearing)
             announceSignalPresenceIfNeeded(crosswalkZoneInfo, currentLat, currentLon, userBearing)
         }
         wasInCrosswalkZone = isInCrossWalkZone
