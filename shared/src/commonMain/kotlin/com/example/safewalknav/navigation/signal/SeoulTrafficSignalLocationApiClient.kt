@@ -17,7 +17,9 @@ class SeoulTrafficSignalLocationApiClient(
     }
 
     suspend fun fetchTrafficSignalXmlPages(
-        pageSize: Int = 1000
+        // 2026-06-02 OOM 대응 — 1000 → 500. 한 페이지 XML 크기 절반으로 줄여 메모리 압박 완화.
+        // 페이지 수는 약 2배로 늘지만 네트워크 요청 시간은 큰 차이 없음 (HTTP keep-alive).
+        pageSize: Int = 500
     ): List<String> {
         val result = mutableListOf<String>()
 
