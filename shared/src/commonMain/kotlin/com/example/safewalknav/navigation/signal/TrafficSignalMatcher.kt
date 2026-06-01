@@ -11,7 +11,7 @@ object TrafficSignalMatcher {
         currentLat: Double,
         currentLon: Double,
         signals: List<TrafficSignalLocation>,
-        radiusMeters: Float = 30f
+        radiusMeters: Float = 10f
     ): TrafficSignalLocation? {
         return signals
             .map { signal ->
@@ -34,8 +34,8 @@ object TrafficSignalMatcher {
         crosswalkLon: Double,
         routeBearing: Float,
         signals: List<TrafficSignalLocation>,
-        crosswalkRadiusMeters: Float = 50f,
-        currentRadiusMeters: Float = 80f,
+        crosswalkRadiusMeters: Float = 10f,
+        currentRadiusMeters: Float = 10f,
         maxBearingDiffDegrees: Float = 90f,
     ): TrafficSignalLocation? {
         return signals
