@@ -58,7 +58,7 @@ object TrafficIntersectionParser {
         intersections: List<TrafficIntersection>,
         lat: Double,
         lon: Double,
-        radiusMeters: Float = 100f
+        radiusMeters: Float = 10f
     ): TrafficIntersection? {
         return intersections
             .map { intersection ->

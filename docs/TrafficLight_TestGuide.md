@@ -131,7 +131,7 @@ Log.d("TL_PERF", "inference=${ms}ms detections=${detections.size}")
 
 **추론 결과가 항상 빈 리스트**
 - 원인 1: input shape 불일치 (모델 input != 640x640)
-- 원인 2: confidence threshold 너무 높음 (`0.7f` 기본)
+- 원인 2: confidence threshold 너무 높음 (`0.5f` 기본)
 - 대응: 디버그 모드로 threshold 0.3 로 낮춰서 출력 보기 → 정상이면 임계값만 조정
 
 **발화가 너무 느림 (5초 이상 지연)**

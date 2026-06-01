@@ -10,11 +10,11 @@ class TrafficSignalMatcherTest {
 
     @Test
     fun prioritizesSignalNearCrosswalkOverSignalNearUser() {
-        val signalNearUser = signal("near-user", 20.0)
+        val signalNearUser = signal("near-user", 35.0)
         val signalNearCrosswalk = signal("near-crosswalk", 39.0)
 
         val selected = TrafficSignalMatcher.findBestSignalForCrosswalk(
-            currentLat = baseLat,
+            currentLat = latOffset(35.0),
             currentLon = baseLon,
             crosswalkLat = latOffset(40.0),
             crosswalkLon = baseLon,
@@ -27,11 +27,11 @@ class TrafficSignalMatcherTest {
 
     @Test
     fun excludesSignalThatPointsAwayFromRouteBearing() {
-        val behindUser = signal("behind-user", -5.0)
+        val behindUser = signal("behind-user", 30.0)
         val aheadAtCrosswalk = signal("ahead-crosswalk", 42.0)
 
         val selected = TrafficSignalMatcher.findBestSignalForCrosswalk(
-            currentLat = baseLat,
+            currentLat = latOffset(35.0),
             currentLon = baseLon,
             crosswalkLat = latOffset(40.0),
             crosswalkLon = baseLon,
@@ -47,12 +47,12 @@ class TrafficSignalMatcherTest {
         val sideSignal = TrafficSignalLocation(
             itstId = "side-signal",
             lat = latOffset(40.0),
-            lon = lonOffset(20.0),
+            lon = lonOffset(8.0),
         )
 
         val selected = TrafficSignalMatcher.findBestSignalForCrosswalk(
-            currentLat = baseLat,
-            currentLon = baseLon,
+            currentLat = latOffset(38.0),
+            currentLon = lonOffset(7.0),
             crosswalkLat = latOffset(40.0),
             crosswalkLon = baseLon,
             routeBearing = 180f,
