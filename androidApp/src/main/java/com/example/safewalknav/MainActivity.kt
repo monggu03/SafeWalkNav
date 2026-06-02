@@ -384,6 +384,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private val HEARTBEAT_INTERVAL_MS = 10_000L
     private val DETECTION_TIMEOUT_MS = 10_000L
 
+    // iOS TrafficLightDetector 와 동일한 미탐지 단계 안내.
+    // AI가 켜진 상태에서 신호등을 계속 못 잡으면 3/6/9초에 한 번씩 카메라 조작 안내를 낸다.
+    private var noDetectionStage: Int = 0
+    private var noDetectionStartedAt: Long = 0L
+    private val NO_DET_STAGE1_MS = 3_000L
+    private val NO_DET_STAGE2_MS = 6_000L
+    private val NO_DET_STAGE3_MS = 9_000L
+
     // Flicker(점멸) 감지 — 한국 보행 신호 종료 직전 약 5~15초간 깜빡이는 phase 대응.
     // 깜빡임 중에 "방금 초록불로 바뀌었습니다, 건너세요" 발화는 안전상 매우 위험 — 사용자가 건너기
     // 시작하면 곧 빨강으로 바뀌어 위험. 그래서 transition 직후 또 transition 이 빠르게 일어나면
@@ -1695,6 +1703,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     lastValidatedAt = 0L
                     lastTransitionAt = 0L
                     flickerLockoutUntil = 0L
+                    resetTrafficLightNoDetectionEscalation()
                     metricZoneEnterCount++   // 정량 지표 — zone 진입 카운트
                     Log.d("SafeWalkNav", "Crosswalk zone ENTER | TrafficLight AI waits for signal<=10m")
                     appendNavLog("Crosswalk zone ENTER | TrafficLight AI waits for signal<=10m")
@@ -2009,7 +2018,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         if (detections.isEmpty()) {
             // 모델이 신호등을 못 봄 (또는 threshold 미달).
-            // zone 안이라도 안내 안 함. 진단 라인은 이미 기록됨.
+            // iOS TrafficLightDetector 와 동일하게 AI 활성 상태에서는 단계형 카메라 조작 안내를 낸다.
+            handleTrafficLightNoDetection(
+                aiResultLine = aiResultLine,
+                reason = "NO_DET",
+                allowSpeech = trafficLightAiActive || TEST_MODE_FORCE_ML_ON,
+            )
             if (BuildConfig.DEBUG) {
                 updateCompactDebugGuidance()
                 updateAiDebugResult("$aiResultLine | action=NO_DET")
@@ -2047,8 +2061,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                             "box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}%"
                 )
             }
+            handleTrafficLightNoDetection(
+                aiResultLine = aiResultLine,
+                reason = "ALL_TOO_SMALL",
+                allowSpeech = trafficLightAiActive || TEST_MODE_FORCE_ML_ON,
+            )
             return
         }
+
+        resetTrafficLightNoDetectionEscalation()
 
         val nearest = selectTrafficLightForSpeech(validated) ?: return
         val detectedColor = nearest.classId
@@ -2253,6 +2274,56 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         "conf=${(nearest.confidence * 100).toInt()}% " +
                         "box=${(nearest.bbox.width * 100).toInt()}x${(nearest.bbox.height * 100).toInt()}%"
             )
+        }
+    }
+
+    private fun resetTrafficLightNoDetectionEscalation() {
+        noDetectionStage = 0
+        noDetectionStartedAt = 0L
+    }
+
+    private fun handleTrafficLightNoDetection(
+        aiResultLine: String,
+        reason: String,
+        allowSpeech: Boolean,
+    ) {
+        if (!allowSpeech) {
+            resetTrafficLightNoDetectionEscalation()
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        if (noDetectionStartedAt == 0L) {
+            noDetectionStartedAt = now
+        }
+
+        val elapsed = now - noDetectionStartedAt
+        val stageMessage = when {
+            elapsed >= NO_DET_STAGE3_MS && noDetectionStage < 3 -> {
+                noDetectionStage = 3
+                "신호등이 감지되지 않습니다. 주변의 소리에 주의하세요."
+            }
+            elapsed >= NO_DET_STAGE2_MS && noDetectionStage < 2 -> {
+                noDetectionStage = 2
+                "각도를 바꿔서 다시 왼쪽에서 오른쪽으로 카메라를 이동해 주세요."
+            }
+            elapsed >= NO_DET_STAGE1_MS && noDetectionStage < 1 -> {
+                noDetectionStage = 1
+                "신호등이 보이지 않습니다. 왼쪽에서 오른쪽으로 천천히 카메라를 이동해 주세요."
+            }
+            else -> null
+        }
+
+        if (stageMessage != null) {
+            speakTrafficLightTTS(stageMessage)
+            appendNavLog(
+                "TL_DIAG  └─ NO_DET_STAGE stage=$noDetectionStage reason=$reason elapsed=${elapsed / 1000}s"
+            )
+            if (BuildConfig.DEBUG) {
+                updateAiDebugResult(
+                    "$aiResultLine | action=NO_DET_STAGE stage=$noDetectionStage reason=$reason"
+                )
+            }
         }
     }
 
