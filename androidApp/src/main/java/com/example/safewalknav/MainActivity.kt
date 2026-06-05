@@ -381,6 +381,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var lastValidatedAt: Long = 0L        // 마지막 validated 검출 시각 (timeout 판정용)
     private val RED_STABILITY_FRAMES = 2
     private val GREEN_STABILITY_FRAMES = 3
+    private val GREEN_TRANSITION_STABILITY_FRAMES = 2
     private val HEARTBEAT_INTERVAL_MS = 10_000L
     private val DETECTION_TIMEOUT_MS = 10_000L
 
@@ -391,6 +392,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private val NO_DET_STAGE1_MS = 3_000L
     private val NO_DET_STAGE2_MS = 6_000L
     private val NO_DET_STAGE3_MS = 9_000L
+    private val NO_DET_SUPPRESS_PEAK_CONFIDENCE = 0.25f
+    private val GREEN_TRANSITION_MIN_CONFIDENCE = 0.55f
+    private val GREEN_OVER_RED_CONFIDENCE_MARGIN = 0.05f
+    private val NO_DET_SPEECH_HOLD_AFTER_CAMERA_ENTRY_MS = 5_000L
+    private var noDetectionSpeechHoldUntil: Long = 0L
+    private val CROSSWALK_ENTRY_SPEECH_HOLD_MS = 4_500L
+    private var crosswalkEntrySpeechHoldUntil: Long = 0L
+    private var deferredSignalDirectionJob: Job? = null
 
     // Flicker(점멸) 감지 — 한국 보행 신호 종료 직전 약 5~15초간 깜빡이는 phase 대응.
     // 깜빡임 중에 "방금 초록불로 바뀌었습니다, 건너세요" 발화는 안전상 매우 위험 — 사용자가 건너기
@@ -1668,6 +1677,35 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 val message = event.message
                 if (message.isEmpty()) return@collectLatest
 
+                val now = System.currentTimeMillis()
+                val isSignalDirection = message.contains("신호등") && message.contains("방향")
+                val isSignalPresenceOnly = message == "신호등이 있습니다."
+                val isCrosswalkEvent = message.contains("횡단보도")
+
+                if (isSignalPresenceOnly) {
+                    appendNavLog("NavEvent suppressed: signal presence only")
+                    return@collectLatest
+                }
+
+                if (now < crosswalkEntrySpeechHoldUntil && (isCrosswalkEvent || message.contains("신호등"))) {
+                    if (isSignalDirection) {
+                        val delayMs = crosswalkEntrySpeechHoldUntil - now
+                        deferredSignalDirectionJob?.cancel()
+                        deferredSignalDirectionJob = lifecycleScope.launch {
+                            delay(delayMs)
+                            speakTTS(message)
+                            appendNavLog("NavEvent deferred after posture: $message")
+                            if (::tvCompassGuidance.isInitialized) {
+                                tvCompassGuidance.text = message
+                            }
+                            if (BuildConfig.DEBUG) updateCompactDebugGuidance()
+                        }
+                    } else {
+                        appendNavLog("NavEvent suppressed during posture guidance: $message")
+                    }
+                    return@collectLatest
+                }
+
                 if (event.interrupt) {
                     tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, message.hashCode().toString())
                 } else {
@@ -1704,6 +1742,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     lastTransitionAt = 0L
                     flickerLockoutUntil = 0L
                     resetTrafficLightNoDetectionEscalation()
+                    noDetectionSpeechHoldUntil =
+                        System.currentTimeMillis() + NO_DET_SPEECH_HOLD_AFTER_CAMERA_ENTRY_MS
+                    crosswalkEntrySpeechHoldUntil =
+                        System.currentTimeMillis() + CROSSWALK_ENTRY_SPEECH_HOLD_MS
                     metricZoneEnterCount++   // 정량 지표 — zone 진입 카운트
                     Log.d("SafeWalkNav", "Crosswalk zone ENTER | TrafficLight AI waits for signal<=10m")
                     appendNavLog("Crosswalk zone ENTER | TrafficLight AI waits for signal<=10m")
@@ -1722,6 +1764,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     Log.d("SafeWalkNav", "Crosswalk zone EXIT | TrafficLight AI=OFF")
                     appendNavLog("Crosswalk zone EXIT | TrafficLight AI=OFF")
                     updateAiDebugResult("AI OFF")
+                    deferredSignalDirectionJob?.cancel()
+                    deferredSignalDirectionJob = null
+                    crosswalkEntrySpeechHoldUntil = 0L
                     // 화면 모드 전환 — 카메라 → 나침반 (NAVIGATING 중일 때만)
                     if (appState == AppState.NAVIGATING) {
                         speakTTS("횡단보도를 지나갔습니다. 휴대폰을 평평하게 들고 계속 진행하세요.")
@@ -2019,6 +2064,18 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (detections.isEmpty()) {
             // 모델이 신호등을 못 봄 (또는 threshold 미달).
             // iOS TrafficLightDetector 와 동일하게 AI 활성 상태에서는 단계형 카메라 조작 안내를 낸다.
+            if (stats != null && stats.peakConfidence >= NO_DET_SUPPRESS_PEAK_CONFIDENCE) {
+                resetTrafficLightNoDetectionEscalation()
+                appendNavLog(
+                    "TL_DIAG  └─ WEAK_CANDIDATE_SUPPRESS_NO_DET peak=${"%.2f".format(stats.peakConfidence)} " +
+                            "(R=${"%.2f".format(stats.peakConfRed)} G=${"%.2f".format(stats.peakConfGreen)})"
+                )
+                if (BuildConfig.DEBUG) {
+                    updateCompactDebugGuidance()
+                    updateAiDebugResult("$aiResultLine | action=WEAK_CANDIDATE")
+                }
+                return
+            }
             handleTrafficLightNoDetection(
                 aiResultLine = aiResultLine,
                 reason = "NO_DET",
@@ -2040,7 +2097,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // 1차 필터: 너무 작은 박스 제외.
         // 빨간불은 놓치는 비용이 크므로 초록불보다 작은 박스도 통과시킨다.
         val minRedBoxDimension = 0.03f
-        val minGreenBoxDimension = 0.06f
+        val minGreenBoxDimension = if (lastConfirmedColor == 0) 0.03f else 0.06f
         val validated = detections.filter { d ->
             val minBoxDimension = if (d.classId == 0) minRedBoxDimension else minGreenBoxDimension
             d.bbox.width >= minBoxDimension && d.bbox.height >= minBoxDimension
@@ -2061,17 +2118,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                             "box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}%"
                 )
             }
-            handleTrafficLightNoDetection(
-                aiResultLine = aiResultLine,
-                reason = "ALL_TOO_SMALL",
-                allowSpeech = trafficLightAiActive || TEST_MODE_FORCE_ML_ON,
-            )
+            resetTrafficLightNoDetectionEscalation()
             return
         }
 
         resetTrafficLightNoDetectionEscalation()
 
-        val nearest = selectTrafficLightForSpeech(validated) ?: return
+        val nearest = selectTrafficLightForSpeech(validated, lastConfirmedColor) ?: return
         val detectedColor = nearest.classId
 
         val now = System.currentTimeMillis()
@@ -2122,7 +2175,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             colorStreak = 1
         }
 
-        val requiredStabilityFrames = if (detectedColor == 0) RED_STABILITY_FRAMES else GREEN_STABILITY_FRAMES
+        val requiredStabilityFrames = when {
+            detectedColor == 0 -> RED_STABILITY_FRAMES
+            lastConfirmedColor == 0 -> GREEN_TRANSITION_STABILITY_FRAMES
+            else -> GREEN_STABILITY_FRAMES
+        }
         if (colorStreak < requiredStabilityFrames) {
             appendNavLog(
                 "TL_DIAG  └─ STABILITY_PENDING candidate=${nearest.label} streak=$colorStreak/$requiredStabilityFrames " +
@@ -2148,7 +2205,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val heartbeatDue = now - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS
             if (heartbeatDue) {
                 val repeatMessage = repeatTrafficLightMessage(confirmedColor)
-                speakTrafficLightTTS(repeatMessage)
+                speakTrafficLightTTS(repeatMessage, interrupt = confirmedColor == 0)
                 lastHeartbeatAt = now
                 appendNavLog(
                     "TL_DIAG  └─ REPEAT_TTS color=${classLabel(confirmedColor)} interval=${HEARTBEAT_INTERVAL_MS}ms"
@@ -2175,10 +2232,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // ── (c-2a) Flicker 감지 — 직전 transition 후 MIN_PHASE_DURATION_MS 미만이면 점멸로 간주 ──
         // previousColor != -1 조건은 첫 confirm 제외 (첫 confirm 은 항상 정상 안내).
         // 점멸 phase 에서 "건너세요" 발화 막는 핵심 안전 로직.
-        if (previousColor != -1 && lastTransitionAt > 0L && now - lastTransitionAt < MIN_PHASE_DURATION_MS) {
+        val isRedToGreenTransition = previousColor == 0 && confirmedColor == 1
+        if (!isRedToGreenTransition &&
+            previousColor != -1 &&
+            lastTransitionAt > 0L &&
+            now - lastTransitionAt < MIN_PHASE_DURATION_MS
+        ) {
             val gapMs = now - lastTransitionAt
             val flickerMsg = "신호가 깜빡입니다. 멈춰서 다음 신호를 기다리세요."
-            speakTrafficLightTTS(flickerMsg)
+            speakTrafficLightTTS(flickerMsg, interrupt = true)
             vibrateWarning()                    // 강한 staccato 진동
             flickerLockoutUntil = now + FLICKER_LOCKOUT_MS
             metricFlickerCount++                // 정량 지표
@@ -2247,7 +2309,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             else -> return
         }
 
-        speakTrafficLightTTS(message)
+        val shouldInterrupt = when (action) {
+            "ANNOUNCED_RED",
+            "ANNOUNCED_TRANSITION_G_TO_R",
+            "ANNOUNCED_TRANSITION_R_TO_G" -> true
+            else -> false
+        }
+        speakTrafficLightTTS(message, interrupt = shouldInterrupt)
         if (withVibrate) vibrateShort()
 
         // Firebase Analytics — ML 신호등 안내 이벤트 (color + transition_type + confidence)
@@ -2293,6 +2361,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         val now = System.currentTimeMillis()
+        if (now < noDetectionSpeechHoldUntil) {
+            resetTrafficLightNoDetectionEscalation()
+            appendNavLog(
+                "TL_DIAG  └─ NO_DET_HOLD_AFTER_CAMERA_ENTRY remaining=${(noDetectionSpeechHoldUntil - now) / 1000}s reason=$reason"
+            )
+            if (BuildConfig.DEBUG) {
+                updateAiDebugResult("$aiResultLine | action=NO_DET_HOLD reason=$reason")
+            }
+            return
+        }
+
         if (noDetectionStartedAt == 0L) {
             noDetectionStartedAt = now
         }
@@ -2315,7 +2394,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
 
         if (stageMessage != null) {
-            speakTrafficLightTTS(stageMessage)
+            speakTrafficLightTTS(stageMessage, interrupt = false)
             appendNavLog(
                 "TL_DIAG  └─ NO_DET_STAGE stage=$noDetectionStage reason=$reason elapsed=${elapsed / 1000}s"
             )
@@ -2330,10 +2409,23 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     /** TTS 판정용 대표 검출 선택. 안전상 빨간불 후보를 초록불보다 우선한다. */
     private fun selectTrafficLightForSpeech(
         detections: List<TrafficLightDetection>,
+        previousColor: Int,
     ): TrafficLightDetection? {
         val red = detections
             .filter { it.classId == 0 }
             .maxWithOrNull(compareBy<TrafficLightDetection> { it.confidence }.thenBy { it.bbox.area })
+        val green = detections
+            .filter { it.classId == 1 }
+            .maxWithOrNull(compareBy<TrafficLightDetection> { it.confidence }.thenBy { it.bbox.area })
+
+        if (previousColor == 0 && green != null) {
+            if (red == null) return green
+
+            val greenIsStrongEnough = green.confidence >= GREEN_TRANSITION_MIN_CONFIDENCE
+            val greenBeatsRed = green.confidence >= red.confidence + GREEN_OVER_RED_CONFIDENCE_MARGIN
+            if (greenIsStrongEnough && greenBeatsRed) return green
+        }
+
         if (red != null) return red
 
         return detections.maxWithOrNull(
@@ -2374,6 +2466,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         lastValidatedAt = 0L
         lastTransitionAt = 0L
         flickerLockoutUntil = 0L
+        noDetectionSpeechHoldUntil = 0L
 
         // 횡단보도 zone 은 NavigationManager.isInCrosswalkZone state flow 가 자동 관리 —
         // 여기서 명시적 reset 불필요. NAVIGATING 종료 시 navigationManager.stopNavigation() 호출되며
@@ -2487,8 +2580,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tts.speak(message, TextToSpeech.QUEUE_ADD, null, message.hashCode().toString())
     }
 
-    private fun speakTrafficLightTTS(message: String) {
-        tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "traffic_light")
+    private fun speakTrafficLightTTS(message: String, interrupt: Boolean = true) {
+        val queueMode = if (interrupt) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+        val utteranceId = if (interrupt) "traffic_light_urgent" else "traffic_light"
+        tts.speak(message, queueMode, null, utteranceId)
     }
 
     /**

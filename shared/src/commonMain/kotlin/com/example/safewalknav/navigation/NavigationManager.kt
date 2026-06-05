@@ -276,6 +276,11 @@ class NavigationManager(
     private var lastCrosswalkAnnouncedWpIdx = -1
     private var lastSignalPresenceAnnouncedWpIdx = -1
     private var lastSignalDirectionAnnouncedWpIdx = -1
+    private val SIGNAL_CAMERA_MATCH_RADIUS_M = 10f
+    private val SIGNAL_DIRECTION_MATCH_RADIUS_M = 35f
+    private val ARRIVAL_DISTANCE_M = 5f
+    private val NEAR_DISTANCE_M = 10f
+    private val APPROACHING_DISTANCE_M = 20f
 
     //클래스 변수 추가
     private var lastSignalApiCallTime = 0L
@@ -820,7 +825,14 @@ class NavigationManager(
             ?: return
         if (crosswalkIdx == lastSignalDirectionAnnouncedWpIdx) return
 
-        val signal = findSignalForCrosswalkIndex(route, crosswalkIdx, currentLat, currentLon, userBearing)
+        val signal = findSignalForCrosswalkIndex(
+            route,
+            crosswalkIdx,
+            currentLat,
+            currentLon,
+            userBearing,
+            matchRadiusMeters = SIGNAL_DIRECTION_MATCH_RADIUS_M,
+        )
             ?: return
 
         lastSignalDirectionAnnouncedWpIdx = crosswalkIdx
@@ -859,6 +871,7 @@ class NavigationManager(
         currentLat: Double,
         currentLon: Double,
         userBearing: Float,
+        matchRadiusMeters: Float = SIGNAL_CAMERA_MATCH_RADIUS_M,
     ): TrafficSignalLocation? {
         val crosswalkWp = route.waypoints.getOrNull(crosswalkIdx) ?: return null
         val routeBearing = computeRouteBearingAhead(15f) ?: userBearing
@@ -869,6 +882,8 @@ class NavigationManager(
             crosswalkLon = crosswalkWp.lon,
             routeBearing = routeBearing,
             signals = trafficSignals,
+            crosswalkRadiusMeters = matchRadiusMeters,
+            currentRadiusMeters = matchRadiusMeters,
         )
     }
 
@@ -1237,17 +1252,17 @@ class NavigationManager(
         val previousState = _arrivalState.value
 
         val newState = when {
-            distToDestination <= 2f -> ArrivalState.ARRIVED
-            distToDestination <= 5f -> ArrivalState.NEAR
-            distToDestination <= 15f -> {
-                if (previousState == ArrivalState.NEAR && distToDestination <= 7f) {
+            distToDestination <= ARRIVAL_DISTANCE_M -> ArrivalState.ARRIVED
+            distToDestination <= NEAR_DISTANCE_M -> ArrivalState.NEAR
+            distToDestination <= APPROACHING_DISTANCE_M -> {
+                if (previousState == ArrivalState.NEAR && distToDestination <= NEAR_DISTANCE_M + 2f) {
                     ArrivalState.NEAR
                 } else {
                     ArrivalState.APPROACHING
                 }
             }
             else -> {
-                if (previousState == ArrivalState.APPROACHING && distToDestination <= 18f) {
+                if (previousState == ArrivalState.APPROACHING && distToDestination <= APPROACHING_DISTANCE_M + 3f) {
                     ArrivalState.APPROACHING
                 } else {
                     ArrivalState.FAR
