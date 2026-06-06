@@ -23,8 +23,9 @@ import android.view.View
  *   더 정확한 매핑이 필요하면 PreviewView 의 outputTransform 행렬을 인자로 받도록 확장.
  *
  * 색상 / 라벨:
- *   class 0 (red_pedestrian)  → RED   박스 + "RED 87%" 라벨
- *   class 1 (green_pedestrian) → GREEN 박스 + "GREEN 91%" 라벨
+ *   class 0 (red_pedestrian)  → 빨간 박스 + "빨간불" 라벨
+ *   class 1 (green_pedestrian) → 초록 박스 + "초록불" 라벨
+ *   (신뢰도 % 는 표시하지 않음 — 시연 시 시각적 노이즈 회피)
  *
  * 사용:
  *   val overlay = BoundingBoxOverlay(context).apply {
@@ -45,6 +46,8 @@ class BoundingBoxOverlay @JvmOverloads constructor(
 
     private val density: Float = resources.displayMetrics.density
 
+    // 2026-06-06 시각 강화 미세 조정 — 선 두께 10 → 6dp, 라벨 폰트 22 → 18sp.
+    // 10dp/22sp 가 너무 두꺼워서 작은 신호등 박스를 거의 가렸음. 6dp/18sp 가 균형.
     private val redStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         color = Color.parseColor("#FF3333")
@@ -70,7 +73,7 @@ class BoundingBoxOverlay @JvmOverloads constructor(
     private val labelText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
         color = Color.WHITE
-        textSize = 16f * density
+        textSize = 18f * density
         typeface = Typeface.DEFAULT_BOLD
     }
 
