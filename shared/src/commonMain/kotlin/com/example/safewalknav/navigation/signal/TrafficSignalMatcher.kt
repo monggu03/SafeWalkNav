@@ -69,6 +69,10 @@ object TrafficSignalMatcher {
             }
             .minWithOrNull(
                 compareBy<SignalCandidate> { if (it.isRouteAligned) 0 else 1 }
+                    // 2026-06-05 외출 버그 #3 — 사용자 10m 이내 신호등은 *사용자 측* 신호등이므로
+                    // 카메라에 잡히지 않음. 후순위로 빼고 반대편 신호등을 우선 선택.
+                    // (5m → 10m 로 확대 — 인도 끝 + 가로등 인접 신호등도 명확히 회피)
+                    .thenBy { if (it.currentDistance < 10f) 1 else 0 }
                     .thenBy { it.crosswalkDistance }
                     .thenBy { it.bearingDiff }
                     .thenBy { it.currentDistance }

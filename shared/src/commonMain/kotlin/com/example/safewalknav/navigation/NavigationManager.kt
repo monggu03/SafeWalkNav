@@ -269,6 +269,14 @@ class NavigationManager(
     private var lastPreAnnouncedIndex = -1
     private var consecutiveRerouteCount = 0  // 연속 재탐색 횟수 (쿨다운 점진 증가)
     private var lastStraightGuidanceTime = 0L // 직진 안내 전용 타이머 (provideDirectionalGuidance 의 straight 분기)
+    // 2026-06-05 외출 버그 #4 — "40m, 35m, 30m 직진" 카운트다운 발화 폭주 해결.
+    // 이전 발화 거리와 5m 이상 차이날 때만 새로 발화 (불필요한 카운트다운 회피).
+    private var lastStraightGuidanceDistance: Float = -1f
+    // 2026-06-05 외출 버그 #1 — 좌우 보정 멘트 GPS Kalman heading 기반 복구.
+    // IMU 기반 leanStatus 와 달리 GPS Kalman 은 자력계 노이즈 영향 없어 안정적.
+    // 횡단보도 구간 한정 (일반 직진 도로는 RouteAnnotator 사전 안내가 대체).
+    private var lateralAccumulator = 0
+    private var lastLateralCorrectionTime = 0L
     private var lastRoadType = -1 // 이전 구간 도로 유형 (전환 안내용)
     // 횡단보도 진입 시점에 "X시 방향으로 횡단보도를 건너세요" 1회 안내용 상태.
     // 시각장애인이 어느 방향에 횡단보도가 있는지 모르므로 zone 진입 transition 에서 발화.
@@ -276,11 +284,22 @@ class NavigationManager(
     private var lastCrosswalkAnnouncedWpIdx = -1
     private var lastSignalPresenceAnnouncedWpIdx = -1
     private var lastSignalDirectionAnnouncedWpIdx = -1
-    private val SIGNAL_CAMERA_MATCH_RADIUS_M = 10f
-    private val SIGNAL_DIRECTION_MATCH_RADIUS_M = 35f
+    // 2026-06-05 외출 버그 #2 — 사용자 위치 10m 내 신호등만 매칭하면 *반대편 신호등 (20~30m)*
+    // 이 누락되어 hasNearbyTrafficSignal=false → 카메라 OFF.
+    // 30m → 50m 재확대 — 강남대로 같은 10차선+ 광폭 도로 (35~50m) 반대편 신호등 포함.
+    // 한국 도로 폭 reference: 2~4차선 14m / 6차선 21m / 8차선 28m / 10차선+ 35~50m.
+    private val SIGNAL_CAMERA_MATCH_RADIUS_M = 50f
+    private val SIGNAL_DIRECTION_MATCH_RADIUS_M = 50f
     private val ARRIVAL_DISTANCE_M = 5f
     private val NEAR_DISTANCE_M = 10f
     private val APPROACHING_DISTANCE_M = 20f
+    // 2026-06-05 외출 버그 #1 — 좌우 보정 임계값.
+    // 25°: route bearing 과 user heading 차이가 이 이상이면 좌우 누적 시작.
+    // 5: 연속 5 프레임 (약 2.5초) 같은 방향 누적 시 발화. 단발 GPS noise 회피.
+    // 8초 cooldown: 사용자가 보정 행동 + 평가 + 재발화 가능한 적절한 간격.
+    private val LATERAL_THRESHOLD_DEG = 25f
+    private val LATERAL_FRAMES = 5
+    private val LATERAL_COOLDOWN_MS = 8_000L
 
     //클래스 변수 추가
     private var lastSignalApiCallTime = 0L
@@ -911,6 +930,9 @@ class NavigationManager(
         lastRerouteTime = 0L
         lastPreAnnouncedIndex = -1
         lastStraightGuidanceTime = 0L
+        lastStraightGuidanceDistance = -1f
+        lateralAccumulator = 0
+        lastLateralCorrectionTime = 0L
         lastRoadType = -1
         wasInCrosswalkZone = false
         lastCrosswalkAnnouncedWpIdx = -1
@@ -2168,10 +2190,44 @@ class NavigationManager(
         // 굽은 길은 RouteAnnotator 의 사전 안내(announceUpcomingAnnotation) 가 대체한다.
         // 복구가 필요하면 git history 의 onCrosswalk 보정 블록을 참고할 것.
 
-        // 직진 안내 — 시각장애 보행자 안심감을 위해 5초 간격. 횡단보도에서는 직진 안내 자체는 생략.
+        // 2026-06-05 외출 버그 #1 — 좌우 보정 멘트 복구 (GPS Kalman heading 기반).
+        // 전구간 (직진 도로 + 횡단보도 모두) 동작 — 굽은 길에서 시각장애인이 직선으로
+        // 못 걷는 핵심 문제 대응. 코너 회전 직전(waypointGuard 25m 이내) 은 이미 위에서
+        // return 되므로, RouteAnnotator 사전 안내와 시간상 충돌하지 않는다.
+        // 폭주 방지: 임계 25° + 누적 5 frame + cooldown 15초.
+        val routeBearingForLateral = computeRouteBearingAhead(15f)
+        val userHeadingForLateral = kalmanHeading.current
+        if (routeBearingForLateral != null && userHeadingForLateral >= 0f) {
+            // angleDiff: 양수 = route 가 user 기준 오른쪽 (= 오른쪽으로 가야 함)
+            val diff = angleDiff(routeBearingForLateral, userHeadingForLateral)
+            when {
+                diff > LATERAL_THRESHOLD_DEG -> lateralAccumulator++
+                diff < -LATERAL_THRESHOLD_DEG -> lateralAccumulator--
+                else -> lateralAccumulator = 0
+            }
+            if (kotlin.math.abs(lateralAccumulator) >= LATERAL_FRAMES &&
+                now - lastLateralCorrectionTime >= LATERAL_COOLDOWN_MS
+            ) {
+                val direction = if (lateralAccumulator > 0) "오른쪽" else "왼쪽"
+                emitGuidance("약간 ${direction}으로 가세요")
+                lastLateralCorrectionTime = now
+                lateralAccumulator = 0
+            }
+        }
+
+        // 횡단보도 구간에서는 거리 안내 (직진 안내) 자체는 생략 — 좌우 보정만 살아있음.
         if (onCrosswalk) return
-        if (now - lastStraightGuidanceTime < 5_000L) return
+
+        // 2026-06-05 외출 버그 #4 — 5초마다 "40m → 35m → 30m" 카운트다운 발화 폭주 문제.
+        // throttle 12초로 늘리고, 이전 발화 거리에서 5m 이상 변화가 있을 때만 새로 발화.
+        if (now - lastStraightGuidanceTime < 12_000L) return
+        if (lastStraightGuidanceDistance >= 0f &&
+            kotlin.math.abs(distToNext - lastStraightGuidanceDistance) < 5f
+        ) {
+            return
+        }
         lastStraightGuidanceTime = now
+        lastStraightGuidanceDistance = distToNext
 
         // 현재 진행 중인 segment (currentWaypointIndex 직전에 진입한 segment).
         //   진행 방향이 segment 의 마지막을 향하므로 toWaypointIndex == currentWaypointIndex.
