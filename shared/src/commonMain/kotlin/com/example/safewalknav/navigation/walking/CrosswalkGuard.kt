@@ -108,8 +108,11 @@ fun findCrosswalkZoneInfo(
     )
 }
 
-private const val APPROACHING_RADIUS_M = 10f
+// 2026-06-05 외출 버그 #2 — 카메라가 너무 늦게 켜져서 신호등 인식 못함.
+// 10m 면 *횡단보도 직전* 에 zone 진입 → 카메라 켜자마자 신호등 사라짐.
+// 25m 로 확대해서 사용자가 *신호등 보고 있을 때* zone 진입 → 카메라 ON.
+private const val APPROACHING_RADIUS_M = 25f
 private const val PASSED_RADIUS_M = 30f
-private const val NEARBY_RADIUS_M = 10f
+private const val NEARBY_RADIUS_M = 15f
 private const val LOOK_AHEAD = 5
 private const val LOOK_BACK = 3
