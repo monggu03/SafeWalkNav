@@ -41,12 +41,13 @@ class TrafficLightDetector(context: Context) {
 
     /**
      * Confidence threshold — 이 값 이상의 점수만 유효 검출로 인정.
-     * 기본 0.5 이상 점수만 통과시킨다.
-     * 학습 시 mAP50 0.9476 기준으로 실기기 민감도를 높이기 위해 0.7에서 낮췄다.
+     * 학습 시 mAP50 0.9476 기준으로 실기기 민감도를 단계적으로 낮춰왔다 (0.7 → 0.5 → 0.4 → 0.2).
+     * 2026-06-05: 시연 영상 촬영용으로 0.2 까지 낮춤 — 시연 환경에서 신호등 검출이 확실히
+     * 보이도록 함. 운영 환경에서 false positive 우려되면 0.4 정도로 복귀 권장.
      *
      * 진단 모드 (diagnosticMode=true) 일 때는 [DIAGNOSTIC_CONFIDENCE_THRESHOLD] 가 대신 적용됨.
      */
-    var confidenceThreshold: Float = 0.4f
+    var confidenceThreshold: Float = 0.2f
 
     /** NMS IoU threshold — 같은 클래스 박스가 이 값 이상 겹치면 중복으로 제거. */
     var iouThreshold: Float = 0.45f

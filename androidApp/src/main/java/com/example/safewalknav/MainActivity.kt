@@ -347,12 +347,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     //   시연/강의실 신호등 사진 인식 테스트 시에만 true 로 켜고, 외출 전 다시 false 로 되돌릴 것.
     private val TEST_MODE_FORCE_ML_ON = false
 
+    // 시연 영상 촬영 모드 — DEBUG 빌드여도 하단 디버그 박스 (STATE/GPS/AI/crosswalkDist 등) 를 숨김.
+    // bbox 오버레이는 그대로 유지하여 신호등 검출 시각화는 보이게 한다.
+    // 시연 영상 촬영 후 일반 디버깅이 필요해지면 false 로 되돌릴 것.
+    private val DEMO_MODE = true
+
     // 시연용 박스 표시 임계값 — 이 값 이상의 confidence 만 BoundingBoxOverlay 에 그린다.
-    // DEBUG 빌드에서 진단 모드(threshold 0.3)로 추론 중이라 noise 박스도 검출 결과에 섞이는데,
-    // 그걸 화면에 다 그리면 신호등 외 빨간 점/표지판/간판 같은 false positive 도 박스로 보임.
-    // 0.6 정도면 진짜 신호등만 시연 화면에 깔끔하게 보임. 진단 로그(TL_DIAG)는 그대로 모든 추론 기록.
-    // 시연 환경에 따라 0.5 (관대) ~ 0.7 (엄격) 사이로 조정 가능.
-    private val OVERLAY_MIN_CONFIDENCE = 0.6f
+    // 2026-06-06: 운영 임계 0.2 와 일치시켜 0.6 → 0.2 로 낮춤. 이전에는 인식은 됐는데
+    // (예: conf 0.5) 박스가 안 그려지는 현상이 있어 시연 영상에서 가끔 박스 누락되었다.
+    // 진단 로그(TL_DIAG)는 그대로 모든 추론 기록.
+    // 시연 환경에 따라 0.2 (관대) ~ 0.5 (엄격) 사이로 조정 가능.
+    private val OVERLAY_MIN_CONFIDENCE = 0.2f
 
     // 신호등 안전 정책 state machine — PR-SAFETY (2026-05-29)
     //
@@ -623,9 +628,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tvDebugGuidance = findViewById(R.id.tvDebugGuidance)
         tvDebugAiResult = findViewById(R.id.tvDebugAiResult)
 
-        // DEBUG 빌드만 디버그 박스 표시 + 시각 힌트 텍스트 표시
+        // DEBUG 빌드만 디버그 박스 표시 + 시각 힌트 텍스트 표시.
+        // DEMO_MODE=true 이면 디버그 박스는 숨기고 (시연 영상용) 시각 힌트는 유지한다.
         if (BuildConfig.DEBUG) {
-            debugContainer.visibility = View.VISIBLE
+            debugContainer.visibility = if (DEMO_MODE) View.GONE else View.VISIBLE
             tvBeforeHint.visibility = View.VISIBLE
             tvBeforeHint.text = "화면을 2초간 길게 눌러주세요"
         }
