@@ -12,6 +12,11 @@ import Foundation
 import AVFoundation
 import Combine
 
+/// 화면 표시 여부를 utterance에 함께 싣기 위한 래퍼
+final class DisplayUtterance: AVSpeechUtterance {
+    var shouldDisplay: Bool = false
+}
+
 /// 시각장애인용 음성 안내 매니저
 final class TtsManager: NSObject, ObservableObject {
 
@@ -85,8 +90,9 @@ final class TtsManager: NSObject, ObservableObject {
         //    멘트가 중간에 잘리지 않는다. priority 인자는 호환을 위해 남기되 끊지 않는다.
         //    (자기 목소리가 마이크로 들어가는 걸 막아야 하는 STT 진입 등은 명시적 stop() 사용)
 
-        // 4. 발화
-        let utterance = AVSpeechUtterance(string: text)
+        // 4. 발화 — 표시 플래그를 utterance 에 실어 보내 didStart 시점에 화면 갱신.
+        let utterance = DisplayUtterance(string: text)
+        utterance.shouldDisplay = display
         utterance.voice = AVSpeechSynthesisVoice(language: "ko-KR")
         utterance.rate = 0.5            // 0.0(느림) ~ 1.0(빠름), 기본 0.5
         utterance.pitchMultiplier = 1.0 // 0.5 ~ 2.0, 1.0이 기본
@@ -115,7 +121,8 @@ final class TtsManager: NSObject, ObservableObject {
         // 큐 전체 비우기 — 대기 중인 횡단보도 등 안내가 있으면 함께 사라진다.
         synthesizer.stopSpeaking(at: .immediate)
 
-        let utterance = AVSpeechUtterance(string: text)
+        let utterance = DisplayUtterance(string: text)
+        utterance.shouldDisplay = display
         utterance.voice = AVSpeechSynthesisVoice(language: "ko-KR")
         utterance.rate = 0.5
         utterance.pitchMultiplier = 1.0
@@ -164,6 +171,9 @@ extension TtsManager: AVSpeechSynthesizerDelegate {
                            didStart utterance: AVSpeechUtterance) {
         DispatchQueue.main.async {
             self.isSpeaking = true
+            if let u = utterance as? DisplayUtterance, u.shouldDisplay {
+                self.displayText = u.speechString   // 발화가 실제로 시작될 때만 갱신
+            }
         }
     }
 
