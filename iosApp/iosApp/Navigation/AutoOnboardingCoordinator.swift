@@ -95,7 +95,7 @@ final class AutoOnboardingCoordinator: NSObject, ObservableObject {
         // Step 1: 요약
         stage = .summary
         if !summary.isEmpty {
-            tts.speak(summary, priority: .high)
+            tts.speak(summary, priority: .high, display: true)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + summaryDelaySec) { [weak self] in
             Task { @MainActor in
@@ -116,7 +116,7 @@ final class AutoOnboardingCoordinator: NSObject, ObservableObject {
         guard stage == .summary else { return }
         stage = .flatPose
         flatPoseStartTime = Date().timeIntervalSince1970
-        tts.speak("스마트폰을 평평하게 들어주세요.", priority: .high)
+        tts.speak("스마트폰을 평평하게 들어주세요.", priority: .high, display: true)
 
         guard motionManager.isDeviceMotionAvailable else {
             // 모션 센서 없으면 자세 감지 생략하고 다음 단계로
@@ -140,7 +140,7 @@ final class AutoOnboardingCoordinator: NSObject, ObservableObject {
         let elapsed = Date().timeIntervalSince1970 - flatPoseStartTime
         if elapsed > maxFlatPoseSec {
             motionManager.stopDeviceMotionUpdates()
-            tts.speak("그대로 진행합니다.", priority: .high)
+            tts.speak("그대로 진행합니다.", priority: .high, display: true)
             startRotatingStage()
             return
         }
@@ -163,12 +163,12 @@ final class AutoOnboardingCoordinator: NSObject, ObservableObject {
     private func startRotatingStage() {
         stage = .rotating
         rotatingStartTime = Date().timeIntervalSince1970
-        tts.speak("천천히 한 바퀴 도세요.", priority: .high)
+        tts.speak("천천히 한 바퀴 도세요.", priority: .high, display: true)
 
         guard CLLocationManager.headingAvailable() else {
             // 나침반 없으면 정면 판정 불가 — 안내 후 그대로 출발
             print("[Onboarding] heading 사용 불가 — 정면 확인 생략하고 출발")
-            tts.speak("출발합니다.", priority: .high)
+            tts.speak("출발합니다.", priority: .high, display: true)
             finish()
             return
         }
@@ -201,10 +201,10 @@ final class AutoOnboardingCoordinator: NSObject, ObservableObject {
                 if rotationRetries < maxRotationRetries {
                     rotationRetries += 1
                     rotatingStartTime = Date().timeIntervalSince1970
-                    tts.speak("다시 한번 천천히 도세요.", priority: .high)
+                    tts.speak("다시 한번 천천히 도세요.", priority: .high, display: true)
                 } else {
                     // 재시도까지 실패 — 강제 finish
-                    tts.speak("정면을 잡지 못했습니다. 그대로 출발합니다.", priority: .high)
+                    tts.speak("정면을 잡지 못했습니다. 그대로 출발합니다.", priority: .high, display: true)
                     finish()
                 }
                 return
@@ -213,7 +213,7 @@ final class AutoOnboardingCoordinator: NSObject, ObservableObject {
             if inTolerance {
                 stage = .confirming
                 confirmStartTime = Date().timeIntervalSince1970
-                tts.speak("방향이 맞습니다. 멈춰주세요.", priority: .high)
+                tts.speak("방향이 맞습니다. 멈춰주세요.", priority: .high, display: true)
             }
 
         case .confirming:
@@ -226,7 +226,7 @@ final class AutoOnboardingCoordinator: NSObject, ObservableObject {
 
             let held = Date().timeIntervalSince1970 - confirmStartTime
             if held >= confirmHoldSec {
-                tts.speak("정면입니다. 직진하세요.", priority: .high)
+                tts.speak("정면입니다. 직진하세요.", priority: .high, display: true)
                 finish()
             }
 

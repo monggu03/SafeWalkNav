@@ -37,6 +37,10 @@ final class NavigationViewModel: ObservableObject {
     }
     @Published private(set) var isAtCrosswalk: Bool = false
 
+    /// 화면 표시용 안내 멘트 — TtsManager.displayText 와 미러링.
+    /// 뷰에서 navVM.guidanceDisplayText 를 관찰해 큰 글씨로 표시.
+    @Published private(set) var guidanceDisplayText: String = ""
+
     // MARK: - 지도 시각화용 데이터
 
     /// 지도 폴리라인용 좌표 배열
@@ -130,7 +134,15 @@ final class NavigationViewModel: ObservableObject {
         print("🟢 [INIT] NavigationViewModel 생성됨")
         bindLocationToNavigation()
         bindVoiceFlow()
+        bindDisplayText()
         startPollingNavigationState()
+    }
+
+    /// TtsManager.displayText → guidanceDisplayText 미러링.
+    /// TtsManager 가 main 큐로 갱신하므로 receive(on:) 없이 바로 assign.
+    private func bindDisplayText() {
+        tts.$displayText
+            .assign(to: &$guidanceDisplayText)
     }
 
     deinit {
@@ -263,6 +275,7 @@ final class NavigationViewModel: ObservableObject {
         navigationManager.stopNavigation()
         headingProvider.clearBaseHeading()
         tts.stop()
+        tts.clearDisplayText()
 
         NavLogFile.shared.close()
     }
@@ -461,11 +474,11 @@ final class NavigationViewModel: ObservableObject {
         guard !msg.isEmpty, !isOnboarding else { return }
         if ev.interrupt {
             // 회전 직전(IMMINENT) 등 타이밍 생명선 안내 — 현재 발화·큐를 끊고 즉시.
-            tts.speakImmediately(msg)
+            tts.speakImmediately(msg, display: true)
         } else {
             // 이벤트 채널은 일회성 → 고우선. TtsManager 가 .high 도 큐잉만 하므로 끊지는 않음.
             // forceRepeat 는 TtsManager 에 매핑되는 force 개념이 없어 현재는 무시(보고서 참고).
-            tts.speak(msg, priority: .high)
+            tts.speak(msg, priority: .high, display: true)
         }
     }
 
@@ -482,7 +495,7 @@ final class NavigationViewModel: ObservableObject {
         guard !isOnboarding else { return }
 
         let priority: TtsManager.Priority = (arrivalState == .arrived) ? .high : .normal
-        tts.speak(message, priority: priority)
+        tts.speak(message, priority: priority, display: true)
     }
 
     // MARK: - 횡단보도 감지

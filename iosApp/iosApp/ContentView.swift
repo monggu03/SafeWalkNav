@@ -162,6 +162,21 @@ struct NavigationStatusCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // Pass 1 임시 연결 — 안내/온보딩 멘트(display:true 발화)만 큰 글씨로 표시.
+            // 다음 안내 전까지 유지, stopNavigation 시 clearDisplayText 로 비워짐.
+            // Pass 2 에서 NAVIGATING 풀스크린으로 교체 예정.
+            if !navVM.guidanceDisplayText.isEmpty {
+                Text(navVM.guidanceDisplayText)
+                    .font(.system(size: 32, weight: .bold))
+                    .foregroundColor(.yellow)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 16)
+                    .background(Color.black)
+                    .cornerRadius(8)
+            }
+
             HStack {
                 Image(systemName: "location.fill")
                     .foregroundColor(.blue)
