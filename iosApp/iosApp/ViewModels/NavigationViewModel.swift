@@ -37,6 +37,10 @@ final class NavigationViewModel: ObservableObject {
     }
     @Published private(set) var isAtCrosswalk: Bool = false
 
+    /// 화면 표시용 안내 멘트 — TtsManager.displayText 와 미러링.
+    /// 뷰에서 navVM.guidanceDisplayText 를 관찰해 큰 글씨로 표시.
+    @Published private(set) var guidanceDisplayText: String = ""
+
     // MARK: - 지도 시각화용 데이터
 
     /// 지도 폴리라인용 좌표 배열
@@ -130,7 +134,15 @@ final class NavigationViewModel: ObservableObject {
         print("🟢 [INIT] NavigationViewModel 생성됨")
         bindLocationToNavigation()
         bindVoiceFlow()
+        bindDisplayText()
         startPollingNavigationState()
+    }
+
+    /// TtsManager.displayText → guidanceDisplayText 미러링.
+    /// TtsManager 가 main 큐로 갱신하므로 receive(on:) 없이 바로 assign.
+    private func bindDisplayText() {
+        tts.$displayText
+            .assign(to: &$guidanceDisplayText)
     }
 
     deinit {
@@ -263,6 +275,10 @@ final class NavigationViewModel: ObservableObject {
         navigationManager.stopNavigation()
         headingProvider.clearBaseHeading()
         tts.stop()
+        tts.clearDisplayText()
+
+        // Pass 2: 종료 후 RESULTS 로 다시 빠지지 않도록 검색 결과 초기화 → IDLE 로 복귀.
+        searchResults = []
 
         NavLogFile.shared.close()
     }
@@ -289,6 +305,8 @@ final class NavigationViewModel: ObservableObject {
             return
         }
 
+        // Pass 2: 새 음성 입력 시 이전 검색 결과 비움 (IDLE → RESULTS 분기 정합).
+        searchResults = []
         voiceFlowStage = .listening
         tts.speak("어디로 갈까요? 목적지를 말씀하세요.", priority: .high)
 
@@ -351,18 +369,17 @@ final class NavigationViewModel: ObservableObject {
 
         await searchDestination(keyword: keyword)
 
-        guard let best = searchResults.first else {
+        guard !searchResults.isEmpty else {
             voiceFlowStage = .idle
             tts.speak("검색 결과가 없습니다. 다시 말씀해 주세요.", priority: .high)
             return
         }
 
-        voiceFlowStage = .startingNavigation
-        let name = String(describing: best.name)
-        // "안내를 시작합니다" 는 AutoOnboardingCoordinator 가 요약 멘트에 포함하므로 여기선 검색 결과 안내만.
-        tts.speak("\(name)으로 경로를 탐색합니다.", priority: .high)
-
-        await startNavigation(to: best)
+        // Pass 2: 자동 첫 결과 안내 시작을 제거 — RESULTS 화면에서 사용자가 선택.
+        // 결과 개수를 음성으로 안내해 다음 행동(VoiceOver 두 번 탭)을 유도한다.
+        // 검색 흐름 멘트이므로 display:false (화면 미표시).
+        let count = searchResults.count
+        tts.speak("\(count)개의 결과를 찾았습니다. 원하는 목적지를 두 번 탭하세요.", priority: .high)
         voiceFlowStage = .idle
     }
 
@@ -461,11 +478,11 @@ final class NavigationViewModel: ObservableObject {
         guard !msg.isEmpty, !isOnboarding else { return }
         if ev.interrupt {
             // 회전 직전(IMMINENT) 등 타이밍 생명선 안내 — 현재 발화·큐를 끊고 즉시.
-            tts.speakImmediately(msg)
+            tts.speakImmediately(msg, display: true)
         } else {
             // 이벤트 채널은 일회성 → 고우선. TtsManager 가 .high 도 큐잉만 하므로 끊지는 않음.
             // forceRepeat 는 TtsManager 에 매핑되는 force 개념이 없어 현재는 무시(보고서 참고).
-            tts.speak(msg, priority: .high)
+            tts.speak(msg, priority: .high, display: true)
         }
     }
 
@@ -482,7 +499,7 @@ final class NavigationViewModel: ObservableObject {
         guard !isOnboarding else { return }
 
         let priority: TtsManager.Priority = (arrivalState == .arrived) ? .high : .normal
-        tts.speak(message, priority: priority)
+        tts.speak(message, priority: priority, display: true)
     }
 
     // MARK: - 횡단보도 감지

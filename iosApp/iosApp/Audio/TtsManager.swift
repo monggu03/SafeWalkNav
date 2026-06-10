@@ -19,6 +19,11 @@ final class TtsManager: NSObject, ObservableObject {
     /// 현재 음성 출력 중인지 여부 (UI에서 확인 가능)
     @Published private(set) var isSpeaking: Bool = false
 
+    /// 화면에 표시할 현재 "안내 멘트" (display:true 로 호출된 발화만 갱신)
+    /// - 다음 안내 발화 전까지 값 유지
+    /// - 안내 종료 시 clearDisplayText() 로 초기화
+    @Published private(set) var displayText: String = ""
+
     // MARK: - Private Properties
     private let synthesizer = AVSpeechSynthesizer()
 
@@ -60,9 +65,15 @@ final class TtsManager: NSObject, ObservableObject {
     /// - Parameters:
     ///   - text: 말할 내용
     ///   - priority: 호환용 인자. 현재는 큐잉 정책 통일로 .high 도 끊지 않고 뒤에 붙는다.
-    func speak(_ text: String, priority: Priority = .normal) {
+    func speak(_ text: String, priority: Priority = .normal, display: Bool = false) {
         // 1. 빈 문자열은 무시
         guard !text.isEmpty else { return }
+
+        // 1-1. 화면 표시 대상이면, 오디오 dedup 여부와 무관하게 화면 텍스트 먼저 갱신
+        //      (같은 멘트를 반복 발화해도 화면은 그대로 유지되도록 dedup 보다 앞에서 처리)
+        if display {
+            DispatchQueue.main.async { self.displayText = text }
+        }
 
         // 2. 같은 메시지 반복 방지
         if shouldSkipDuplicate(text: text) {
@@ -94,8 +105,12 @@ final class TtsManager: NSObject, ObservableObject {
     /// 일반 speak() 와 차이:
     ///   - 3초 중복 필터(shouldSkipDuplicate)를 우회 — 직전은 무조건 발화.
     ///   - stopSpeaking(.immediate) 로 현재+큐 비움 (대기 안내가 있으면 같이 사라지는 점 인지).
-    func speakImmediately(_ text: String) {
+    func speakImmediately(_ text: String, display: Bool = false) {
         guard !text.isEmpty else { return }
+
+        if display {
+            DispatchQueue.main.async { self.displayText = text }
+        }
 
         // 큐 전체 비우기 — 대기 중인 횡단보도 등 안내가 있으면 함께 사라진다.
         synthesizer.stopSpeaking(at: .immediate)
@@ -116,6 +131,11 @@ final class TtsManager: NSObject, ObservableObject {
         if synthesizer.isSpeaking {
             synthesizer.stopSpeaking(at: .immediate)
         }
+    }
+
+    /// 화면 표시용 안내 멘트 초기화 (안내 종료/취소 시 호출)
+    func clearDisplayText() {
+        DispatchQueue.main.async { self.displayText = "" }
     }
 
     // MARK: - Private Helpers
