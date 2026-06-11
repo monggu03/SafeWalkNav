@@ -34,14 +34,20 @@ val tDataApiKey: String = run {
     props.getProperty("T_DATA_API_KEY", "")
 }
 
-// Release 서명 키 정보 — keystore.properties 에서 로드 (gitignored).
-// 파일이 없으면 release 빌드는 unsigned APK 가 생성되며 평가자가 설치할 수 없음.
+// Release APK 서명 설정 — keystore.properties (gitignored) 에서 로드.
+// 파일 없으면 release 빌드 시 서명 생략 (unsigned APK 산출).
+// keystore.properties 양식:
+//   storeFile=safewalknav-release.keystore
+//   storePassword=...
+//   keyAlias=safewalknav
+//   keyPassword=...
 val keystoreProperties = Properties().apply {
-    val keystoreFile = rootProject.file("keystore.properties")
-    if (keystoreFile.exists()) {
-        keystoreFile.inputStream().use { load(it) }
+    val file = rootProject.file("keystore.properties")
+    if (file.exists()) {
+        file.inputStream().use { load(it) }
     }
 }
+val hasReleaseSigning = keystoreProperties.getProperty("storeFile")?.isNotBlank() == true
 
 android {
     namespace = "com.example.safewalknav"
@@ -65,10 +71,9 @@ android {
     }
 
     signingConfigs {
-        create("release") {
-            val storeFileName = keystoreProperties.getProperty("storeFile")
-            if (storeFileName != null) {
-                storeFile = rootProject.file(storeFileName)
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
                 storePassword = keystoreProperties.getProperty("storePassword")
                 keyAlias = keystoreProperties.getProperty("keyAlias")
                 keyPassword = keystoreProperties.getProperty("keyPassword")
@@ -79,7 +84,9 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
