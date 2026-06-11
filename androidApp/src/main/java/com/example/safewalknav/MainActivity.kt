@@ -1910,20 +1910,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         cameraPreviewContainer.removeAllViews()
         cameraPreviewContainer.addView(pv)
 
-        // 발표/시연용 바운딩박스 오버레이 — DEBUG 빌드에서만 PreviewView 위에 한 겹 add.
+        // 발표/시연·평가용 바운딩박스 오버레이 — PreviewView 위에 한 겹 add.
         // onTrafficLightDetected 가 setDetections() 로 검출 결과를 푸시 → 카메라 영상 위에 빨강/초록 박스.
-        // Release 빌드에서는 add 안 함 — 실 사용자(시각장애인)에게 의미 없으므로 GPU/메모리 절약.
-        if (BuildConfig.DEBUG) {
-            val overlay = BoundingBoxOverlay(this).apply {
-                layoutParams = FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.MATCH_PARENT,
-                    FrameLayout.LayoutParams.MATCH_PARENT
-                )
-            }
-            cameraPreviewContainer.addView(overlay)
-            boundingBoxOverlay = overlay
-            appendNavLog("BoundingBoxOverlay attached (DEBUG 빌드 시연용)")
+        // 2026-06-06: 평가자 일관성 확보를 위해 Release 빌드에서도 add (시연 영상과 동작 일치).
+        // 향후 실 시각장애인 사용자 일반 배포 시에는 BuildConfig.DEBUG 조건을 다시 복원할 것.
+        val overlay = BoundingBoxOverlay(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
         }
+        cameraPreviewContainer.addView(overlay)
+        boundingBoxOverlay = overlay
+        appendNavLog("BoundingBoxOverlay attached")
 
         // 검출기/executor 초기화 (재사용)
         if (trafficLightDetector == null) {
