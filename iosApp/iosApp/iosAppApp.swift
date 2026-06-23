@@ -18,7 +18,7 @@ struct iosAppApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            AppRootView()
                 .environmentObject(deps)
                 .environmentObject(deps.navigationViewModel)
         }
