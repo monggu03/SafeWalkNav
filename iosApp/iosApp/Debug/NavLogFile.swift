@@ -40,10 +40,6 @@ final class NavLogFile {
 
     private init() {}
 
-    var isActive: Bool {
-        ioQueue.sync { handle != nil }
-    }
-
     /// 안내 시작 시 호출. 이미 열려있으면 먼저 닫고 새 파일을 연다.
     func start() {
         ioQueue.async { [weak self] in

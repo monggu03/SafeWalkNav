@@ -36,9 +36,7 @@ import com.example.safewalknav.navigation.tmap.TMapApiClient
 import com.example.safewalknav.navigation.tmap.TMapRoute
 import com.example.safewalknav.navigation.tmap.Waypoint
 import com.example.safewalknav.navigation.walking.HeadingLogger
-import com.example.safewalknav.navigation.walking.LeanStatus
 import com.example.safewalknav.navigation.walking.NoopHeadingLogger
-import com.example.safewalknav.navigation.walking.WalkingDiagnostic
 import com.example.safewalknav.navigation.walking.CrosswalkZoneInfo
 import com.example.safewalknav.navigation.walking.findCrosswalkZoneInfo
 import com.example.safewalknav.navigation.walking.isCrosswalkWaypoint
@@ -97,7 +95,6 @@ class NavigationManager(
     private val headingLogger: HeadingLogger = NoopHeadingLogger,
     private var trafficSignals: List<TrafficSignalLocation> = emptyList(), //횡단보도 주변 신호등 데이터
 ) {
-    private val walkingDiagnostic = WalkingDiagnostic()
     // 사용자 휴대폰 자력계+가속도 fusion azimuth (MainActivity 가 매 sensor tick 마다 push)
     private val _compassHeading = MutableStateFlow(0f)
     val compassHeading: StateFlow<Float> = _compassHeading.asStateFlow()
@@ -131,20 +128,7 @@ class NavigationManager(
     // 최근 GPS 정확도 (m). IMU+GPS heading 융합 가중치 계산에 사용.
     // 작을수록(정확할수록) GPS 가중치 ↑. 30m 초과면 GPS bearing 신뢰 불가.
     private var latestGpsAccuracy: Float = 999f
-    private val FUSION_MIN_SPEED = 0.5f       // 이 미만이면 IMU만 사용 (GPS bearing 잡음)
-    private val FUSION_FULL_SPEED = 2.0f      // 이 이상이면 GPS 가중치 최대
-    private val FUSION_MAX_ACCURACY = 30f     // 이 초과면 IMU만 사용 (GPS 신뢰 X)
-    private val FUSION_GPS_WEIGHT_MIN = 0.2f  // GPS 가중치 하한
-    private val FUSION_GPS_WEIGHT_MAX = 0.8f  // GPS 가중치 상한 (IMU 신호 최소 보존)
 
-    // 최근 fuseImuAndGps 호출 결과 진단 문자열. MainActivity 가 GPS tick 마다 읽어
-    // walk_log 에 HEADING_FUSION 라인으로 기록. 외출 후 외부에서 융합 가중치 추적 가능.
-    var latestFusionDebug: String = ""
-        private set
-
-    // Settling — 첫 lean 발화 후 사용자가 보정해서 STRAIGHT 한 번 거치기 전엔
-    // 재누적 안 함. 발화 직후 과보정 → 반대 LEAN → 즉시 반대 발화 사이클 방지.
-    private var requireStraightBeforeNextLean: Boolean = false
 
     // 외부에서 관찰할 수 있는 StateFlow (필요시)
 
@@ -272,11 +256,6 @@ class NavigationManager(
     // 2026-06-05 외출 버그 #4 — "40m, 35m, 30m 직진" 카운트다운 발화 폭주 해결.
     // 이전 발화 거리와 5m 이상 차이날 때만 새로 발화 (불필요한 카운트다운 회피).
     private var lastStraightGuidanceDistance: Float = -1f
-    // 2026-06-05 외출 버그 #1 — 좌우 보정 멘트 GPS Kalman heading 기반 복구.
-    // IMU 기반 leanStatus 와 달리 GPS Kalman 은 자력계 노이즈 영향 없어 안정적.
-    // 횡단보도 구간 한정 (일반 직진 도로는 RouteAnnotator 사전 안내가 대체).
-    private var lateralAccumulator = 0
-    private var lastLateralCorrectionTime = 0L
     private var lastRoadType = -1 // 이전 구간 도로 유형 (전환 안내용)
     // 횡단보도 진입 시점에 "X시 방향으로 횡단보도를 건너세요" 1회 안내용 상태.
     // 시각장애인이 어느 방향에 횡단보도가 있는지 모르므로 zone 진입 transition 에서 발화.
@@ -295,11 +274,6 @@ class NavigationManager(
     private val APPROACHING_DISTANCE_M = 20f
     // 2026-06-05 외출 버그 #1 — 좌우 보정 임계값.
     // 25°: route bearing 과 user heading 차이가 이 이상이면 좌우 누적 시작.
-    // 5: 연속 5 프레임 (약 2.5초) 같은 방향 누적 시 발화. 단발 GPS noise 회피.
-    // 8초 cooldown: 사용자가 보정 행동 + 평가 + 재발화 가능한 적절한 간격.
-    private val LATERAL_THRESHOLD_DEG = 25f
-    private val LATERAL_FRAMES = 5
-    private val LATERAL_COOLDOWN_MS = 8_000L
 
     //클래스 변수 추가
     private var lastSignalApiCallTime = 0L
@@ -334,152 +308,11 @@ class NavigationManager(
      * MainActivity의 센서 퓨전(가속도+자력계) azimuth를 최신값으로 받는다.
      * CSV `rotation_vector_heading` 필드 기록용. heading 판정 로직 자체는 GPS bearing 기반 그대로 유지.
      */
-    private var leanAccumulator = 0 // 쏠림 누적 카운트
 
     fun updateCompassHeading(azimuth: Float, currentTime: Long) {
         latestCompassHeading = azimuth
         _compassHeading.value = azimuth   // CompassView 흰 화살표 계속 작동
 
-        // ──────────────────────────────────────────────────────────────────────
-        // 2026-05-31 설계 결정 — IMU heading 기반 lean 안내 시스템 비활성화.
-        //
-        // 문제: IMU heading vs 도로 방향 비교 방식은 다음 본질적 한계로 폭주 발화 유발:
-        //   1. IMU azimuth 는 "휴대폰 향한 방향" 이지 "이동 방향" 이 아님 — 휴대폰 자세 변화/
-        //      자력계 노이즈(건물 근처)에 매우 민감.
-        //   2. 비교 기준인 도로 방향(폴리라인) 도 GPS 정확도 한계로 흔들림.
-        //   3. 시각장애인 흰지팡이 좌우 탐지 보행은 본질적으로 큰 좌우 흔들림 동반 — 이게
-        //      *정상* 보행 방식인데 lean 으로 잘못 판정.
-        //
-        // 대안: 굽은 길 보정은 handleVirtualWaypointPassed (가상 waypoint cross-track 기반)
-        //   이 담당. 사용자 *위치* 가 가상점 라인에서 5m+ 벗어나면 "이탈하셨습니다" 발화.
-        //   - 위치 기반 → IMU 노이즈 회피
-        //   - 5m 간격 가상점 (RouteAnnotator.expandWithVirtualWaypoints) → 곡선 추적 정밀
-        //   - 시각장애인 흰지팡이 흔들림 무시 (위치만 보므로)
-        //
-        // CompassView 의 흰 화살표(사용자 방향)는 _compassHeading 으로 그대로 갱신되므로
-        // 시각 표시는 영향 없음. 음성 발화만 차단.
-        //
-        // 향후 IMU heading 신뢰도가 높은 환경(실내/터널)에서 부분 재활성화 검토 가능 —
-        // 그래서 아래 walkingDiagnostic 로직은 제거하지 않고 dead branch 로 보존.
-        // ──────────────────────────────────────────────────────────────────────
-        return
-
-        @Suppress("UNREACHABLE_CODE")
-        if (_isNavigating.value && hasRoadBearing) {
-            // 정지/거의 정지 상태에선 IMU heading 비교 자체가 의미 없음.
-            // 사용자가 멈춰 있으면 휴대폰을 두리번거리거나 자세 바꾸는 게 흔하고, 그게 진행 방향과 무관.
-            // 보행 중(speed >= 0.3 m/s) 일 때만 walkingDiagnostic 진입.
-            if (latestSpeed < MIN_WALKING_SPEED_MPS) return
-
-            // ──── IMU + GPS Kalman heading 융합 (2026-05-31) ────
-            // 기존: IMU(자력계 fusion azimuth) 만으로 도로 방향과 비교 → 자기장 노이즈/휴대폰 자세에 민감
-            // 변경: GPS Kalman heading(실제 이동 방향, 민성님 KalmanHeading) 과 융합해 정확도 향상
-            //   - 속도 빠르고 GPS 정확도 좋으면 GPS 가중치 ↑ (실제 진행 방향 신뢰)
-            //   - 속도 느리거나 GPS 정확도 나쁘면 IMU 가중치 ↑ (현재 향한 방향 신뢰)
-            val fusedHeading = fuseImuAndGps(
-                imuAzimuth = azimuth,
-                gpsKalmanHeading = kalmanHeading.current,
-                speed = latestSpeed,
-                gpsAccuracy = latestGpsAccuracy,
-            )
-
-            val targetBearing = currentTargetBearing
-            val status = walkingDiagnostic.analyzeLeanStatus(fusedHeading, targetBearing)
-
-            // Settling — 직전 발화 후 사용자가 보정해서 STRAIGHT 한 번 거치기 전엔 재누적 안 함.
-            // 발화 직후 사용자가 과보정하면 반대 방향 LEAN 이 5초 후 또 발화되는 핑퐁 사이클 방지.
-            if (requireStraightBeforeNextLean) {
-                if (status == LeanStatus.STRAIGHT) {
-                    requireStraightBeforeNextLean = false
-                    leanAccumulator = 0
-                }
-                // STRAIGHT 든 LEAN 이든 일단 누적/발화는 안 함.
-                return
-            }
-
-            // 5초 쿨타임 체크
-            if (currentTime - lastGuidanceTime >= guidanceCooldownMs) {
-                when (status) {
-                    LeanStatus.LEFT_LEAN -> leanAccumulator--
-                    LeanStatus.RIGHT_LEAN -> leanAccumulator++
-                    LeanStatus.STRAIGHT -> {
-                        // 잔상효과(정상 보행이어도 누적된 메시지 알림 방지)
-                        leanAccumulator = 0
-                    }
-                }
-
-                // 누적 카운트가 임계값(5)에 도달하면 안내 메시지 발화.
-                // 2026-05-31 외출 피드백 — 3 회 누적은 너무 빨라 잘못된 발화 폭주.
-                // 5 회 (≈ 0.3 초 지속 LEAN) 로 완화해 일시적 흔들림 무시.
-                if (kotlin.math.abs(leanAccumulator) >= 5) {
-                    val message = if (leanAccumulator <= -3) {
-                        "왼쪽으로 치우쳤습니다. 오른쪽으로 오세요."
-                    } else {
-                        "오른쪽으로 치우쳤습니다. 왼쪽으로 오세요."
-                    }
-
-                    emitGuidance(message)
-                    lastGuidanceTime = currentTime
-                    requireStraightBeforeNextLean = true   // 다음 발화는 STRAIGHT 한 번 거친 후
-
-                    // 발화 후에는 다시 0부터 쌓이도록 초기화
-                    leanAccumulator = 0
-                }
-            }
-        }
-    }
-
-    /**
-     * 보행 중 lean 안내용 heading 결정.
-     *
-     * 2026-05-31 설계 변경 — IMU(자력계+가속도 fusion)는 *움직일 때* 자기장 노이즈와
-     * 휴대폰 자세 변화로 오류가 큰 것이 외출 테스트에서 확인됨. 따라서 보행 중 lean 보정에는
-     * **GPS bearing 의 Kalman smoothed heading 만 사용**. IMU 는 fallback 으로만 유지.
-     *
-     * 이 함수는 updateCompassHeading 에서 latestSpeed >= MIN_WALKING_SPEED_MPS(0.3) 조건
-     * 통과 후 호출되므로 호출 시점에 이미 *보행 중*. 정지 상태에선 호출 자체가 안 됨.
-     *
-     * 동작:
-     *   - 정상 (GPS Kalman 초기화 + GPS accuracy 양호) → GPS Kalman heading 사용 (IMU 무시)
-     *   - GPS Kalman 미초기화 (KalmanHeading 초기 1~2 frame) → IMU fallback
-     *   - GPS accuracy > 30m (도심 빌딩 밀집 등) → IMU fallback
-     *
-     * Note: 함수 이름은 호환성 위해 fuseImuAndGps 유지. 내부 동작은 GPS 우선.
-     * 가중 평균 버전의 상수 (FUSION_MIN_SPEED, FUSION_FULL_SPEED, FUSION_GPS_WEIGHT_MIN/MAX)
-     * 및 import (PI, sin, cos, atan2) 는 향후 재시도 가능성 + 보고서 narrative 유지를 위해 보존.
-     */
-    private fun fuseImuAndGps(
-        imuAzimuth: Float,
-        gpsKalmanHeading: Float,
-        speed: Float,
-        gpsAccuracy: Float,
-    ): Float {
-        // K/N commonMain 은 String.format 미지원 — math.round 로 직접 2자리 반올림.
-        val speedR2 = kotlin.math.round(speed * 100.0) / 100.0
-
-        // GPS Kalman 미초기화 → IMU fallback (KalmanHeading 초기 1~2 frame)
-        if (gpsKalmanHeading < 0f) {
-            val debug = "imu=${imuAzimuth.toInt()}° gps=N/A " +
-                    "speed=${speedR2} acc=${gpsAccuracy.toInt()}m USED=IMU(fallback)"
-            println("[HEADING_FUSION] $debug")
-            latestFusionDebug = debug
-            return imuAzimuth
-        }
-        // GPS 정확도 너무 나쁨 → IMU fallback (빌딩 밀집/지하 출구 등)
-        if (gpsAccuracy > FUSION_MAX_ACCURACY) {
-            val debug = "imu=${imuAzimuth.toInt()}° gps=${gpsKalmanHeading.toInt()}° " +
-                    "speed=${speedR2} acc=${gpsAccuracy.toInt()}m USED=IMU(gps_bad)"
-            println("[HEADING_FUSION] $debug")
-            latestFusionDebug = debug
-            return imuAzimuth
-        }
-        // 정상 보행 중 + GPS 신뢰 가능 → GPS Kalman heading 만 사용 (IMU 무시).
-        // IMU 움직임 노이즈가 굽은 길에서 잘못된 lean 안내를 유발하던 문제 해결.
-        val debug = "imu=${imuAzimuth.toInt()}° gps=${gpsKalmanHeading.toInt()}° " +
-                "speed=${speedR2} acc=${gpsAccuracy.toInt()}m USED=GPS"
-        println("[HEADING_FUSION] $debug")
-        latestFusionDebug = debug
-        return gpsKalmanHeading
     }
 
     // ========== 경로 탐색 ==========
@@ -556,8 +389,6 @@ class NavigationManager(
         currentTargetBearing = 0f
         latestSpeed = 0f
         latestGpsAccuracy = 999f
-        requireStraightBeforeNextLean = false
-        leanAccumulator = 0
 
         // === 진단: TMap 응답이 횡단보도를 별도 waypoint 로 만들었는지 검증 ===
         // 시각장애인 안내의 핵심 — 만약 CROSSWALK 0 개면 TMap API 가 sparse 응답한 것.
@@ -931,8 +762,6 @@ class NavigationManager(
         lastPreAnnouncedIndex = -1
         lastStraightGuidanceTime = 0L
         lastStraightGuidanceDistance = -1f
-        lateralAccumulator = 0
-        lastLateralCorrectionTime = 0L
         lastRoadType = -1
         wasInCrosswalkZone = false
         lastCrosswalkAnnouncedWpIdx = -1
@@ -960,8 +789,6 @@ class NavigationManager(
         currentTargetBearing = 0f
         latestSpeed = 0f
         latestGpsAccuracy = 999f
-        requireStraightBeforeNextLean = false
-        leanAccumulator = 0
 
         // 폴리라인 평행 나침반 상태 리셋
         routeBearingProfile = null
@@ -1003,7 +830,6 @@ class NavigationManager(
         // 도로 방향 상태 리셋
         hasRoadBearing = false
         currentTargetBearing = 0f
-        leanAccumulator = 0
 
         // 폴리라인 평행 나침반 상태 리셋
         routeBearingProfile = null
@@ -2190,32 +2016,11 @@ class NavigationManager(
         // 굽은 길은 RouteAnnotator 의 사전 안내(announceUpcomingAnnotation) 가 대체한다.
         // 복구가 필요하면 git history 의 onCrosswalk 보정 블록을 참고할 것.
 
-        // 2026-06-05 외출 버그 #1 — 좌우 보정 멘트 복구 (GPS Kalman heading 기반).
-        // 전구간 (직진 도로 + 횡단보도 모두) 동작 — 굽은 길에서 시각장애인이 직선으로
-        // 못 걷는 핵심 문제 대응. 코너 회전 직전(waypointGuard 25m 이내) 은 이미 위에서
-        // return 되므로, RouteAnnotator 사전 안내와 시간상 충돌하지 않는다.
-        // 폭주 방지: 임계 25° + 누적 5 frame + cooldown 15초.
-        val routeBearingForLateral = computeRouteBearingAhead(15f)
-        val userHeadingForLateral = kalmanHeading.current
-        if (routeBearingForLateral != null && userHeadingForLateral >= 0f) {
-            // angleDiff: 양수 = route 가 user 기준 오른쪽 (= 오른쪽으로 가야 함)
-            val diff = angleDiff(routeBearingForLateral, userHeadingForLateral)
-            when {
-                diff > LATERAL_THRESHOLD_DEG -> lateralAccumulator++
-                diff < -LATERAL_THRESHOLD_DEG -> lateralAccumulator--
-                else -> lateralAccumulator = 0
-            }
-            if (kotlin.math.abs(lateralAccumulator) >= LATERAL_FRAMES &&
-                now - lastLateralCorrectionTime >= LATERAL_COOLDOWN_MS
-            ) {
-                val direction = if (lateralAccumulator > 0) "오른쪽" else "왼쪽"
-                emitGuidance("약간 ${direction}으로 가세요")
-                lastLateralCorrectionTime = now
-                lateralAccumulator = 0
-            }
-        }
+        // 2026-06-15 — 보행 중 좌우 방향 보정("약간 오른쪽으로 가세요") 제거.
+        // 서울임팩트 단계 결정: "걸으면서 방향 잡아주기" 기능 폐기.
+        // 신호등 조준용 나침반(compassHeading → getClockDirection)은 그대로 유지한다.
 
-        // 횡단보도 구간에서는 거리 안내 (직진 안내) 자체는 생략 — 좌우 보정만 살아있음.
+        // 횡단보도 구간에서는 거리 안내 (직진 안내) 자체는 생략.
         if (onCrosswalk) return
 
         // 2026-06-05 외출 버그 #4 — 5초마다 "40m → 35m → 30m" 카운트다운 발화 폭주 문제.
@@ -2748,3 +2553,4 @@ class NavigationManager(
         )
     }
 }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
