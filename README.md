@@ -1,4 +1,4 @@
-# SafeWalkNav
+# SafeWalk — 시각장애인 보행 안전 AI 앱
 
 시각장애인을 위한 **횡단보도 보행 안전 앱**. 음향신호기가 없거나 고장 난 횡단보도에서, 스마트폰 카메라와 GPS만으로 신호등 색을 인식해 음성·진동으로 알려줍니다.
 
@@ -132,17 +132,18 @@ cd SafeWalkNav
 
 ```properties
 TMAP_APP_KEY=발급받은_TMap_앱_키
+SEOUL_API_KEY=발급받은_서울_공공데이터_키
 T_DATA_API_KEY=발급받은_서울_T-data_키
 SEOUL_API_KEY=발급받은_서울_열린데이터_키
 ```
 
-`local.properties`는 `.gitignore`에 포함되어 커밋되지 않습니다.
+`local.properties` 는 `.gitignore` 에 포함되어 커밋되지 않습니다.
 
 ### 3. Firebase 설정
 
 [Firebase Console](https://console.firebase.google.com/)에서 `google-services.json`을 받아 **`androidApp/` 폴더에 배치**합니다. 이 파일도 gitignore 처리됩니다.
 
-### 4. 빌드
+### 4. Release 빌드 (선택)
 
 ```bash
 ./gradlew :androidApp:assembleDebug
@@ -174,7 +175,7 @@ SEOUL_API_KEY=발급받은_서울_열린데이터_키
 
 ---
 
-## 주요 권한 (Android)
+## 권한 (Android)
 
 | 권한 | 용도 |
 |---|---|
@@ -204,7 +205,14 @@ SEOUL_API_KEY=발급받은_서울_열린데이터_키
 
 ---
 
-## 알고리즘 핵심
+---
+
+## 폐기한 기술 (정직한 의사결정)
+
+본 프로젝트는 정량 검증을 거쳐 폐기한 기술도 함께 보고합니다 (최종 보고서 §2.3.5 참조):
+
+- **Depth Anything V2 단안 깊이 추정** — 줄자 실측 결과 5m 이내에서만 신뢰 가능, 7m 이상에서 51%+ 오차 + 거리 역전 현상. 시속 50km 차량 회피용 인식거리(40~60m) 와 괴리. 추가로 사용자 인터뷰 결과 *위험 탐지보다 내비게이션·신호등이 더 중요* 라는 응답이 일관되어 전면 폐기.
+- **IMU heading 기반 방위각** — 정지 상태는 안정적이나 보행 중 재현성 부족 (동일 조건 4회 보행 시 급변율 3.9~18.1% 편차). 자력계 기반 heading 의 본질적 한계. GPS Kalman heading 단일 소스로 일원화.
 
 - **YOLOv11n + P2 Head** — 기본 YOLOv11n은 P3/P4/P5에서만 검출해 원거리 신호등(작은 객체)에 약합니다. 고해상도 P2 레벨(stride 4) 검출 헤드를 추가해 원거리 검출률을 baseline 14% → **26.4% (+12.4%p)** 로 끌어올렸습니다(50m급 시뮬레이션, IoU≥0.75). Float16 양자화로 모델 크기 **5.6 MB**.
 - **Circular Kalman Filter** (`geo/KalmanHeading.kt`) — bearing(원형각)을 sin/cos 두 성분으로 분해해 각각 1D Kalman을 적용. 359°/0° 경계 문제를 회피하며, GPS accuracy를 measurement noise로 동적 사용합니다.
@@ -226,7 +234,7 @@ SEOUL_API_KEY=발급받은_서울_열린데이터_키
 
 ---
 
-## 팀
+## 후속 프로젝트 — 서울임팩트프로젝트
 
 동국대학교 컴퓨터공학과 CSC4004 공개SW프로젝트 1조 (지도: 석문기 교수님)
 
