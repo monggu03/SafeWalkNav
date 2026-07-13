@@ -100,7 +100,7 @@ android {
     }
 
     buildFeatures {
-        viewBinding = true
+        // viewBinding 제거 (2026-06-15 정리) — *Binding 클래스 사용처 0건, 전부 findViewById.
         buildConfig = true
     }
 }
@@ -151,13 +151,12 @@ dependencies {
     // TensorFlow Lite + GPU delegate — 신호등(YOLOv8n) 추론
     // Galaxy S25 (Adreno 830) 는 GPU delegate 풀 지원
     // gpu-delegate-plugin 은 옛 API 사용해 lite-gpu:2.14 와 호환 안 됨 → 제외
+    // 추론 경로는 NNAPI 사용 (TrafficLightDetector 참조).
+    // tensorflow-lite-gpu 는 실사용처가 없어 제거 (2026-06-15 정리).
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
-    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
-    // OpenCV (Android) — 점자블록(노란색) / 횡단보도 줄무늬 검출
-    // quickbirdstudios 패키지: 비공식이지만 안정성 검증된 OpenCV Android 빌드
-    implementation("com.quickbirdstudios:opencv:4.5.3.0")
+    // OpenCV 제거 (2026-06-15 정리) — 유일 사용처였던 MLCameraProbe(의존성 검증용 임시 파일) 삭제됨.
 
     //Room - 신호등 위치 데이터 로컬 캐시
     val roomVersion = "2.6.1"

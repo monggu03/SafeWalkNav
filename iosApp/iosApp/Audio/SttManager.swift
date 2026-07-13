@@ -70,11 +70,6 @@ final class SttManager: ObservableObject {
         self.tts = tts
     }
 
-    /// AppDependencies에서 순환 의존을 피하기 위해 init 후 주입
-    func attach(tts: TtsManager) {
-        self.tts = tts
-    }
-
     // MARK: - 권한 요청
     /// 앱 시작 시 또는 첫 사용 직전에 호출
     func requestAuthorization() async -> Bool {
@@ -219,16 +214,6 @@ final class SttManager: ObservableObject {
     }
 
     // MARK: - 타이머
-//    private func startTimers() {
-//        resetSilenceTimer()
-//        // 최대 듣기 시간 — 도달 시 강제 종료
-//        maxDurationTimer = Timer.scheduledTimer(withTimeInterval: maxDuration, repeats: false) { [weak self] _ in
-//            Task { @MainActor in
-//                self?.lastError = "음성 인식 시간 초과"
-//                self?.stopListening()
-//            }
-//        }
-//    }
     private func startTimers() {
         // 무음 타이머는 첫 partial 결과가 도착했을 때 resetSilenceTimer()에서 무장.
         // 시작 직후엔 maxDurationTimer만 활성화 — 인식 엔진 초기화 지연(~0.5s)으로
@@ -245,18 +230,6 @@ final class SttManager: ObservableObject {
         }
     }
 
-//    private func resetSilenceTimer() {
-//        silenceTimer?.invalidate()
-//        silenceTimer = Timer.scheduledTimer(withTimeInterval: silenceTimeout, repeats: false) { [weak self] _ in
-//            Task { @MainActor in
-//                // 무음 5초 → 자동 종료 (이미 들은 partial 결과가 있으면 그걸 final로 처리)
-//                if let self = self, !self.partialText.isEmpty {
-//                    self.finalResultPublisher.send(self.partialText)
-//                }
-//                self?.stopListening()
-//            }
-//        }
-//    }
     private func resetSilenceTimer() {
         silenceTimer?.invalidate()
 

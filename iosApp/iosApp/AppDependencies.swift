@@ -47,9 +47,12 @@ final class AppDependencies: ObservableObject {
         let tMapAppKey = Secrets.tMapAppKey
         let tDataApiKey = Secrets.tDataApiKey
         let seoulApiKey = Secrets.seoulApiKey
-        print("[AppDependencies] TMap 키 길이: \(tMapAppKey.count), " +
-              "T-Data 키 길이: \(tDataApiKey.count), " +
-              "Seoul 키 길이: \(seoulApiKey.count)")
+        // 키 관련 로그는 릴리스에서 남기지 않는다 (키 존재/길이도 노출 정보).
+        #if DEBUG
+        print("[AppDependencies] TMap 키: \(tMapAppKey.isEmpty ? "없음" : "설정됨"), " +
+              "T-Data 키: \(tDataApiKey.isEmpty ? "없음" : "설정됨"), " +
+              "Seoul 키: \(seoulApiKey.isEmpty ? "없음" : "설정됨")")
+        #endif
 
         let signalClient = SignalApiClient(apiKey: tDataApiKey)
         let tMapClient = TMapApiClient(appKey: tMapAppKey)

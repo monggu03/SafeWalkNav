@@ -1,152 +1,99 @@
 # SafeWalk — 시각장애인 보행 안전 AI 앱
 
-> **동국대학교 컴퓨터공학과 CSC4004 공개SW프로젝트 — 1조**
->
-> 시각장애인이 스마트폰 카메라와 GPS만으로 횡단보도를 안전하게 건널 수 있게 돕는 안드로이드 앱입니다. 음향신호기가 설치되지 않은 횡단보도 구간(전국 약 45.3%)에서 신호등 색상과 방향을 직접 인지할 수 있도록, 자체 설계한 AI 모델과 6-Layer 방어적 안전 설계로 *오안내하기보다 침묵한다* 원칙을 구현했습니다.
+시각장애인을 위한 **횡단보도 보행 안전 앱**. 음향신호기가 없거나 고장 난 횡단보도에서, 스마트폰 카메라와 GPS만으로 신호등 색을 인식해 음성·진동으로 알려줍니다.
 
-| 항목 | 링크 |
-|---|---|
-| 🎬 시연 영상 | https://youtu.be/FpTKEb9lbQ4 |
-| 📦 Android APK | [GitHub Releases v1.0.1 (latest)](https://github.com/monggu03/SafeWalkNav/releases/latest) |
-| 📱 지원 OS | Android 8.0 (API 26) 이상 |
+**Kotlin Multiplatform Mobile (KMM)** 으로 Android/iOS가 동일한 내비게이션 로직을 공유합니다.
 
----
+> 동국대학교 컴퓨터공학과 CSC4004 공개SW프로젝트 — 1조
 
-## 핵심 결과 (capstone 산출)
-
-- **자체 설계 AI 아키텍처** — Ultralytics 가 공식 제공하지 않는 YOLOv11n + P2 Head 하이브리드를 yaml 수준에서 직접 설계
-- **Distance Ablation 정량 입증** — 50m급 원거리 시뮬레이션 환경에서 IoU≥0.75 기준 검출률을 baseline 14.0% → hybrid **26.4% (+12.4%p)** 로 향상
-- **mAP50 0.947 / 모델 크기 5.6 MB** — Float16 양자화 + TFLite + Android NNAPI 가속
-- **6-Layer Defense-in-Depth 안전 설계** — Zone Gating · 학습 데이터 가드 · 신뢰도 임계 · Bounding Box 물리 필터 · 3-Frame 안정성 · 다중 소스 교차 검증
-- **GPS Kalman Heading** — sin/cos 분해 기반 Circular Kalman Filter 로 0°/360° 경계 문제 해결
-- **TMap 곡선 보완** — 폴리라인 누적 곡률 분석 + 5m 가상 Waypoint 삽입 (Clark-Carter 1987 보행 속도 1.44 m/s 근거)
-- **실 시각장애인 외출 테스트 7회 이상** — 동국대 / 마포구청 인근, walk_log + Firebase Analytics 5종 커스텀 이벤트 정량 수집
+- **시연 영상**: https://youtu.be/FpTKEb9lbQ4
+- **Android APK**: [GitHub Releases](https://github.com/monggu03/SafeWalkNav/releases/latest) (v1.0.1, signed)
 
 ---
 
-## 빠른 체험 (평가자용)
+## 왜 만들었나
 
-별도 회원가입·로그인 불필요. 권한 4종(카메라·위치·진동·마이크) 만 허용하면 즉시 실행됩니다.
+전국 횡단보도 중 음향신호기가 **적정 설치된 곳은 28%**, **미설치가 45.3%** 입니다(한국시각장애인연합회 2023 실태조사). 최근 4년간 고장 신고가 4,451건이고 수리까지 최대 184일이 걸린 사례도 있습니다. 음향신호기 1대 설치에 500~800만 원이 들어 지자체가 단기간에 확충하기 어렵습니다.
 
-1. [GitHub Releases v1.0.1](https://github.com/monggu03/SafeWalkNav/releases/latest) 에서 `androidApp-release.apk` 다운로드
-2. Android 8.0 이상 기기에 설치 (출처를 알 수 없는 앱 허용 필요)
-3. 권한 4종 허용 후 실행
-4. TalkBack 활성화 상태에서 평가 권장 (시각장애인용 앱 시나리오)
+SafeWalkNav는 **인프라가 갖춰질 때까지의 다리** 역할을 목표로, 시각장애인이 이미 가진 스마트폰만으로 "횡단보도 그 30초"를 책임집니다.
 
 ---
 
 ## 핵심 기능
 
-- **횡단보도 신호등 인식 AI** — 50m 원거리 보행 신호등 실시간 검출. 적색·녹색·점멸 구분, R→G 전환 직접 포착 시에만 강한 진동 + 음성 안내
-- **시계 방향 카메라 조준 안내** — 서울시 신호등 공공데이터(약 62,690 entry) 기반 *"3시 방향에 카메라를 들어주세요"* 음성 안내로 화면을 볼 수 없는 사용자도 정확히 조준 가능
-- **6-Layer 방어적 안전 설계** — 정적 초록불에는 "건너세요" 안내 배제. 최종 판단권은 사용자에게 위임 (AI 단일 실패 지점 회피)
-- **TMap 보행자 경로 안내** — Forward-Only Waypoint 추적, 4단계 도착 안내(FAR / APPROACHING / NEAR / ARRIVED)
-- **경로 사전 분석** — `RouteAnnotator` 가 경로 전체를 SHARP_TURN / TURN / CURVE / SLIGHT_CURVE 로 사전 분류해 15~30m 전 미리 음성 안내
-- **GPS Kalman 보행 쏠림 보정** — heading vs 도로 방위 차이 25° 이상 누적 시 *"약간 오른쪽으로 가세요"* 보정 안내, 8초 cooldown
-- **walk_log 자동 진단 + Firebase Analytics** — 평균 보행 속도, 방향 상실 경고, R→G 안내, Flicker 감지 횟수 자동 기록
+- **신호등 색상 인식 (AI)** — 자체 설계 **YOLOv11n + P2 Head** 모델로 `ped_red` / `ped_green` 검출. 원거리(50m급) 검출률을 baseline 대비 **+12.4%p** 향상 (mAP50 0.947).
+- **횡단보도 Zone Gating** — 횡단보도 25m 이내에서만 카메라·ML 추론을 켜서 배터리·발열 억제.
+- **시계 방향 조준 안내** — 카메라를 어디로 향할지 모르는 문제를 `"3시 방향에 카메라를 들어주세요"` 형태로 해결.
+- **출발 전 방향 정렬 온보딩** — 경로 요약 → 평평 자세 → 회전 → 정면 확인 → 출발. 회전 중 목표 방향에 가까울수록 빨라지는 **실시간 스테레오 비프**로 멈출 타이밍을 안내.
+- **도보 내비게이션** — TMap 보행자 경로 REST API, 4단계 도착 안내(FAR / APPROACHING / NEAR / ARRIVED).
+- **경로 사전 분석** — `RouteAnnotator`가 경로를 곡선/회전/직진으로 사전 분류해 굽은 길을 미리 안내.
+- **신호 잔여시간** — 서울 T-data 신호제어기 API 연동 (60초 쿨다운 캐싱 + 경과시간 보정).
+- **신호등 4단계 매칭** — 광폭 도로에서 사용자 바로 앞이 아닌 **반대편 신호등**(20~50m)을 우선 선택.
+- **음성 안내** — 한국어 TTS / STT(음성 목적지 입력), 거리 기반 오디오 비콘, 스테레오 패닝.
 
 ---
 
 ## 프로젝트 구조
 
-KMM (Kotlin Multiplatform Mobile) 멀티 모듈로 비즈니스 로직과 OS 의존 코드를 분리했습니다. `shared/commonMain/navigation/` 은 책임별로 7개 하위 패키지로 구성됩니다.
-
 ```
 SafeWalkNav/
-├── shared/                                 # ⭐ KMM 공통 모듈 (Android + iOS 공통)
-│   └── src/
-│       ├── commonMain/.../navigation/
-│       │   ├── NavigationManager.kt        # 최상위 오케스트레이터 (1500+ LOC)
-│       │   │
-│       │   ├── platform/                   # 플랫폼 추상화 (expect/actual)
-│       │   │   ├── Logger.kt
-│       │   │   ├── Time.kt
-│       │   │   └── GpsLocation.kt
-│       │   │
-│       │   ├── geo/                        # 좌표·방위·필터 수학 (순수 함수)
-│       │   │   ├── BearingMath.kt          #   bearing / angleDiff / distanceBetween
-│       │   │   ├── CrossTrack.kt           #   cross-track error 계산
-│       │   │   ├── KalmanHeading.kt        #   ⭐ Circular Kalman Filter
-│       │   │   └── ClockDirection.kt       #   "3시 방향" 시계 안내
-│       │   │
-│       │   ├── tmap/                       # TMap REST API
-│       │   │   ├── TMapApiClient.kt        #   Ktor 기반 호출
-│       │   │   ├── TMapRoute.kt            #   Route / Waypoint / Segment / LatLng
-│       │   │   └── POIResult.kt
-│       │   │
-│       │   ├── route/                      # 경로 위험도·안내 전략
-│       │   │   ├── RiskScoreCalculator.kt
-│       │   │   ├── SegmentAnalyzer.kt
-│       │   │   └── GuidanceStrategy.kt
-│       │   │
-│       │   ├── signal/                     # 서울 T-data 신호등 API
-│       │   │   ├── SignalApiClient.kt
-│       │   │   ├── SeoulTrafficSignalLocationApiClient.kt
-│       │   │   ├── TrafficSignalLocation.kt
-│       │   │   ├── TrafficSignalMatcher.kt   #   ⭐ 4단계 매칭 알고리즘
-│       │   │   ├── TrafficLightCountdownService.kt
-│       │   │   └── TrafficSignalRemainingTimeParser.kt
-│       │   │
-│       │   ├── walking/                    # 보행자 행동·로깅·상수
-│       │   │   ├── WalkingConstants.kt
-│       │   │   ├── WalkingDiagnostic.kt    #   쏠림 진단
-│       │   │   ├── CrosswalkGuard.kt       #   ⭐ 횡단보도 zone 게이팅
-│       │   │   └── HeadingLogger.kt
-│       │   │
-│       │   └── tbfw/                       # TBFW 알고리즘 (Trust-Based Forward Waypoint)
-│       │       ├── TrustBasedNavigator.kt
-│       │       ├── TrustScoreCalculator.kt
-│       │       ├── ForwardOnlyTracker.kt
-│       │       ├── RouteAnnotator.kt       #   ⭐ 경로 곡선/회전 사전 분류
-│       │       ├── PathAnnotation.kt
-│       │       ├── MessageBuilder.kt
-│       │       └── NavigatorConfig.kt
-│       │
-│       ├── androidMain/.../navigation/     # Android 전용 actual 구현
-│       ├── iosMain/.../navigation/         # iOS 전용 actual 구현
-│       └── commonTest/                     # KMP 공통 테스트
+├── shared/                                  # ⭐ KMM 공통 모듈 (Android + iOS)
+│   └── src/commonMain/.../navigation/
+│       ├── NavigationManager.kt             # 최상위 오케스트레이터
+│       ├── platform/                        # expect/actual 추상화
+│       │   ├── Logger.kt  Time.kt  GpsLocation.kt
+│       ├── geo/                             # 좌표·방위·필터 수학 (순수 함수)
+│       │   ├── BearingMath.kt               #   bearing / angleDiff / distance
+│       │   ├── CrossTrack.kt                #   cross-track error
+│       │   ├── KalmanHeading.kt             #   Circular Kalman 필터
+│       │   ├── RouteBearingProfile.kt
+│       │   └── ClockDirection.kt            #   "3시 방향" 시계 안내
+│       ├── tmap/                            # TMap 보행자 경로 REST API
+│       │   ├── TMapApiClient.kt  TMapRoute.kt  POIResult.kt
+│       ├── signal/                          # 서울 T-data 신호등 API
+│       │   ├── SignalApiClient.kt
+│       │   ├── SeoulTrafficSignalLocationApiClient.kt
+│       │   ├── TrafficSignalMatcher.kt      #   4단계 매칭 (반대편 우선)
+│       │   ├── TrafficSignalRemainingTimeParser.kt
+│       │   └── TrafficIntersectionParser.kt  TrafficSignalLocation.kt
+│       ├── walking/
+│       │   ├── CrosswalkGuard.kt            #   횡단보도 Zone Gating (25m)
+│       │   └── HeadingLogger.kt             #   CSV 로깅 인터페이스
+│       ├── route/RiskScoreCalculator.kt
+│       ├── audio/SpatialBeeper.kt           # 스테레오 비프 (expect/actual)
+│       └── tbfw/                            # 경로 사전 안내
+│           ├── RouteAnnotator.kt            #   곡선/회전 사전 분류
+│           ├── AnnouncementSelector.kt      #   안내 시점 선택
+│           ├── MessageBuilder.kt  PathAnnotation.kt  NavigatorConfig.kt
 │
-├── androidApp/                             # ⭐ 안드로이드 앱
-│   ├── libs/                               #   TMap SDK aar (gitignored, 직접 배치)
-│   ├── google-services.json                #   Firebase 설정 (gitignored)
-│   └── src/main/
-│       ├── AndroidManifest.xml
-│       ├── java/com/example/safewalknav/
-│       │   ├── MainActivity.kt             #   UI / 센서 / TTS / STT 오케스트레이터
-│       │   ├── ml/
-│       │   │   ├── TrafficLightDetector.kt #   ⭐ TFLite + NNAPI YOLOv11 추론
-│       │   │   └── BoundingBoxOverlay.kt   #   시연용 bbox 시각화
-│       │   └── location/LocationTracker.kt
-│       └── res/
+├── androidApp/                              # ⭐ Android 앱
+│   └── src/main/java/com/example/safewalknav/
+│       ├── MainActivity.kt                  # UI/센서/오디오/TTS/STT 오케스트레이터
+│       ├── ml/                              # 신호등 검출
+│       │   ├── TrafficLightDetector.kt      #   TFLite (NNAPI) 추론
+│       │   ├── TrafficLightAnalyzer.kt      #   CameraX ImageAnalysis
+│       │   └── BoundingBoxOverlay.kt        #   시연용 bbox 시각화
+│       ├── onboarding/                      # 출발 전 방향 정렬
+│       │   ├── AutoOnboardingCoordinator.kt
+│       │   ├── HeadingSensor.kt  PoseSensor.kt
+│       ├── traffic/                         # 신호등 위치 로컬 캐시 (Room)
+│       ├── location/LocationTracker.kt      # FusedLocationProvider
+│       └── compass/CompassView.kt
 │
-├── iosApp/                                 # ⭐ iOS 앱 (SwiftUI, 화면 구현)
+├── iosApp/                                  # ⭐ iOS 앱 (SwiftUI) — UI 재설계 중
 │   └── iosApp/
-│       ├── Navigation/                     #   메인 내비게이션 화면
-│       ├── TBFW/                           #   TBFW 데모 화면
-│       ├── Location/                       #   CoreLocation 래퍼
-│       └── ML/                             #   CoreML (서울임팩트 단계에서 통합 예정)
+│       ├── AppDependencies.swift            # DI 컨테이너
+│       ├── ML/TrafficLightDetector.swift    # CoreML + Vision 추론
+│       ├── Navigation/AutoOnboardingCoordinator.swift
+│       ├── Location/  Sensors/  Audio/  Traffic/  ViewModels/  Debug/
+│       └── CameraPreview.swift
 │
-├── tools/
-│   ├── heading_analysis.py                 #   Kalman Before/After 시각화
-│   └── generate_dummy_data.py
-│
-├── settings.gradle.kts
-├── build.gradle.kts                        # 루트 — KMP/AGP 플러그인 선언
-├── gradle.properties                       # KMM 옵션 + 메모리 설정
-├── local.properties                        # API Key (gitignored)
-└── keystore.properties                     # Release 서명 (gitignored)
+├── ml_experiments/                          # YOLO 학습·평가 스크립트 (gitignored)
+├── models/                                  # 학습된 모델 원본 (gitignored)
+├── docs/                                    # 테스트 가이드·알고리즘 문서·설문지
+├── settings.gradle.kts                      # :androidApp, :shared
+└── local.properties                         # API 키 (gitignored)
 ```
-
----
-
-## 알고리즘 핵심
-
-- **Circular Kalman Filter** (`geo/KalmanHeading.kt`) — bearing(원형각)을 sin/cos 두 직교 성분으로 분해 후 각 성분에 1D Kalman 적용. 350°/10° 같은 경계 문제 회피. GPS accuracy 를 measurement noise 로 동적 사용
-- **TrafficSignalMatcher 4단계 정렬** (`signal/TrafficSignalMatcher.kt`) — (1) GPS 반경 50m 후보 추출 → (2) 전방 90° 우선 → (3) TMap 경로상 횡단보도 거리 가중치 → (4) 반대편 신호등 우선
-- **RouteAnnotator** (`tbfw/RouteAnnotator.kt`) — 경로 waypoint 시퀀스를 사전 스캔해 SHARP_TURN / TURN / CURVE / SLIGHT_CURVE 로 분류. 도달 거리(15~30m 전)에 맞춰 미리 음성 안내
-- **CrosswalkGuard zone 게이팅** (`walking/CrosswalkGuard.kt`) — TMap 횡단보도 반경 25m 이내 진입 시에만 카메라·ML 활성화 (Layer 1 안전 정책)
-- **6-Layer Defense-in-Depth 안전 설계** — Confidence 0.5 임계, Bounding Box 화면비 6% 이상, 3-Frame 안정성 필터, 점멸(Flicker) 감지 시 6초 안내 차단
-- **Forward-Only Waypoint Selection** (`tbfw/ForwardOnlyTracker.kt`) — 한 번 지나간 waypoint 는 다시 잡지 않음 (GPS 튀김으로 인한 안내 혼선 방지)
 
 ---
 
@@ -157,80 +104,64 @@ SafeWalkNav/
 | Kotlin | 1.9.22 |
 | Android Gradle Plugin | 8.2.0 |
 | Gradle | 8.2 |
-| Android SDK | minSdk 26, targetSdk 34, compileSdk 34 |
+| Android SDK | minSdk 26 / targetSdk 34 / compileSdk 34 |
 | JDK | 17 |
 | Ktor | 2.3.7 |
-| kotlinx-serialization | 1.6.2 |
-| kotlinx-coroutines | 1.7.3 |
-| TensorFlow Lite | 2.14.0 |
-| Room | 2.6.1 |
+
+- **Android 빌드**: Windows / macOS / Linux 어디서나 가능
+- **iOS 빌드**: **macOS + Xcode 15+ 필수** (Kotlin/Native가 ARM64 framework를 생성)
 
 ---
 
 ## 설치 및 빌드 (Android)
 
-### 0. 프로젝트 위치 — OneDrive 외부 권장
+### 1. Clone
 
-OneDrive 안에 두면 Gradle build/ 폴더가 동기화되면서 빌드 충돌이 자주 발생합니다. `C:\Dev\SafeWalkNav` 같은 외부 경로에 clone 권장:
+OneDrive 안에 두면 Gradle `build/` 동기화 충돌이 자주 발생합니다. **`C:\Dev\SafeWalkNav` 같은 외부 경로** 권장.
 
 ```bash
-mkdir -p /c/Dev
-cd /c/Dev
 git clone https://github.com/monggu03/SafeWalkNav.git
 cd SafeWalkNav
 ```
 
-### 1. TMap SDK 다운로드
-
-라이선스 정책상 SDK `.aar` 파일은 저장소에 포함되어 있지 않습니다. [TMap 개발자센터](https://tmapapi.tmapmobility.com/) 에서 직접 받으세요. `androidApp/libs/` 디렉토리에 다음 파일을 배치:
-
-```
-androidApp/libs/
-├── vsm-tmap-sdk-v2-android-2.0.0.aar
-└── tmap-sdk-3.5.aar
-```
+> TMap **SDK(.aar)는 필요 없습니다.** 지도 화면을 쓰지 않고 경로 REST API만 사용하므로 SDK 의존을 제거했습니다.
 
 ### 2. API 키 등록
 
-[TMap 개발자센터](https://tmapapi.tmapmobility.com/) 와 [서울 열린데이터광장](https://data.seoul.go.kr/) 에서 키를 발급받아 프로젝트 루트의 `local.properties` 에 추가:
+[TMap 개발자센터](https://tmapapi.tmapmobility.com/)와 [서울 열린데이터광장](https://data.seoul.go.kr/)에서 키를 발급받아 루트의 `local.properties`에 추가합니다.
 
 ```properties
 TMAP_APP_KEY=발급받은_TMap_앱_키
 SEOUL_API_KEY=발급받은_서울_공공데이터_키
 T_DATA_API_KEY=발급받은_서울_T-data_키
+SEOUL_API_KEY=발급받은_서울_열린데이터_키
 ```
 
 `local.properties` 는 `.gitignore` 에 포함되어 커밋되지 않습니다.
 
 ### 3. Firebase 설정
 
-[Firebase Console](https://console.firebase.google.com/) 에서 프로젝트의 `google-services.json` 을 받아 `androidApp/` 폴더에 직접 배치합니다. 이 파일도 `.gitignore` 로 처리되어 커밋되지 않습니다.
+[Firebase Console](https://console.firebase.google.com/)에서 `google-services.json`을 받아 **`androidApp/` 폴더에 배치**합니다. 이 파일도 gitignore 처리됩니다.
 
 ### 4. Release 빌드 (선택)
 
-Release 빌드를 직접 만들려면 keystore 가 필요합니다. 프로젝트 루트에 `keystore.properties` 작성:
-
-```properties
-storeFile=safewalknav-release.keystore
-storePassword=...
-keyAlias=safewalknav
-keyPassword=...
-```
-
-`keystore.properties` 가 없으면 빌드는 가능하나 unsigned APK 가 생성되어 설치 시 거부됩니다 (조건부 signing 적용).
-
-### 5. 빌드
-
-Android Studio 에서 프로젝트를 열고 Sync 후 실행. CLI 빌드:
-
 ```bash
-./gradlew :androidApp:assembleDebug    # Debug 빌드
-./gradlew :androidApp:assembleRelease  # Release 빌드 (서명됨)
+./gradlew :androidApp:assembleDebug
 ```
 
-APK 출력 경로:
-- Debug: `androidApp/build/outputs/apk/debug/androidApp-debug.apk`
-- Release: `androidApp/build/outputs/apk/release/androidApp-release.apk`
+출력: `androidApp/build/outputs/apk/debug/androidApp-debug.apk`
+
+> **Release 서명**: `keystore.properties`가 존재할 때만 release signing이 활성화됩니다(`hasReleaseSigning` 플래그). 없으면 debug 서명으로 빌드됩니다.
+
+---
+
+## 설치 및 빌드 (iOS)
+
+1. macOS + Xcode 15+
+2. `./gradlew :shared:assembleSharedDebugXCFramework` — KMP framework 생성
+3. `iosApp/iosApp.xcodeproj` 열고 실기기/시뮬레이터에서 Run
+4. `iosApp/iosApp/Secrets.plist` 생성 후 `TMapAppKey` / `TDataApiKey` / `SeoulApiKey` 입력 (gitignored)
+5. 시뮬레이터 위치 재생이 필요하면 `docs/gpx/*.gpx`를 Xcode의 **Debug → Simulate Location**으로 주입
 
 ---
 
@@ -240,7 +171,7 @@ APK 출력 경로:
 ./gradlew :shared:allTests
 ```
 
-`commonTest/.../` 아래 `RouteAnnotatorTest`, `TrustBasedNavigatorTest`, `CrosswalkGuardTest`, `TrafficSignalMatcherTest` 등이 알고리즘 핵심을 커버합니다.
+`shared/src/commonTest/` 아래 `RouteAnnotatorTest`, `AnnouncementSelectorTest`, `MessageBuilderTest`, `TrafficSignalMatcherTest`, `CrosswalkGuardTest` 가 알고리즘 핵심을 커버합니다.
 
 ---
 
@@ -248,12 +179,11 @@ APK 출력 경로:
 
 | 권한 | 용도 |
 |---|---|
-| `ACCESS_FINE_LOCATION` / `ACCESS_COARSE_LOCATION` | GPS 위치 추적, 횡단보도 zone 감지 |
-| `INTERNET` / `ACCESS_NETWORK_STATE` | TMap / 서울 T-Data REST API |
-| `CAMERA` | 신호등 인식 AI 추론 |
-| `VIBRATE` | 진동 피드백 (방향 보정, R→G 전환) |
-| `RECORD_AUDIO` | STT(흔들기 호출) |
-| `FOREGROUND_SERVICE` | 백그라운드 TTS / GPS |
+| `ACCESS_FINE_LOCATION` / `ACCESS_COARSE_LOCATION` | GPS 위치 |
+| `CAMERA` | 신호등 인식 (횡단보도 25m 이내에서만 활성화) |
+| `INTERNET` / `ACCESS_NETWORK_STATE` | TMap · 서울 T-data REST API |
+| `VIBRATE` | 진동 피드백 |
+| `FOREGROUND_SERVICE` | 백그라운드 TTS |
 
 ---
 
@@ -261,21 +191,19 @@ APK 출력 경로:
 
 | 영역 | 기술 |
 |------|------|
-| 언어 | Kotlin (Android + 공통), Swift (iOS), Python (모델 학습·분석) |
-| 멀티플랫폼 | Kotlin Multiplatform Mobile (KMM, expect/actual 패턴) |
-| AI 모델 | YOLOv11n + P2 Head (자체 yaml 설계, hybrid_P2_head.yaml) |
-| ML 런타임 | TFLite 2.14 + Android NNAPI delegate (Float16 양자화 5.6 MB) |
-| 학습 환경 | Ultralytics + Roboflow pedestrian-traffic-light v1, Google Colab |
-| HTTP | Ktor Client (Android: OkHttp, iOS: Darwin) |
-| JSON | kotlinx-serialization |
-| 비동기 | Kotlin Coroutines + Flow + StateFlow |
-| 시간 | kotlinx-datetime |
-| 지도 | TMap SDK (Android), Apple MapKit (iOS) |
-| GPS / 센서 | FusedLocationProvider, SensorManager (Android), CoreLocation·CoreMotion (iOS) |
-| 데이터 | Room 2.6.1 (신호등 위치 캐시) |
-| TTS / STT | Android TextToSpeech / RecognizerIntent |
-| 분석·모니터링 | Firebase Analytics (5종 커스텀 이벤트) + 자체 walk_log |
+| 언어 | Kotlin (Android + 공통), Swift (iOS), Python (ML 실험) |
+| 멀티플랫폼 | Kotlin Multiplatform Mobile (expect/actual) |
+| HTTP | Ktor Client (Android: OkHttp / iOS: Darwin) |
+| 직렬화 | kotlinx-serialization |
+| 비동기 | Coroutines + Flow |
+| ML | **YOLOv11n + P2 Head** — TFLite Float16 + NNAPI (Android) / CoreML + Vision (iOS) |
+| 로컬 캐시 | Room (Android) / JSON 캐시 (iOS) |
+| 좌표 변환 | proj4j (EPSG:5186 → WGS84) |
+| GPS · 센서 | FusedLocationProvider · SensorManager (Android) / CoreLocation · CoreMotion (iOS) |
+| TTS · STT | TextToSpeech · SpeechRecognizer (Android) / AVSpeechSynthesizer · SFSpeechRecognizer (iOS) |
 | 배포 | GitHub Releases (signed APK), Firebase App Distribution |
+
+---
 
 ---
 
@@ -286,44 +214,51 @@ APK 출력 경로:
 - **Depth Anything V2 단안 깊이 추정** — 줄자 실측 결과 5m 이내에서만 신뢰 가능, 7m 이상에서 51%+ 오차 + 거리 역전 현상. 시속 50km 차량 회피용 인식거리(40~60m) 와 괴리. 추가로 사용자 인터뷰 결과 *위험 탐지보다 내비게이션·신호등이 더 중요* 라는 응답이 일관되어 전면 폐기.
 - **IMU heading 기반 방위각** — 정지 상태는 안정적이나 보행 중 재현성 부족 (동일 조건 4회 보행 시 급변율 3.9~18.1% 편차). 자력계 기반 heading 의 본질적 한계. GPS Kalman heading 단일 소스로 일원화.
 
+- **YOLOv11n + P2 Head** — 기본 YOLOv11n은 P3/P4/P5에서만 검출해 원거리 신호등(작은 객체)에 약합니다. 고해상도 P2 레벨(stride 4) 검출 헤드를 추가해 원거리 검출률을 baseline 14% → **26.4% (+12.4%p)** 로 끌어올렸습니다(50m급 시뮬레이션, IoU≥0.75). Float16 양자화로 모델 크기 **5.6 MB**.
+- **Circular Kalman Filter** (`geo/KalmanHeading.kt`) — bearing(원형각)을 sin/cos 두 성분으로 분해해 각각 1D Kalman을 적용. 359°/0° 경계 문제를 회피하며, GPS accuracy를 measurement noise로 동적 사용합니다.
+- **신호등 4단계 매칭** (`signal/TrafficSignalMatcher.kt`) — ①경로 방향 정렬 → ②사용자 10m 이내 신호등 후순위(카메라에 안 잡힘) → ③횡단보도 거리 최소 → ④방위각 차 최소. 광폭 도로(10차선 35~50m)의 반대편 신호등을 놓치지 않습니다.
+- **횡단보도 Zone Gating** (`walking/CrosswalkGuard.kt`) — 횡단보도 25m 이내에서만 카메라·추론을 활성화. 상시 구동이 아니므로 배터리·발열 부담이 낮습니다.
+- **Route Annotation** (`tbfw/RouteAnnotator.kt`) — 경로를 사전 스캔해 SHARP_TURN / TURN / CURVE / SLIGHT_CURVE로 분류하고 도달 15~25m 전에 미리 안내합니다. 임계값은 `NavigatorConfig`로 튜닝 가능.
+
+### 검증 후 폐기한 접근
+
+정량 검증 결과 기대에 미치지 못해 **의도적으로 제거**한 기능들입니다.
+
+| 폐기 | 이유 |
+|---|---|
+| **단안 깊이 추정** (Depth Anything V2) | 줄자 실측 오차 7m 34% / 10m 61%, 거리 역전 현상. 차량 회피에 필요한 40~60m 인식과 괴리 |
+| **IMU heading 기반 보행 방향 보정** | 정지 시엔 안정적이나 보행 중 재현성 없음(동일 조건 4회 급변율 3.9~18.1%). 자력계 기반 heading의 본질적 한계 |
+| **보행 중 좌우 방향 보정** | 흰지팡이 좌우 탐지 보행은 *정상* 보행인데 이탈로 오판정. 발화 폭주 유발 |
+
+> IMU(나침반)는 **신호등 조준용 시계 방향 안내**에만 사용합니다 — 정지 상태의 1회성 방향 판정이라 위 한계에 해당하지 않습니다.
+
 ---
 
 ## 후속 프로젝트 — 서울임팩트프로젝트
 
-본 capstone 결과물은 **서울임팩트프로젝트 (2026.04 ~ 2026.10)** 의 사회혁신 파트너 프로젝트로 선정되어 후속 개발이 진행 중입니다.
+동국대학교 컴퓨터공학과 CSC4004 공개SW프로젝트 1조 (지도: 석문기 교수님)
 
-후속 단계에서는:
-- iOS 풀 네이티브 + CoreML 통합으로 **App Store 정식 출시** 목표
-- **BLE 음향신호기 광고 수신** (경찰청 표준 사양) + 서울시 T-Data 잔여시간 API 결합
-- 한국시각장애인연합회 협력 베타테스터 10명 외출 검증 + PSEQ 자기효능감 측정
-- 9월 SOVAC 2026 (코엑스) 부스 시연 + 임팩트 보고서 발간
-
----
-
-## 팀 — 동국대학교 컴퓨터공학과 1조
-
-| 이름 | 담당 | GitHub |
-|---|---|---|
-| **이도윤** (팀장) | Android · YOLOv11 모델 설계 · KMM 아키텍처 · 6-Layer 안전 시스템 | [@monggu03](https://github.com/monggu03) |
-| 김민성 | Circular Kalman Filter · GPS bearing · accuracy gating | — |
-| 김수영 | 서울시 신호등 공공데이터 API · TrafficSignalMatcher · 시각장애인 인터뷰 | — |
-| 이지민 | iOS SwiftUI · RouteAnnotator (Waypoint 알고리즘) · Depth/IMU 정량 검증 | [@jiminlyy](https://github.com/jiminlyy) |
-
-담당교수: 석문기 교수님
+- **이도윤** ([@monggu03](https://github.com/monggu03)) — 팀장 / Android · 알고리즘 · KMM
+- **김민성** — GPS · Kalman Filter
+- **김수영** — iOS
+- **이지민** — AI (YOLOv11n + P2 Head 학습)
 
 ---
 
 ## 라이선스
 
-신호등 모델 학습 시 Ultralytics YOLOv11 의존성으로 **AGPL-3.0** 라이선스가 적용됩니다.
+본 프로젝트는 **GNU AGPL-3.0** 라이선스를 따릅니다. 전문은 [`LICENSE`](./LICENSE) 파일을 참조하세요.
 
----
+신호등 인식 모델이 [Ultralytics YOLO](https://github.com/ultralytics/ultralytics)(AGPL-3.0)를 기반으로 하며, 학습된 모델 가중치가 본 저장소에 포함되어 있으므로 AGPL-3.0의 소스 공개 의무가 적용됩니다.
 
-## 참고 자료
+> 상용·폐쇄 배포를 원하는 경우 Ultralytics의 별도 엔터프라이즈 라이선스가 필요합니다.
 
-- 한국시각장애인연합회 (2023). 시각장애인 보행 안전 실태 보고서 — 음향신호기 적정 설치 28.0%, 미설치 45.3%
-- 보건복지부 (2023). 장애인 실태조사
-- Ultralytics. YOLOv11 Documentation
-- Roboflow. Pedestrian Traffic Light Dataset v1
-- SK Telecom. TMap REST API 개발자 가이드
-- Clark-Carter, D. D., Heyes, A. D., & Howarth, C. I. (1987). *The efficiency and walking speed of visually impaired people*. Ergonomics
+### 서드파티 고지
+
+| 구성요소 | 라이선스 |
+|---|---|
+| Ultralytics YOLO (YOLOv11n + P2 Head) | AGPL-3.0 |
+| TensorFlow Lite | Apache-2.0 |
+| Ktor · kotlinx-serialization · Coroutines | Apache-2.0 |
+| AndroidX (CameraX, Room) | Apache-2.0 |
+| proj4j | Apache-2.0 |

@@ -44,8 +44,9 @@ kotlin {
             implementation("io.ktor:ktor-client-content-negotiation:$ktorVersion")
             implementation("io.ktor:ktor-serialization-kotlinx-json:$ktorVersion")
 
-            // 🆕 TrafficLightCountdownService 쿨다운 시간 계산용
-            implementation("org.jetbrains.kotlinx:kotlinx-datetime:$kotlinxDatetimeVersion")
+            // kotlinx-datetime 제거 (2026-06-15 정리) — 유일 사용처였던
+            // TrafficLightCountdownService(미배선 죽은 클래스) 삭제됨.
+            // 잔여시간 쿨다운은 NavigationManager.signalApiCooldownMs 가 담당.
         }
         commonTest.dependencies {
             implementation(kotlin("test"))

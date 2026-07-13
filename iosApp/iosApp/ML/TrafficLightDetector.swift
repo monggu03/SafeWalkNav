@@ -85,11 +85,6 @@ final class TrafficLightDetector: NSObject, ObservableObject {
         setupAudio()
     }
 
-    /// AppDependencies에서 나중에 TtsManager를 주입할 때
-    func attach(tts: TtsManager) {
-        self.tts = tts
-    }
-
     // MARK: - Setup
 
     private func setupModel() {
