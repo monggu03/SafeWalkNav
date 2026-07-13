@@ -502,15 +502,6 @@ final class NavigationViewModel: ObservableObject {
         tts.speak(message, priority: priority, display: true)
     }
 
-    // MARK: - 횡단보도 감지
-
-    private func parseCrosswalkFromDebugMessage() -> Bool {
-        guard let debug = navigationManager.debugMessage.value as? String else {
-            return false
-        }
-        return debug.contains("횡단보도=true")
-    }
-
     // MARK: - 지도 시각화 갱신
 
     /// NavigationManager.currentRoute + annotations 를 Swift 친화 형태로 변환.

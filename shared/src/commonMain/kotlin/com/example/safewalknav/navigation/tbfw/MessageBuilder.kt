@@ -47,7 +47,13 @@ object MessageBuilder {
      * direction == NONE 이면 빈 문자열을 돌려준다.
      */
     fun buildImminentAnnounce(annotation: PathAnnotation): String {
-        return ""
+        val dir = when (annotation.direction) {
+            TurnDirection.LEFT -> "왼쪽"
+            TurnDirection.RIGHT -> "오른쪽"
+            TurnDirection.NONE -> return ""
+        }
+        if (annotation.type == PathSegmentType.STRAIGHT) return ""
+        return "지금 ${dir}으로"
     }
 
     /**

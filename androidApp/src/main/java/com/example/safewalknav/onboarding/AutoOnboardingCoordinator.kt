@@ -49,6 +49,9 @@ class AutoOnboardingCoordinator(
     context: Context,
     private val scope: CoroutineScope,
     private val speak: (String) -> Unit,
+    // 실시간 방향 비프 콜백. diffDeg = 목표bearing - 현재heading (-180~180).
+    // 좌우 패닝·피치 계산은 호출측(MainActivity)이 담당. 기본값 no-op.
+    private val beep: (diffDeg: Double) -> Unit = {},
     private val config: NavigatorConfig = NavigatorConfig.defaults(),
 ) {
 
@@ -73,6 +76,10 @@ class AutoOnboardingCoordinator(
 
     private fun onPoseUpdate(isFlat: Boolean) {
         if (stage == Stage.FLAT_POSE && isFlat) {
+            // 자세가 즉시 평평해도 최소 dwell 을 둬서 "평평하게 들어주세요" 멘트가
+            // 끝날 시간을 준다 (멘트 와다다 방지).
+            val elapsed = System.currentTimeMillis() - flatPoseStartMs
+            if (elapsed < MIN_FLAT_POSE_MS) return
             poseSensor.stop()
             startRotatingStage()
         }
@@ -85,6 +92,8 @@ class AutoOnboardingCoordinator(
     private var rotationRetries: Int = 0
     private var onCompleted: (() -> Unit)? = null
     private var stageTimerJob: Job? = null
+    private var lastHeadingLogMs: Long = 0L
+    private var lastBeepMs: Long = 0L
 
     /**
      * 온보딩 시작.
@@ -151,12 +160,17 @@ class AutoOnboardingCoordinator(
         stageTimerJob?.cancel()
         stage = Stage.FLAT_POSE
         flatPoseStartMs = System.currentTimeMillis()
+        Log.d(TAG, "→ FLAT_POSE (poseAvailable=${poseSensor.isAvailable})")
         speak("스마트폰을 평평하게 들어주세요.")
 
         if (!poseSensor.isAvailable) {
-            // TYPE_GRAVITY 없는 디바이스 — 자세 단계 생략
-            Log.d(TAG, "TYPE_GRAVITY 없음 — 자세 단계 건너뜀")
-            startRotatingStage()
+            // TYPE_GRAVITY 없는 디바이스 — 자세 감지는 생략하되, "평평하게" 멘트가 끝날
+            // 시간을 주려고 최소 dwell 후 회전 단계로 (멘트 와다다 방지).
+            Log.d(TAG, "TYPE_GRAVITY 없음 — ${MIN_FLAT_POSE_MS}ms 후 회전 단계")
+            stageTimerJob = scope.launch {
+                delay(MIN_FLAT_POSE_MS)
+                if (stage == Stage.FLAT_POSE) startRotatingStage()
+            }
             return
         }
 
@@ -179,6 +193,7 @@ class AutoOnboardingCoordinator(
         stageTimerJob?.cancel()
         stage = Stage.ROTATING
         rotatingStartMs = System.currentTimeMillis()
+        Log.d(TAG, "→ ROTATING (targetBearing=${targetBearing.toInt()}, headingAvailable=${headingSensor.isAvailable})")
         speak("천천히 한 바퀴 도세요.")
 
         if (!headingSensor.isAvailable) {
@@ -198,7 +213,30 @@ class AutoOnboardingCoordinator(
         var diff = targetBearing - trueHeading
         if (diff > 180) diff -= 360
         if (diff < -180) diff += 360
-        val inTolerance = abs(diff) < config.initialHeadingToleranceDeg
+        val absDiff = abs(diff)
+        val inTolerance = absDiff < config.initialHeadingToleranceDeg
+
+        // 1초에 한 번만 현재 상태 로그 (진단용).
+        val nowLog = System.currentTimeMillis()
+        if (nowLog - lastHeadingLogMs > 1000) {
+            lastHeadingLogMs = nowLog
+            Log.d(TAG, "heading=${trueHeading.toInt()} target=${targetBearing.toInt()} diff=${diff.toInt()} inTol=$inTolerance stage=$stage")
+        }
+
+        // 실시간 방향 비프 — 회전/확정 중, 목표에 가까울수록 빠르게 울려 "멈출 타이밍" 을
+        // 귀로 알 수 있게 한다 (주차센서 방식). 좌우 패닝·피치는 beep 콜백이 diff 로 계산.
+        if (stage == Stage.ROTATING || stage == Stage.CONFIRMING) {
+            val beepInterval = when {
+                absDiff < config.initialHeadingToleranceDeg -> 250L  // 정면 근처 — 빠르게
+                absDiff < 45.0 -> 450L
+                absDiff < 90.0 -> 700L
+                else -> 1000L                                        // 멀음 — 느리게
+            }
+            if (nowLog - lastBeepMs >= beepInterval) {
+                lastBeepMs = nowLog
+                beep(diff)
+            }
+        }
 
         when (stage) {
             Stage.ROTATING -> {
@@ -215,7 +253,13 @@ class AutoOnboardingCoordinator(
                     return
                 }
 
+                // "천천히 한 바퀴 도세요" 멘트가 끝나고 사용자가 실제로 돌 시간을 확보하기 위한
+                // 최소 회전 시간. 이 시간 전에는 우연히 방향이 맞아도 확정하지 않는다
+                // (회전 없이 즉시 "정면입니다" 방지).
+                if (elapsed < MIN_ROTATING_BEFORE_CONFIRM_MS) return
+
                 if (inTolerance) {
+                    Log.d(TAG, "→ CONFIRMING (rotating ${elapsed}ms 경과, diff=${diff.toInt()})")
                     stage = Stage.CONFIRMING
                     confirmStartMs = System.currentTimeMillis()
                     speak("방향이 맞습니다. 멈춰주세요.")
@@ -223,8 +267,9 @@ class AutoOnboardingCoordinator(
             }
 
             Stage.CONFIRMING -> {
-                if (!inTolerance) {
-                    // 1초 유지 실패 — ROTATING 복귀 (멈춤 멘트 재발화 X)
+                // 히스테리시스 — 작은 흔들림/오버슈트로 즉시 풀리지 않게, 허용오차의 2배를
+                // 벗어나야 ROTATING 으로 복귀한다 (확정이 안 잡히고 무한 회전하던 문제 완화).
+                if (absDiff > config.initialHeadingToleranceDeg * 2) {
                     stage = Stage.ROTATING
                     rotatingStartMs = System.currentTimeMillis()
                     return
@@ -232,6 +277,7 @@ class AutoOnboardingCoordinator(
 
                 val held = System.currentTimeMillis() - confirmStartMs
                 if (held >= CONFIRM_HOLD_MS) {
+                    Log.d(TAG, "정면 확정 → '정면입니다' (rotating 총 ${System.currentTimeMillis() - rotatingStartMs}ms)")
                     speak("정면입니다. 직진하세요.")
                     finish()
                 }
@@ -261,5 +307,9 @@ class AutoOnboardingCoordinator(
         private const val MAX_ROTATING_MS: Long = 15_000L
         private const val MAX_FLAT_POSE_MS: Long = 15_000L
         private const val MAX_ROTATION_RETRIES: Int = 1
+
+        // 멘트 페이싱 — 각 단계 멘트가 끝나고 사용자가 반응할 시간을 확보 (와다다·즉시확정 방지).
+        private const val MIN_FLAT_POSE_MS: Long = 2_500L              // 자세 단계 최소 유지
+        private const val MIN_ROTATING_BEFORE_CONFIRM_MS: Long = 3_000L // 회전 후 확정까지 최소 시간
     }
 }

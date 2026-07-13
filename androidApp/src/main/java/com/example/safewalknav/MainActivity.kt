@@ -54,6 +54,7 @@ import com.example.safewalknav.compass.CompassView
 import com.example.safewalknav.ml.BoundingBoxOverlay
 import com.example.safewalknav.ml.TrafficLightAnalyzer
 import com.example.safewalknav.ml.TrafficLightDetection
+import com.example.safewalknav.onboarding.AutoOnboardingCoordinator
 import com.example.safewalknav.ml.TrafficLightDetector
 import com.google.firebase.analytics.FirebaseAnalytics
 import com.google.firebase.analytics.ktx.analytics
@@ -166,6 +167,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private val LOCATION_PERMISSION_CODE = 1001
     private var trackingJob: Job? = null
+    private var onboardingCoordinator: AutoOnboardingCoordinator? = null
     private var ttsReady = false
     private var gpsReady = false
     private var welcomePlayed = false
@@ -211,7 +213,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // startNavLog 시점에 모두 reset, closeNavLog 시점에 walk_log 끝에 SUMMARY 블록으로 출력.
     // Capstone 발표 / 시각장애인 사용자 테스트 분석 / 슬라이드 정량 인용용.
     private var metricStartMs: Long = 0L
-    private var metricLeanCount = 0              // "치우쳤습니다"
     private var metricCurveCount = 0             // "휘어집니다" / "꺾습니다"
     private var metricCrosswalkAnnounceCount = 0 // "횡단보도가 있습니다" / "휴대폰을 세로로"
     private var metricMlRedCount = 0             // ANNOUNCED_RED 발화
@@ -230,7 +231,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun resetMetrics() {
         metricStartMs = System.currentTimeMillis()
-        metricLeanCount = 0
         metricCurveCount = 0
         metricCrosswalkAnnounceCount = 0
         metricMlRedCount = 0
@@ -260,7 +260,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         appendNavLog("이동 거리(GPS 누적): ${metricDistanceM.toInt()}m")
         appendNavLog("평균 속도: ${"%.2f".format(avgSpeed)} m/s")
         appendNavLog("--- 보행 안내 ---")
-        appendNavLog("lean 보정 발화: ${metricLeanCount}회")
         appendNavLog("곡선/회전 안내: ${metricCurveCount}회")
         appendNavLog("횡단보도 진입 안내: ${metricCrosswalkAnnounceCount}회")
         appendNavLog("재라우팅: ${metricRerouteCount}회")
@@ -584,19 +583,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 trafficSignals = emptyList()
             )
 
-        lifecycleScope.launch {
-
-            navigationManager.updateTrafficSignals(
-                loadTrafficSignalLocations()
-            )
-        }
-
-        /*lifecycleScope.launch {
-            navigationManager.fetchTrafficSignalData(
-                signalLat = 37.5547454,
-                signalLon = 127.1364893
-            )
-        }*/
+        // 2026-06-15 정리 — 신호등 위치 로딩이 여기서 한 번, 아래에서 또 한 번 실행되어
+        // 앱 시작 시 Room/네트워크 조회가 2회 발생하던 중복 제거. 아래 블록 하나로 통일.
 
         observeGuidance()
 
@@ -687,6 +675,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     override fun onDestroy() {
         super.onDestroy()
+        onboardingCoordinator?.stop()   // 센서 리스너 해제 (lifecycleScope 취소로는 unregister 안 됨)
+        onboardingCoordinator = null
         trackingJob?.cancel()
         autoRepeatJob?.cancel()
         beaconJob?.cancel()
@@ -1257,10 +1247,61 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
 
                 val summary = navigationManager.buildInitialSummary().ifEmpty { getRouteSummary() }
-                appendNavLog("Starting walking guidance immediately")
-                if (summary.isNotEmpty()) speakTTS(summary)
-                startLocationTracking()
-                startAutoRepeat()
+                // 주의: waypoints[0] 은 TMap "출발점"(= 현재 위치)이라 방위 계산이 무의미함
+                // (bearing(현재,현재) → 엉뚱한 값 → 회전 없이 즉시 "정면입니다" 버그).
+                // 현재 위치에서 8m 이상 떨어진 첫 waypoint 를 목표 방향 기준점으로 사용한다.
+                val firstWaypoint = run {
+                    val wps = navigationManager.currentRoute?.waypoints ?: emptyList()
+                    wps.firstOrNull { wp ->
+                        val dLat = (wp.lat - currentLocation.latitude) * 111320.0
+                        val dLon = (wp.lon - currentLocation.longitude) * 111320.0 *
+                            kotlin.math.cos(currentLocation.latitude * kotlin.math.PI / 180.0)
+                        kotlin.math.sqrt(dLat * dLat + dLon * dLon) >= 8.0
+                    } ?: wps.firstOrNull()
+                }
+
+                if (firstWaypoint != null) {
+                    // 안내 시작 직후 자동 온보딩 (iOS AutoOnboardingCoordinator 와 동일 흐름):
+                    // 요약 발화 → 평평 자세 → 회전 → 정면 일치 1초 유지 → 본격 보행 안내.
+                    // 요약 발화는 coordinator 가 담당하므로 여기선 speakTTS 하지 않는다.
+                    appendNavLog("AutoOnboarding 시작 (요약→자세→회전→정면)")
+                    android.util.Log.d(
+                        "Onboarding",
+                        "start — firstWp=(${firstWaypoint.lat}, ${firstWaypoint.lon}) " +
+                            "cur=(${currentLocation.latitude}, ${currentLocation.longitude})"
+                    )
+                    onboardingCoordinator?.stop()
+                    onboardingCoordinator = AutoOnboardingCoordinator(
+                        context = applicationContext,
+                        scope = lifecycleScope,
+                        speak = { msg -> speakTTS(msg) },
+                        // 실시간 방향 비프 — 기존 방향성 비콘 오디오 재사용.
+                        // 좌우 패닝으로 회전 방향, 정면(±15°)이면 높은 피치로 "멈춰" 신호.
+                        beep = { diffDeg ->
+                            val (l, r, facing) = computeStereoPan(diffDeg.toFloat())
+                            playStereoBeep(l, r, facing)
+                        },
+                    ).apply {
+                        start(
+                            summary = summary,
+                            currentLat = currentLocation.latitude,
+                            currentLon = currentLocation.longitude,
+                            firstWaypointLat = firstWaypoint.lat,
+                            firstWaypointLon = firstWaypoint.lon,
+                            onCompleted = {
+                                appendNavLog("AutoOnboarding 완료 → 보행 안내 시작")
+                                startLocationTracking()
+                                startAutoRepeat()
+                            },
+                        )
+                    }
+                } else {
+                    // waypoint 가 비어있는 예외적 경우 — 온보딩 생략하고 즉시 안내.
+                    appendNavLog("waypoint 없음 — 온보딩 생략, 즉시 안내")
+                    if (summary.isNotEmpty()) speakTTS(summary)
+                    startLocationTracking()
+                    startAutoRepeat()
+                }
             } else {
                 playToneError()
                 speakAndListenIdle("경로를 찾을 수 없습니다. 다른 목적지를 말씀해주세요.")
@@ -1306,7 +1347,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             param("destination_name", arrivedName)
             param("duration_sec", durationSec)
             param("distance_m", metricDistanceM.toLong())
-            param("lean_count", metricLeanCount.toLong())
             param("curve_count", metricCurveCount.toLong())
             param("crosswalk_announce_count", metricCrosswalkAnnounceCount.toLong())
             param("reroute_count", metricRerouteCount.toLong())
@@ -1338,6 +1378,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun stopNavigationFull() {
         appendNavLog("stopNavigationFull (사용자 중단 또는 음성 명령)")
         closeNavLog()
+        // 온보딩 도중 중단 시 coordinator 즉시 정리 (onCompleted 는 호출 안 됨 → 보행 안내 시작 안 함).
+        onboardingCoordinator?.stop()
+        onboardingCoordinator = null
         trackingJob?.cancel()
         stopAutoRepeat()
         stopBeacon()
@@ -1412,14 +1455,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                             "$accuracyText spd=$speedText dest=${dist.toInt()}m | $debugSnapshot"
                 )
 
-                // IMU + GPS Kalman heading 융합 진단 — 2026-05-31 추가.
-                // NavigationManager.fuseImuAndGps 가 매 sensor tick (~16Hz) 호출되며
-                // latestFusionDebug 를 갱신하지만, walk_log 에는 GPS tick 주기(500ms~2s)로만 기록해
-                // 파일 크기 폭주 방지. 외출 후 walk_log 에서 HEADING_FUSION 라인 grep 으로 융합 동작 검증.
-                val fusionDebug = navigationManager.latestFusionDebug
-                if (fusionDebug.isNotEmpty()) {
-                    appendNavLog("HEADING_FUSION $fusionDebug")
-                }
 
                 if (BuildConfig.DEBUG) {
                     updateCompactDebugGuidance()
@@ -1648,7 +1683,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                     // 정량 지표 — guidanceMessage 패턴으로 안내 종류 카운트.
                     when {
-                        message.contains("치우쳤습니다") -> metricLeanCount++
                         message.contains("휘어집니다") || message.contains("꺾습니다") -> metricCurveCount++
                         message.contains("횡단보도가 있습니다") ||
                                 message.contains("휴대폰을 세로로") -> metricCrosswalkAnnounceCount++
@@ -2698,3 +2732,4 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         return repository.getTrafficSignals()
     }
 }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
