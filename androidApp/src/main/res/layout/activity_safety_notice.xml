@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <!-- ========== 고지 화면 ========== -->
+    <LinearLayout
+        android:id="@+id/noticeContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="24dp">
+
+        <TextView
+            android:id="@+id/tvNotice"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:gravity="center_vertical"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:focusable="true"
+            android:text="SafeWalkNav는 보행을 돕는 보조 안내 시스템입니다. 실제 도로 상황과 다를 수 있으니, 흰지팡이와 주변 소리 등 평소의 판단을 함께 사용해 주세요. 안전한 이동의 최종 판단은 사용자 본인에게 있습니다." />
+
+        <Button
+            android:id="@+id/btnAgree"
+            android:layout_width="match_parent"
+            android:layout_height="88dp"
+            android:layout_marginTop="16dp"
+            android:text="동의하고 시작하기"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:textColor="#000000"
+            android:backgroundTint="#FFD700"
+            android:contentDescription="동의하고 시작하기. 두 번 탭하면 앱을 시작합니다." />
+
+        <Button
+            android:id="@+id/btnDecline"
+            android:layout_width="match_parent"
+            android:layout_height="72dp"
+            android:layout_marginTop="12dp"
+            android:text="동의하지 않음"
+            android:textSize="20sp"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#333333"
+            android:contentDescription="동의하지 않음. 두 번 탭하면 종료 안내 화면으로 이동합니다." />
+    </LinearLayout>
+
+    <!-- ========== 비동의 차단 화면 ========== -->
+    <LinearLayout
+        android:id="@+id/blockedContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:padding="24dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/tvBlocked"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:focusable="true"
+            android:text="동의하지 않으셔서 앱을 사용하실 수 없습니다." />
+
+        <Button
+            android:id="@+id/btnReconsider"
+            android:layout_width="match_parent"
+            android:layout_height="88dp"
+            android:text="다시 고지 보기"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:textColor="#000000"
+            android:backgroundTint="#FFD700"
+            android:contentDescription="다시 고지 보기. 두 번 탭하면 안내 고지 화면으로 돌아갑니다." />
+    </LinearLayout>
+</FrameLayout>
