@@ -52,7 +52,9 @@ object MessageBuilder {
         val dir = when (annotation.direction) {
             TurnDirection.LEFT -> "왼쪽"
             TurnDirection.RIGHT -> "오른쪽"
-            TurnDirection.NONE -> return ""
+            // STRAIGHT/UTURN/NONE 은 직전 좌우 안내 대상이 아님 → 발화 없음.
+            // (TurnDirection 은 PR#77 의 TurnMath 로 STRAIGHT·UTURN 이 추가돼 5개 값이 됨)
+            TurnDirection.STRAIGHT, TurnDirection.UTURN, TurnDirection.NONE -> return ""
         }
         if (annotation.type == PathSegmentType.STRAIGHT) return ""
         return "지금 ${dir}으로"
