@@ -70,6 +70,11 @@ import com.example.safewalknav.navigation.tmap.ArrivalState
 import com.example.safewalknav.navigation.NavigationManager
 import com.example.safewalknav.navigation.tmap.POIResult
 import com.example.safewalknav.navigation.signal.SignalApiClient
+import com.example.safewalknav.navigation.signal.SignalDecisionEngine
+import com.example.safewalknav.navigation.signal.SignalDecision
+import com.example.safewalknav.navigation.signal.SignalTransition
+import com.example.safewalknav.navigation.signal.SilentReason
+import com.example.safewalknav.navigation.signal.RawSignalDetection
 import com.example.safewalknav.navigation.tmap.TMapApiClient
 import com.example.safewalknav.navigation.toGpsLocation
 import com.google.android.gms.common.api.ResolvableApiException
@@ -372,22 +377,30 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     //
     // 발화 빈도:
     //   - 색 변경 시에만 TTS (반복 X)
-    //   - HEARTBEAT_INTERVAL_MS 마다 같은 색상 신호를 TTS 반복
+    //   - heartbeat 간격마다 같은 색상 신호를 TTS 반복 (SignalDecisionConfig.heartbeatIntervalMs)
     //
     // 검출 타임아웃:
-    //   - DETECTION_TIMEOUT_MS 이상 validated 검출 없으면 state reset.
+    //   - 일정 시간 validated 검출 없으면 state reset (SignalDecisionConfig.detectionTimeoutMs).
     //     이유: 사용자가 잠시 카메라 돌렸다가 다시 신호등 향하면 그 사이 신호가 바뀌었을 수 있음 →
-    //     이전 lastConfirmedColor 를 신뢰하지 않음.
-    private var currentColorCandidate: Int = -1   // 현재 안정성 필터에서 추적 중인 색
-    private var colorStreak: Int = 0              // 연속 검출 카운트
-    private var lastConfirmedColor: Int = -1      // 3-frame 확정 통과한 마지막 색
-    private var lastHeartbeatAt: Long = 0L        // 마지막 heartbeat 톤 시각
-    private var lastValidatedAt: Long = 0L        // 마지막 validated 검출 시각 (timeout 판정용)
-    private val RED_STABILITY_FRAMES = 2
-    private val GREEN_STABILITY_FRAMES = 3
-    private val GREEN_TRANSITION_STABILITY_FRAMES = 2
-    private val HEARTBEAT_INTERVAL_MS = 10_000L
-    private val DETECTION_TIMEOUT_MS = 10_000L
+    //     이전 확정색을 신뢰하지 않음.
+    //
+    // ⚠️ 위 상세 로직(임계·안정성·점멸·확정)은 모두 shared/SignalDecisionEngine 으로 이관됨.
+    //    아래 주석은 그 동작을 설명할 뿐, 여기(Android)에는 상태/상수가 없다.
+    // ──────────────────────────────────────────────────────────────────────
+    // 신호등 안내 결정 = 공유 엔진(shared/SignalDecisionEngine) 에 위임.
+    //
+    //   신뢰도 비대칭 필터(빨강0.25/초록0.45) · 크기 하한 · 3프레임 안정성 ·
+    //   점멸 감지 · 색 확정 상태기계 — 이 전부가 이제 shared/ 에 있다.
+    //   Android/iOS 가 이 하나를 공유하므로 두 플랫폼의 안전 동작이 갈라질 수 없다.
+    //   (예전엔 Android=상세 로직 / iOS=`confidence>=0.5` 한 줄 로 갈라져 있었음)
+    //
+    //   임계값의 유일한 원천은 SignalDecisionConfig 기본값이다. 여기서 상수를
+    //   따로 두지 않는다 — 두 벌이 존재하면 다시 갈라진다.
+    //
+    //   MainActivity 의 역할: 카메라 검출 → RawSignalDetection 변환 → 엔진 호출
+    //   → 결정(SignalDecision)을 부수효과(TTS·진동·Firebase·로그)로 변환.
+    // ──────────────────────────────────────────────────────────────────────
+    private val signalDecisionEngine = SignalDecisionEngine()
 
     // iOS TrafficLightDetector 와 동일한 미탐지 단계 안내.
     // AI가 켜진 상태에서 신호등을 계속 못 잡으면 3/6/9초에 한 번씩 카메라 조작 안내를 낸다.
@@ -397,25 +410,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private val NO_DET_STAGE2_MS = 6_000L
     private val NO_DET_STAGE3_MS = 9_000L
     private val NO_DET_SUPPRESS_PEAK_CONFIDENCE = 0.25f
-    private val GREEN_TRANSITION_MIN_CONFIDENCE = 0.55f
-    private val GREEN_OVER_RED_CONFIDENCE_MARGIN = 0.05f
     private val NO_DET_SPEECH_HOLD_AFTER_CAMERA_ENTRY_MS = 5_000L
     private var noDetectionSpeechHoldUntil: Long = 0L
     private val CROSSWALK_ENTRY_SPEECH_HOLD_MS = 4_500L
     private var crosswalkEntrySpeechHoldUntil: Long = 0L
     private var deferredSignalDirectionJob: Job? = null
 
-    // Flicker(점멸) 감지 — 한국 보행 신호 종료 직전 약 5~15초간 깜빡이는 phase 대응.
-    // 깜빡임 중에 "방금 초록불로 바뀌었습니다, 건너세요" 발화는 안전상 매우 위험 — 사용자가 건너기
-    // 시작하면 곧 빨강으로 바뀌어 위험. 그래서 transition 직후 또 transition 이 빠르게 일어나면
-    // "신호 깜빡입니다, 멈추세요" 로 전환하고 일정 시간 안내 락아웃.
-    private var lastTransitionAt: Long = 0L
-    private var flickerLockoutUntil: Long = 0L
-    private val MIN_PHASE_DURATION_MS = 4_000L   // 정상 신호 phase 는 최소 이 시간 지속
-    // 한국 보행 신호 정상 phase 는 보통 5초 이상이므로 4초 임계가 안전.
-    // 2026-05-29 walk_20260529_125126.log 분석에서 gap 3.1~3.08초 transition 이
-    // 정상으로 처리되어 점멸 phase 일부를 놓치는 케이스 발견 → 3000 → 4000 으로 상향.
-    private val FLICKER_LOCKOUT_MS = 6_000L      // flicker 감지 후 추가 안내 차단 기간
+    // Flicker(점멸) 감지 상태·임계는 SignalDecisionEngine 이 소유 (minPhaseDurationMs,
+    // flickerLockoutMs). 한국 보행 신호 종료 직전 깜빡임 phase 에서 "건너세요" 발화를 막는
+    // 안전 로직으로, 이제 iOS 와 공유된다.
 
     // 횡단보도 zone 게이팅 — NavigationManager.isInCrosswalkZone (TMap waypoint 기반) 정확히 추적.
     // GPS update 마다 NavigationManager 가 isOnCrosswalkSegment() 로 판정 → state flow emit.
@@ -1773,14 +1776,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 inCrosswalkZone = inZone
                 if (inZone && !wasIn) {
                     // 진입 시점 — 신호등 안전 state machine 리셋해서 깨끗한 상태로 시작.
-                    // 안정성 streak, 마지막 confirmed 색, heartbeat 시각, flicker 락아웃 모두 초기화.
-                    currentColorCandidate = -1
-                    colorStreak = 0
-                    lastConfirmedColor = -1
-                    lastHeartbeatAt = 0L
-                    lastValidatedAt = 0L
-                    lastTransitionAt = 0L
-                    flickerLockoutUntil = 0L
+                    // (안정성 streak, 마지막 confirmed 색, heartbeat, flicker 락아웃 전부 엔진이 초기화)
+                    signalDecisionEngine.reset()
                     resetTrafficLightNoDetectionEscalation()
                     noDetectionSpeechHoldUntil =
                         System.currentTimeMillis() + NO_DET_SPEECH_HOLD_AFTER_CAMERA_ENTRY_MS
@@ -2133,254 +2130,119 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // 단 TEST_MODE_FORCE_ML_ON=true 면 zone 무관하게 TTS 발화 + 디바운스/박스필터 진행 (인식 정확도 테스트용).
         if (!trafficLightAiActive && !TEST_MODE_FORCE_ML_ON) return
 
-        // 1차 필터: 너무 작은 박스 제외.
-        // 빨간불은 놓치는 비용이 크므로 초록불보다 작은 박스도 통과시킨다.
-        val minRedBoxDimension = 0.03f
-        val minGreenBoxDimension = if (lastConfirmedColor == 0) 0.03f else 0.06f
-        val validated = detections.filter { d ->
-            val minBoxDimension = if (d.classId == 0) minRedBoxDimension else minGreenBoxDimension
-            d.bbox.width >= minBoxDimension && d.bbox.height >= minBoxDimension
+        // ──── 안내 결정 — 공유 엔진(SignalDecisionEngine)에 위임 ────
+        // 신뢰도 비대칭·크기 하한·안정성·점멸·색 확정 로직은 shared 모듈에 있다.
+        // 여기서는 카메라 검출을 엔진 입력으로 바꾸고, 결정을 부수효과(TTS·진동·Firebase·로그)로 옮긴다.
+        val rawSignals = detections.map {
+            RawSignalDetection(it.classId, it.confidence, it.bbox.width, it.bbox.height)
         }
-        if (validated.isEmpty()) {
-            // 1차 필터에서 다 떨어짐 — 진단 라인에 reason 추가
-            val small = detections.first()
-            appendNavLog(
-                "TL_DIAG  └─ ALL_TOO_SMALL nearest=${small.label} ${(small.confidence * 100).toInt()}% " +
-                        "box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}% " +
-                        "(minR=3%, minG=6%)"
-            )
-            if (BuildConfig.DEBUG) {
-                updateCompactDebugGuidance()
-                updateAiDebugResult(
-                    "$aiResultLine | action=SMALL label=${small.label} " +
-                            "conf=${(small.confidence * 100).toInt()}% " +
-                            "box=${(small.bbox.width * 100).toInt()}x${(small.bbox.height * 100).toInt()}%"
-                )
-            }
-            resetTrafficLightNoDetectionEscalation()
-            return
-        }
+        val decision = signalDecisionEngine.decide(rawSignals, System.currentTimeMillis())
 
-        resetTrafficLightNoDetectionEscalation()
+        // 로그·Firebase 표기용 대표 검출 (판정은 엔진이 이미 끝냄 — 표시 전용)
+        val nearest = detections.maxByOrNull { it.confidence }
+        val nearestLabel = nearest?.label ?: "-"
+        val nearestConfStr = nearest?.let { "${(it.confidence * 100).toInt()}%" } ?: "-"
+        val nearestBoxStr = nearest?.let {
+            "${(it.bbox.width * 100).toInt()}x${(it.bbox.height * 100).toInt()}%"
+        } ?: "-"
 
-        val nearest = selectTrafficLightForSpeech(validated, lastConfirmedColor) ?: return
-        val detectedColor = nearest.classId
-
-        val now = System.currentTimeMillis()
-
-        // ──── (a0) Flicker 락아웃 — 깜빡임 감지된 이후 안내 자체를 차단 ────
-        // 한국 보행 신호 종료 직전 점멸 phase 에서 transition 이 1~3초 간격으로 반복되는 패턴을
-        // 잡아 "건너세요" 류 발화를 막는다. lockout 동안 state 도 동결 (streak 갱신 X).
-        if (flickerLockoutUntil > 0L && now < flickerLockoutUntil) {
-            val remainingMs = flickerLockoutUntil - now
-            appendNavLog(
-                "TL_DIAG  └─ FLICKER_LOCKOUT remaining=${remainingMs}ms current=${nearest.label}"
-            )
-            if (BuildConfig.DEBUG) {
-                updateCompactDebugGuidance()
-                updateAiDebugResult(
-                    "$aiResultLine | action=FLICKER_LOCKOUT remaining=${remainingMs}ms"
-                )
-            }
-            return
-        }
-        if (flickerLockoutUntil > 0L && now >= flickerLockoutUntil) {
-            // 락아웃 종료 — state 깨끗이 reset 해서 다음 frame 부터 보수적으로 재인식.
-            // lastConfirmedColor 도 -1 로 reset 해야 락아웃 직후 GREEN 이 "transition" 으로 잘못
-            // 잡혀 "건너세요" 발화되는 일을 막을 수 있음.
-            appendNavLog("TL_DIAG  └─ FLICKER_LOCKOUT_END (state reset)")
-            currentColorCandidate = -1
-            colorStreak = 0
-            lastConfirmedColor = -1
-            flickerLockoutUntil = 0L
-        }
-
-        // ──── (a) Detection 타임아웃 → state reset ────
-        // validated 검출이 DETECTION_TIMEOUT_MS 이상 끊겼다가 다시 들어오면 이전 lastConfirmedColor 신뢰 X.
-        // 사용자가 잠시 카메라를 다른 데 돌렸다가 다시 신호등 비추는 사이 신호가 바뀌었을 가능성.
-        if (lastValidatedAt > 0 && now - lastValidatedAt > DETECTION_TIMEOUT_MS) {
-            appendNavLog("TL_DIAG  └─ STATE_RESET (gap=${(now - lastValidatedAt) / 1000}s, prev=${classLabel(lastConfirmedColor)})")
-            currentColorCandidate = -1
-            colorStreak = 0
-            lastConfirmedColor = -1
-        }
-        lastValidatedAt = now
-
-        // ──── (b) 안정성 필터 — 빨간불은 더 빠르게, 초록불은 더 보수적으로 confirm ────
-        if (detectedColor == currentColorCandidate) {
-            colorStreak++
-        } else {
-            currentColorCandidate = detectedColor
-            colorStreak = 1
-        }
-
-        val requiredStabilityFrames = when {
-            detectedColor == 0 -> RED_STABILITY_FRAMES
-            lastConfirmedColor == 0 -> GREEN_TRANSITION_STABILITY_FRAMES
-            else -> GREEN_STABILITY_FRAMES
-        }
-        if (colorStreak < requiredStabilityFrames) {
-            appendNavLog(
-                "TL_DIAG  └─ STABILITY_PENDING candidate=${nearest.label} streak=$colorStreak/$requiredStabilityFrames " +
-                        "conf=${(nearest.confidence * 100).toInt()}% " +
-                        "box=${(nearest.bbox.width * 100).toInt()}x${(nearest.bbox.height * 100).toInt()}%"
-            )
-            if (BuildConfig.DEBUG) {
-                updateCompactDebugGuidance()
-                updateAiDebugResult(
-                    "$aiResultLine | action=STABILITY_PENDING label=${nearest.label} " +
-                            "streak=$colorStreak/$requiredStabilityFrames"
-                )
-            }
-            return
-        }
-
-        // ──── (c) 안정성 통과 — confirmed ────
-        val confirmedColor = currentColorCandidate
-        val previousColor = lastConfirmedColor
-
-        // (c-1) 같은 색 지속 → HEARTBEAT_INTERVAL_MS 마다 같은 색상 TTS 반복
-        if (confirmedColor == previousColor) {
-            val heartbeatDue = now - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS
-            if (heartbeatDue) {
-                val repeatMessage = repeatTrafficLightMessage(confirmedColor)
-                speakTrafficLightTTS(repeatMessage, interrupt = confirmedColor == 0)
-                lastHeartbeatAt = now
-                appendNavLog(
-                    "TL_DIAG  └─ REPEAT_TTS color=${classLabel(confirmedColor)} interval=${HEARTBEAT_INTERVAL_MS}ms"
-                )
-                if (BuildConfig.DEBUG) {
-                    updateAiDebugResult("$aiResultLine | action=REPEAT_TTS label=${nearest.label}")
+        when (decision) {
+            is SignalDecision.Silent -> {
+                resetTrafficLightNoDetectionEscalation()
+                val tag = when (decision.reason) {
+                    SilentReason.NO_DETECTION -> "NO_DET_CANDIDATE"
+                    SilentReason.ALL_TOO_SMALL -> "ALL_TOO_SMALL"
+                    SilentReason.ALL_LOW_CONFIDENCE -> "ALL_LOW_CONF"
+                    SilentReason.STABILITY_PENDING ->
+                        "STABILITY_PENDING streak=${decision.streak}/${decision.requiredFrames}"
+                    SilentReason.FLICKER_LOCKOUT -> "FLICKER_LOCKOUT"
+                    SilentReason.SAME_COLOR_QUIET -> "SAME_COLOR_QUIET"
                 }
-            } else {
-                val nextIn = (HEARTBEAT_INTERVAL_MS - (now - lastHeartbeatAt)) / 1000
-                appendNavLog(
-                    "TL_DIAG  └─ SAME_COLOR_QUIET (next repeat in ${nextIn}s)"
-                )
+                appendNavLog("TL_DIAG  └─ $tag nearest=$nearestLabel $nearestConfStr box=$nearestBoxStr")
                 if (BuildConfig.DEBUG) {
+                    updateCompactDebugGuidance()
                     updateAiDebugResult(
-                        "$aiResultLine | action=QUIET label=${nearest.label} next_repeat=${nextIn}s"
+                        "$aiResultLine | action=${decision.reason} label=$nearestLabel " +
+                                "conf=$nearestConfStr box=$nearestBoxStr"
                     )
                 }
             }
-            return
-        }
 
-        // (c-2) 색이 변경됨 (또는 첫 confirm)
-
-        // ── (c-2a) Flicker 감지 — 직전 transition 후 MIN_PHASE_DURATION_MS 미만이면 점멸로 간주 ──
-        // previousColor != -1 조건은 첫 confirm 제외 (첫 confirm 은 항상 정상 안내).
-        // 점멸 phase 에서 "건너세요" 발화 막는 핵심 안전 로직.
-        val isRedToGreenTransition = previousColor == 0 && confirmedColor == 1
-        if (!isRedToGreenTransition &&
-            previousColor != -1 &&
-            lastTransitionAt > 0L &&
-            now - lastTransitionAt < MIN_PHASE_DURATION_MS
-        ) {
-            val gapMs = now - lastTransitionAt
-            val flickerMsg = "신호가 깜빡입니다. 멈춰서 다음 신호를 기다리세요."
-            speakTrafficLightTTS(flickerMsg, interrupt = true)
-            vibrateWarning()                    // 강한 staccato 진동
-            flickerLockoutUntil = now + FLICKER_LOCKOUT_MS
-            metricFlickerCount++                // 정량 지표
-            // Firebase Analytics — Flicker(점멸) 감지 이벤트
-            firebaseAnalytics.logEvent("flicker_detected") {
-                param("gap_ms", gapMs)
-                param("prev_color", classLabel(previousColor))
-                param("new_color", classLabel(confirmedColor))
+            is SignalDecision.Repeat -> {
+                resetTrafficLightNoDetectionEscalation()
+                speakTrafficLightTTS(repeatTrafficLightMessage(decision.color), interrupt = decision.color == 0)
+                appendNavLog("TL_DIAG  └─ REPEAT_TTS color=${classLabel(decision.color)}")
+                if (BuildConfig.DEBUG) {
+                    updateAiDebugResult("$aiResultLine | action=REPEAT_TTS label=${classLabel(decision.color)}")
+                }
             }
 
-            // state 정리 — 락아웃 동안 streak / candidate 갱신 안 되게.
-            // lastConfirmedColor 는 일단 -1 로 — 락아웃 종료 후 보수적 재시작.
-            lastConfirmedColor = -1
-            currentColorCandidate = -1
-            colorStreak = 0
-            lastTransitionAt = now
-            lastHeartbeatAt = now
-
-            Log.d("SafeWalkNav", "TL FLICKER detected — gap=${gapMs}ms, lockout ${FLICKER_LOCKOUT_MS}ms")
-            appendNavLog(
-                "TL_DIAG  └─ FLICKER_DETECTED prev=${classLabel(previousColor)} new=${classLabel(confirmedColor)} " +
-                        "gap=${gapMs}ms (min=${MIN_PHASE_DURATION_MS}ms) lockout=${FLICKER_LOCKOUT_MS}ms"
-            )
-
-            if (BuildConfig.DEBUG) {
-                updateCompactDebugGuidance()
-                updateAiDebugResult(
-                    "$aiResultLine | action=FLICKER gap=${gapMs}ms lockout=${FLICKER_LOCKOUT_MS}ms"
+            is SignalDecision.Flicker -> {
+                resetTrafficLightNoDetectionEscalation()
+                speakTrafficLightTTS("신호가 깜빡입니다. 멈춰서 다음 신호를 기다리세요.", interrupt = true)
+                vibrateWarning()
+                metricFlickerCount++
+                firebaseAnalytics.logEvent("flicker_detected") {
+                    param("gap_ms", decision.gapMs)
+                    param("prev_color", classLabel(decision.previousColor))
+                    param("new_color", classLabel(decision.newColor))
+                }
+                appendNavLog(
+                    "TL_DIAG  └─ FLICKER_DETECTED prev=${classLabel(decision.previousColor)} " +
+                            "new=${classLabel(decision.newColor)} gap=${decision.gapMs}ms"
                 )
+                if (BuildConfig.DEBUG) {
+                    updateCompactDebugGuidance()
+                    updateAiDebugResult("$aiResultLine | action=FLICKER gap=${decision.gapMs}ms")
+                }
             }
-            return
-        }
 
-        // (c-2b) 정상 transition (또는 첫 confirm) → TTS 발화
-        lastConfirmedColor = confirmedColor
-        lastHeartbeatAt = now
-        lastTransitionAt = now
-
-        val message: String
-        val withVibrate: Boolean
-        val action: String
-
-        when {
-            confirmedColor == 0 -> {
-                // 빨강 — 신규 또는 초록→빨강 전환
-                message = "빨간불입니다. 정지하세요."
-                withVibrate = previousColor == 1   // 초록→빨강 전환 시 진동 추가
-                action = if (previousColor == 1) "ANNOUNCED_TRANSITION_G_TO_R" else "ANNOUNCED_RED"
-                if (previousColor == 1) metricMlGreenToRedCount++ else metricMlRedCount++
+            is SignalDecision.Announce -> {
+                resetTrafficLightNoDetectionEscalation()
+                val message: String
+                val action: String
+                when (decision.transition) {
+                    SignalTransition.RED_NEW -> {
+                        message = "빨간불입니다. 정지하세요."
+                        action = "ANNOUNCED_RED"
+                        metricMlRedCount++
+                    }
+                    SignalTransition.GREEN_TO_RED -> {
+                        message = "빨간불입니다. 정지하세요."
+                        action = "ANNOUNCED_TRANSITION_G_TO_R"
+                        metricMlGreenToRedCount++
+                    }
+                    SignalTransition.RED_TO_GREEN -> {
+                        message = "방금 초록불로 바뀌었습니다. 안전을 확인하고 건너세요."
+                        action = "ANNOUNCED_TRANSITION_R_TO_G"
+                        metricMlTransitionCount++
+                    }
+                    SignalTransition.STATIC_GREEN -> {
+                        message = "초록불입니다. 일단 멈춰서 다음 신호를 기다리세요."
+                        action = "ANNOUNCED_STATIC_GREEN"
+                        metricMlGreenStaticCount++
+                    }
+                }
+                speakTrafficLightTTS(message, interrupt = decision.interrupt)
+                if (decision.vibrate) vibrateShort()
+                firebaseAnalytics.logEvent("traffic_light_announced") {
+                    param("color", classLabel(decision.color))
+                    param("transition_type", action)
+                    param("confidence_pct", (decision.confidence * 100).toLong())
+                }
+                Log.d("SafeWalkNav", "TL: $action — $message (conf=${decision.confidence})")
+                appendNavLog(
+                    "TL_DIAG  └─ $action color=${classLabel(decision.color)} " +
+                            "conf=${"%.2f".format(decision.confidence)}"
+                )
+                if (BuildConfig.DEBUG) {
+                    updateCompactDebugGuidance()
+                    updateAiDebugResult(
+                        "$aiResultLine | action=$action label=${classLabel(decision.color)} " +
+                                "conf=${(decision.confidence * 100).toInt()}%"
+                    )
+                }
             }
-            confirmedColor == 1 && previousColor == 0 -> {
-                // 빨강 → 초록 직접 전환 인식! 유일하게 "건너세요" 안내하는 케이스.
-                message = "방금 초록불로 바뀌었습니다. 안전을 확인하고 건너세요."
-                withVibrate = true   // 강한 주의 환기
-                action = "ANNOUNCED_TRANSITION_R_TO_G"
-                metricMlTransitionCount++
-            }
-            confirmedColor == 1 -> {
-                // 정적 초록불 (첫 인식 / timeout 후 재인식 — 전환 못 봄).
-                // ❗ "건너세요" 절대 안 함. 다음 주기 대기 안내.
-                message = "초록불입니다. 일단 멈춰서 다음 신호를 기다리세요."
-                withVibrate = false
-                action = "ANNOUNCED_STATIC_GREEN"
-                metricMlGreenStaticCount++
-            }
-            else -> return
-        }
-
-        val shouldInterrupt = when (action) {
-            "ANNOUNCED_RED",
-            "ANNOUNCED_TRANSITION_G_TO_R",
-            "ANNOUNCED_TRANSITION_R_TO_G" -> true
-            else -> false
-        }
-        speakTrafficLightTTS(message, interrupt = shouldInterrupt)
-        if (withVibrate) vibrateShort()
-
-        // Firebase Analytics — ML 신호등 안내 이벤트 (color + transition_type + confidence)
-        firebaseAnalytics.logEvent("traffic_light_announced") {
-            param("color", classLabel(confirmedColor))
-            param("transition_type", action)
-            param("confidence_pct", (nearest.confidence * 100).toLong())
-            param("box_width_pct", (nearest.bbox.width * 100).toLong())
-            param("box_height_pct", (nearest.bbox.height * 100).toLong())
-        }
-
-        Log.d("SafeWalkNav", "TL: $action — $message (conf=${nearest.confidence}, prev=$previousColor)")
-        appendNavLog(
-            "TL_DIAG  └─ $action prev=${classLabel(previousColor)} new=${classLabel(confirmedColor)} " +
-                    "conf=${"%.2f".format(nearest.confidence)} " +
-                    "box=${"%.2f".format(nearest.bbox.width)}x${"%.2f".format(nearest.bbox.height)} " +
-                    "validated=${validated.size}/${detections.size}"
-        )
-
-        if (BuildConfig.DEBUG) {
-            updateCompactDebugGuidance()
-            updateAiDebugResult(
-                "$aiResultLine | action=$action label=${nearest.label} " +
-                        "conf=${(nearest.confidence * 100).toInt()}% " +
-                        "box=${(nearest.bbox.width * 100).toInt()}x${(nearest.bbox.height * 100).toInt()}%"
-            )
         }
     }
 
@@ -2445,33 +2307,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    /** TTS 판정용 대표 검출 선택. 안전상 빨간불 후보를 초록불보다 우선한다. */
-    private fun selectTrafficLightForSpeech(
-        detections: List<TrafficLightDetection>,
-        previousColor: Int,
-    ): TrafficLightDetection? {
-        val red = detections
-            .filter { it.classId == 0 }
-            .maxWithOrNull(compareBy<TrafficLightDetection> { it.confidence }.thenBy { it.bbox.area })
-        val green = detections
-            .filter { it.classId == 1 }
-            .maxWithOrNull(compareBy<TrafficLightDetection> { it.confidence }.thenBy { it.bbox.area })
-
-        if (previousColor == 0 && green != null) {
-            if (red == null) return green
-
-            val greenIsStrongEnough = green.confidence >= GREEN_TRANSITION_MIN_CONFIDENCE
-            val greenBeatsRed = green.confidence >= red.confidence + GREEN_OVER_RED_CONFIDENCE_MARGIN
-            if (greenIsStrongEnough && greenBeatsRed) return green
-        }
-
-        if (red != null) return red
-
-        return detections.maxWithOrNull(
-            compareBy<TrafficLightDetection> { it.confidence }.thenBy { it.bbox.area }
-        )
-    }
-
     /** classId → 사람이 읽기 쉬운 라벨 (로그용). */
     private fun classLabel(classId: Int): String = when (classId) {
         0 -> "RED"
@@ -2498,13 +2333,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         boundingBoxOverlay = null
 
         // 신호등 안전 state machine 리셋 — 다음 NAVIGATING 진입 시 깨끗한 상태로 시작
-        currentColorCandidate = -1
-        colorStreak = 0
-        lastConfirmedColor = -1
-        lastHeartbeatAt = 0L
-        lastValidatedAt = 0L
-        lastTransitionAt = 0L
-        flickerLockoutUntil = 0L
+        signalDecisionEngine.reset()
         noDetectionSpeechHoldUntil = 0L
 
         // 횡단보도 zone 은 NavigationManager.isInCrosswalkZone state flow 가 자동 관리 —
@@ -2732,4 +2561,3 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         return repository.getTrafficSignals()
     }
 }
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 
