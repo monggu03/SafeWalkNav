@@ -26,6 +26,9 @@ import com.example.safewalknav.navigation.tbfw.NavigatorConfig
 import com.example.safewalknav.navigation.tbfw.PathAnnotation
 import com.example.safewalknav.navigation.tbfw.RouteAnnotationLogger
 import com.example.safewalknav.navigation.tbfw.RouteAnnotator
+import com.example.safewalknav.navigation.tbfw.TurnDirection
+import com.example.safewalknav.navigation.tbfw.computeTurn
+import com.example.safewalknav.navigation.tbfw.maybeInvert
 import com.example.safewalknav.navigation.tbfw.selectAnnouncementCandidate
 import com.example.safewalknav.navigation.tmap.ArrivalState
 import com.example.safewalknav.navigation.tmap.LatLng
@@ -375,6 +378,8 @@ class NavigationManager(
         currentWaypointIndex = 0
         currentRoutePointIndex = 0
         lastPreAnnouncedIndex = -1
+        lastCurveReminderTime = 0L
+        lastCurveReminderDirection = null
         wasInCrosswalkZone = false
         lastCrosswalkAnnouncedWpIdx = -1
         lastSignalPresenceAnnouncedWpIdx = -1
@@ -1893,12 +1898,18 @@ class NavigationManager(
         if (currentWaypointIndex >= route.waypoints.size) return
 
         val nextWaypoint = route.waypoints[currentWaypointIndex]
-        // 가상 waypoint 는 음성 안내 대상이 아님 — syncWaypointIndexForwardOnly 가
-        // 통과 시점에 스테레오 비프(handleVirtualWaypointPassed) 로 처리.
-        if (nextWaypoint.isVirtual) return
         val distToNext = distanceBetween(
             currentLat, currentLon, nextWaypoint.lat, nextWaypoint.lon
         )
+        if (nextWaypoint.isVirtual) {
+            announceVirtualCurveWaypointIfNeeded(
+                waypoint = nextWaypoint,
+                waypointIndex = currentWaypointIndex,
+                distanceToWaypoint = distToNext,
+                route = route,
+            )
+            return
+        }
 
         // waypoint 도착 판정: GPS 오차 감안하여 10m (기존 5m → 회전 안내를 놓치는 문제 해결)
         if (distToNext <= 10f) {
@@ -2235,6 +2246,79 @@ class NavigationManager(
         val wp = route.waypoints.getOrNull(idx) ?: return cumulativeDistances[idx]
         val remaining = distanceBetween(currentLat, currentLon, wp.lat, wp.lon).toDouble()
         return (cumulativeDistances[idx] - remaining).coerceAtLeast(0.0)
+    }
+
+    private fun announceVirtualCurveWaypointIfNeeded(
+        waypoint: Waypoint,
+        waypointIndex: Int,
+        distanceToWaypoint: Float,
+        route: TMapRoute,
+    ) {
+        if (waypoint.pointType != "VIRTUAL_CURVE") return
+        if (distanceToWaypoint > navigatorConfig.curveAnnouncementDistanceM) return
+
+        val now = currentTimeMillis()
+        if (now - lastCurveReminderTime < navigatorConfig.minSpeechIntervalForCurveMs) return
+
+        val turn = computeTurnForVirtualWaypoint(route, waypointIndex, waypoint)
+        val rawDirection = turn?.direction ?: when (waypoint.curveDirection) {
+            "RIGHT" -> TurnDirection.RIGHT
+            "LEFT" -> TurnDirection.LEFT
+            else -> TurnDirection.NONE
+        }
+        val finalDirection = maybeInvert(rawDirection)
+        val directionText = when (finalDirection) {
+            TurnDirection.RIGHT -> "RIGHT"
+            TurnDirection.LEFT -> "LEFT"
+            TurnDirection.UTURN -> "UTURN"
+            TurnDirection.STRAIGHT -> "STRAIGHT"
+            TurnDirection.NONE -> waypoint.curveDirection ?: "NONE"
+        }
+        val text = when (finalDirection) {
+            TurnDirection.RIGHT -> "길이 오른쪽으로 휘어집니다"
+            TurnDirection.LEFT -> "길이 왼쪽으로 휘어집니다"
+            else -> waypoint.description.ifBlank { "길이 휘어집니다" }
+        }
+
+        println("[SPEECH-TURN] waypointIndex=$waypointIndex")
+        println("[SPEECH-TURN] spokenText=$text")
+        println("[SPEECH-TURN] direction=$directionText")
+        println("[SPEECH-TURN] delta=${turn?.delta ?: waypoint.bearingToNext ?: 0.0}")
+        println("[SPEECH-TURN] incomingBearing=${turn?.incomingBearing ?: 0.0}")
+        println("[SPEECH-TURN] outgoingBearing=${turn?.outgoingBearing ?: waypoint.bearingToNext ?: 0.0}")
+
+        speak(text)
+        lastCurveReminderTime = now
+        lastCurveReminderDirection = when (finalDirection) {
+            TurnDirection.RIGHT -> "RIGHT"
+            TurnDirection.LEFT -> "LEFT"
+            else -> waypoint.curveDirection
+        }
+    }
+
+    private fun computeTurnForVirtualWaypoint(
+        route: TMapRoute,
+        waypointIndex: Int,
+        waypoint: Waypoint,
+    ) = if (waypoint.sourceRoutePointIdx > 0 && waypoint.sourceRoutePointIdx + 1 < route.routePoints.size) {
+        val i = waypoint.sourceRoutePointIdx
+        computeTurn(
+            prev = route.routePoints[i - 1],
+            current = LatLng(waypoint.lat, waypoint.lon),
+            next = route.routePoints[i + 1],
+        )
+    } else {
+        val prev = route.waypoints.getOrNull(waypointIndex - 1)
+        val next = route.waypoints.getOrNull(waypointIndex + 1)
+        if (prev != null && next != null) {
+            computeTurn(
+                prev = LatLng(prev.lat, prev.lon),
+                current = LatLng(waypoint.lat, waypoint.lon),
+                next = LatLng(next.lat, next.lon),
+            )
+        } else {
+            null
+        }
     }
 
     // 2026-05-21 — RouteAnnotator 의 사전 분석 결과(announceUpcomingAnnotation) 로 대체됨.

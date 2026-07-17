@@ -30,6 +30,16 @@ import kotlin.math.abs
 class RouteAnnotator(
     private val config: NavigatorConfig = NavigatorConfig(),
 ) {
+    private enum class VirtualWaypointRejectReason {
+        angleTooSmall,
+        distanceTooShort,
+        tooCloseToExistingWaypoint,
+        tooCloseToPreviousVirtualWaypoint,
+        duplicateCoordinate,
+        outsideRoute,
+        unknown,
+    }
+
     /**
      * waypoint 리스트(+ 선택적으로 segment 리스트)를 분석해 AnnotatedRoute 반환.
      *
@@ -93,7 +103,7 @@ class RouteAnnotator(
                     abs(delta) >= config.noiseAngleThresholdDeg -> {
                         val curve = scanCurve(waypoints, i)
                         val sigOk = curve.consistencyRatio >= config.curveSignConsistencyRatio
-                        val cumOk = abs(curve.cumulative) >= config.curveCumulativeThresholdDeg
+                        val cumOk = abs(curve.cumulative) + ANGLE_EPSILON_DEG >= config.curveCumulativeThresholdDeg
                         if (sigOk && cumOk) {
                             val dir = if (curve.cumulative >= 0) "RIGHT" else "LEFT"
                             println("[Annotator IN  ] idx=$i prev=(${a.lat},${a.lon}) " +
@@ -400,7 +410,7 @@ class RouteAnnotator(
             if (isPair) logPairCurve(startIdx, sliceCount, cumulative, "REJECTED(consistency=$ratio)")
             return null
         }
-        if (abs(cumulative) < config.curveCumulativeThresholdDeg) {
+        if (abs(cumulative) + ANGLE_EPSILON_DEG < config.curveCumulativeThresholdDeg) {
             if (isPair) logPairCurve(startIdx, sliceCount, cumulative, "REJECTED(cumulative<${config.curveCumulativeThresholdDeg}°)")
             return null
         }
@@ -661,7 +671,7 @@ class RouteAnnotator(
         }
 
         val consistencyRatio = sameSignCount.toDouble() / totalCount
-        val cumOk = abs(cumulative) >= config.curveCumulativeThresholdDeg
+        val cumOk = abs(cumulative) + ANGLE_EPSILON_DEG >= config.curveCumulativeThresholdDeg
         val ratioOk = consistencyRatio >= config.curveSignConsistencyRatio
         val verdict = when {
             !cumOk && !ratioOk -> "REJECTED(cumulative miss & consistency miss)"
@@ -673,7 +683,7 @@ class RouteAnnotator(
                 "totalCount=$totalCount cumulative=${cumulative}° consistency=$consistencyRatio " +
                 "vs threshold cum>=${config.curveCumulativeThresholdDeg}° consistency>=${config.curveSignConsistencyRatio} " +
                 "→ $verdict")
-        if (abs(cumulative) < config.curveCumulativeThresholdDeg) return null
+        if (abs(cumulative) + ANGLE_EPSILON_DEG < config.curveCumulativeThresholdDeg) return null
         if (consistencyRatio < config.curveSignConsistencyRatio) return null
 
         val direction = if (cumulative >= 0) TurnDirection.RIGHT else TurnDirection.LEFT
@@ -716,6 +726,8 @@ class RouteAnnotator(
     ): List<Waypoint> {
         val original = annotated.waypoints
         if (original.isEmpty()) return emptyList()
+        println("[VW-DEBUG] originalWaypoints.count=${original.count()}")
+        println("[VW-DEBUG] routePoints.count=${routePoints.count()}")
 
         // annotation 에서 curve 구간만 추출 (direction 과 routePoint subrange 도 같이 보존)
         data class CurveSpan(
@@ -749,11 +761,21 @@ class RouteAnnotator(
                     it.routePointRange != null && i == it.waypointRange.first
                 }
                 if (explicitCurve?.routePointRange != null) {
-                    val virtuals = generateVirtualPointsAlongRoutePointRange(
+                    val rawVirtuals = generateVirtualPointsAlongRoutePointRange(
                         routePoints = routePoints,
                         range = explicitCurve.routePointRange,
                         spacingM = config.virtualWaypointSpacingM,
                         curveDirection = explicitCurve.direction,
+                        roadType = original[i].roadType,
+                    )
+                    val virtuals = filterAndLogVirtualCandidates(
+                        candidates = rawVirtuals,
+                        routePoints = routePoints,
+                        originalWaypoints = original,
+                        acceptedWaypoints = expanded,
+                        insertIndex = expanded.size,
+                        annotationDirection = explicitCurve.direction,
+                        fallbackRoutePointRange = explicitCurve.routePointRange,
                         roadType = original[i].roadType,
                     )
                     expanded.addAll(virtuals)
@@ -764,12 +786,22 @@ class RouteAnnotator(
                     it.routePointRange == null && i in it.waypointRange
                 }
                 if (curve != null) {
-                    val virtuals = generateVirtualPointsAlongPolyline(
+                    val rawVirtuals = generateVirtualPointsAlongPolyline(
                         start = original[i],
                         end = original[i + 1],
                         routePoints = routePoints,
                         spacingM = config.virtualWaypointSpacingM,
                         curveDirection = curve.direction,
+                    )
+                    val virtuals = filterAndLogVirtualCandidates(
+                        candidates = rawVirtuals,
+                        routePoints = routePoints,
+                        originalWaypoints = original,
+                        acceptedWaypoints = expanded,
+                        insertIndex = expanded.size,
+                        annotationDirection = curve.direction,
+                        fallbackRoutePointRange = null,
+                        roadType = original[i].roadType,
                     )
                     expanded.addAll(virtuals)
                 }
@@ -792,8 +824,153 @@ class RouteAnnotator(
             .count { it.value > 1 }
         println("[VirtualDedup] before=$virtualBefore after=$virtualAfter " +
                 "removed=${virtualBefore - virtualAfter} duplicateSourceRPAfter=$duplicateAfter")
+        println("[VW-SUMMARY] originalWaypoints=${original.count()}")
+        println("[VW-SUMMARY] expandedWaypoints=${deduped.count()}")
+        println("[VW-SUMMARY] virtualWaypoints=$virtualAfter")
         return deduped
     }
+
+    private fun filterAndLogVirtualCandidates(
+        candidates: List<Waypoint>,
+        routePoints: List<LatLng>,
+        originalWaypoints: List<Waypoint>,
+        acceptedWaypoints: List<Waypoint>,
+        insertIndex: Int,
+        annotationDirection: String?,
+        fallbackRoutePointRange: IntRange?,
+        roadType: Int,
+    ): List<Waypoint> {
+        val mutableCandidates = candidates.toMutableList()
+        if (mutableCandidates.isEmpty() && fallbackRoutePointRange != null) {
+            val fallback = buildFallbackVirtualWaypoint(
+                routePoints = routePoints,
+                range = fallbackRoutePointRange,
+                curveDirection = annotationDirection,
+                roadType = roadType,
+            )
+            if (fallback != null) {
+                mutableCandidates.add(fallback)
+            } else {
+                println("[VW-REJECT] index=${fallbackRoutePointRange.first} reason=${VirtualWaypointRejectReason.unknown}")
+            }
+        }
+
+        val accepted = mutableListOf<Waypoint>()
+        for ((offset, candidate) in mutableCandidates.withIndex()) {
+            val candidateIndex = candidate.sourceRoutePointIdx.takeIf { it >= 0 } ?: (insertIndex + offset)
+            val duplicate = (originalWaypoints + acceptedWaypoints + accepted).any {
+                sameCoordinate(it.lat, it.lon, candidate.lat, candidate.lon)
+            }
+            if (duplicate) {
+                println("[VW-REJECT] index=$candidateIndex reason=${VirtualWaypointRejectReason.duplicateCoordinate}")
+                continue
+            }
+
+            val nearestExisting = originalWaypoints.minOfOrNull {
+                distanceBetween(candidate.lat, candidate.lon, it.lat, it.lon).toDouble()
+            } ?: Double.MAX_VALUE
+            if (nearestExisting < config.minDistanceFromExistingWaypointM) {
+                println("[VW-REJECT] index=$candidateIndex reason=${VirtualWaypointRejectReason.tooCloseToExistingWaypoint} distance=${nearestExisting}m")
+                continue
+            }
+
+            val previousVirtuals = (acceptedWaypoints + accepted).filter { it.isVirtual }
+            val nearestVirtual = previousVirtuals.minOfOrNull {
+                distanceBetween(candidate.lat, candidate.lon, it.lat, it.lon).toDouble()
+            } ?: Double.MAX_VALUE
+            if (nearestVirtual < config.minDistanceBetweenVirtualWaypointsM) {
+                println("[VW-REJECT] index=$candidateIndex reason=${VirtualWaypointRejectReason.tooCloseToPreviousVirtualWaypoint} distance=${nearestVirtual}m")
+                continue
+            }
+
+            println("[VW-INSERT] index=${insertIndex + accepted.size}")
+            println("[VW-INSERT] coordinate=${candidate.lat},${candidate.lon}")
+            println("[VW-INSERT] direction=${candidate.curveDirection}")
+            println("[VW-INSERT] delta=${candidate.bearingToNext ?: 0.0}")
+            println("[VW-INSERT] description=${candidate.description}")
+            accepted.add(candidate)
+        }
+        return accepted
+    }
+
+    private fun buildFallbackVirtualWaypoint(
+        routePoints: List<LatLng>,
+        range: IntRange,
+        curveDirection: String?,
+        roadType: Int,
+    ): Waypoint? {
+        if (routePoints.size < 3) return null
+        val startIdx = range.first.coerceIn(0, routePoints.lastIndex)
+        val endIdx = range.last.coerceIn(0, routePoints.lastIndex)
+        if (endIdx - startIdx < 2) {
+            println("[VW-REJECT] index=$startIdx reason=${VirtualWaypointRejectReason.outsideRoute}")
+            return null
+        }
+
+        var bestIndex = -1
+        var bestTurn: TurnComputation? = null
+        var cumulativeDelta = 0.0
+        for (i in startIdx until endIdx - 1) {
+            val prev = routePoints[i]
+            val current = routePoints[i + 1]
+            val next = routePoints[i + 2]
+            val turn = computeTurn(prev, current, next, log = false)
+            if (abs(turn.delta) < config.noiseAngleThresholdDeg) {
+                println("[VW-REJECT] index=$i reason=${VirtualWaypointRejectReason.angleTooSmall} delta=${turn.delta}")
+                continue
+            }
+
+            cumulativeDelta += turn.delta
+            val rawDirection = turn.direction
+            val finalDirection = maybeInvert(rawDirection)
+            println("[VW-CANDIDATE] index=$i")
+            println("[VW-CANDIDATE] prev=${prev.lat},${prev.lon}")
+            println("[VW-CANDIDATE] current=${current.lat},${current.lon}")
+            println("[VW-CANDIDATE] next=${next.lat},${next.lon}")
+            println("[VW-CANDIDATE] delta=${turn.delta}")
+            println("[VW-CANDIDATE] cumulativeDelta=$cumulativeDelta")
+            println("[VW-CANDIDATE] direction=${finalDirection.name}")
+
+            if (abs(turn.delta) >= config.turnPeakThresholdDeg || abs(cumulativeDelta) >= config.curveCumulativeThresholdDeg) {
+                if (bestTurn == null || abs(turn.delta) > abs(bestTurn.delta)) {
+                    bestIndex = i + 1
+                    bestTurn = turn.copy(direction = finalDirection)
+                }
+            }
+        }
+
+        val turn = bestTurn
+        if (bestIndex < 0 || turn == null) {
+            println("[VW-REJECT] index=$startIdx reason=${VirtualWaypointRejectReason.angleTooSmall} delta=$cumulativeDelta")
+            return null
+        }
+
+        val point = routePoints[bestIndex]
+        val direction = curveDirection ?: turn.direction.name.takeIf {
+            turn.direction == TurnDirection.LEFT || turn.direction == TurnDirection.RIGHT
+        }
+        val description = when (direction) {
+            "RIGHT" -> "길이 오른쪽으로 휘어집니다"
+            "LEFT" -> "길이 왼쪽으로 휘어집니다"
+            else -> "길이 휘어집니다"
+        }
+        return Waypoint(
+            lat = point.lat,
+            lon = point.lon,
+            turnType = 0,
+            description = description,
+            distance = 0,
+            roadType = roadType,
+            pointType = "VIRTUAL_CURVE",
+            isVirtual = true,
+            sourceRoutePointIdx = bestIndex,
+            curveDirection = direction,
+            bearingToNext = turn.delta,
+        )
+    }
+
+    private fun sameCoordinate(aLat: Double, aLon: Double, bLat: Double, bLon: Double): Boolean =
+        abs(aLat - bLat) < 1e-7 && abs(aLon - bLon) < 1e-7
 
     /**
      * start ↔ end 사이에 해당하는 polyline 슬라이스 위에 누적 거리 spacing 간격으로 가상점을 찍는다.
@@ -858,13 +1035,18 @@ class RouteAnnotator(
                 val t = (nextTarget - accumulated) / segDist
                 val vLat = p1.lat + (p2.lat - p1.lat) * t
                 val vLon = p1.lon + (p2.lon - p1.lon) * t
+                val description = when (curveDirection) {
+                    "RIGHT" -> "길이 오른쪽으로 휘어집니다"
+                    "LEFT" -> "길이 왼쪽으로 휘어집니다"
+                    else -> "길이 휘어집니다"
+                }
 
                 virtuals.add(
                     Waypoint(
                         lat = vLat,
                         lon = vLon,
                         turnType = 0,
-                        description = "virtual",
+                        description = description,
                         distance = 0,
                         roadType = roadType,
                         pointType = "VIRTUAL_CURVE",
@@ -879,6 +1061,18 @@ class RouteAnnotator(
             accumulated += segDist
         }
 
+        val midpointCandidate = buildInterpolatedVirtualPointAtDistance(
+            routePoints = routePoints,
+            startIdx = startIdx,
+            endIdx = endIdx,
+            targetDistanceM = accumulated / 2.0,
+            curveDirection = curveDirection,
+            roadType = roadType,
+        )
+        if (midpointCandidate != null) {
+            virtuals.add(midpointCandidate)
+        }
+
         println("[VirtualGen] curve(${routePoints[startIdx].lat},${routePoints[startIdx].lon})→(${routePoints[endIdx].lat},${routePoints[endIdx].lon})")
         println("[VirtualGen]   polyline range: $startIdx → $endIdx, generated ${virtuals.size}점")
         virtuals.forEachIndexed { idx, v ->
@@ -888,16 +1082,58 @@ class RouteAnnotator(
         return virtuals
     }
 
+    private fun buildInterpolatedVirtualPointAtDistance(
+        routePoints: List<LatLng>,
+        startIdx: Int,
+        endIdx: Int,
+        targetDistanceM: Double,
+        curveDirection: String?,
+        roadType: Int,
+    ): Waypoint? {
+        if (targetDistanceM < config.minDistanceFromExistingWaypointM) return null
+
+        var accumulated = 0.0
+        for (i in startIdx until endIdx) {
+            val p1 = routePoints[i]
+            val p2 = routePoints[i + 1]
+            val segDist = distanceBetween(p1.lat, p1.lon, p2.lat, p2.lon).toDouble()
+            if (segDist == 0.0) continue
+            if (targetDistanceM <= accumulated + segDist) {
+                val t = (targetDistanceM - accumulated) / segDist
+                val vLat = p1.lat + (p2.lat - p1.lat) * t
+                val vLon = p1.lon + (p2.lon - p1.lon) * t
+                val segBearing = bearing(p1.lat, p1.lon, p2.lat, p2.lon).toDouble()
+                val description = when (curveDirection) {
+                    "RIGHT" -> "길이 오른쪽으로 휘어집니다"
+                    "LEFT" -> "길이 왼쪽으로 휘어집니다"
+                    else -> "길이 휘어집니다"
+                }
+                return Waypoint(
+                    lat = vLat,
+                    lon = vLon,
+                    turnType = 0,
+                    description = description,
+                    distance = 0,
+                    roadType = roadType,
+                    pointType = "VIRTUAL_CURVE",
+                    isVirtual = true,
+                    sourceRoutePointIdx = i,
+                    curveDirection = curveDirection,
+                    bearingToNext = segBearing,
+                )
+            }
+            accumulated += segDist
+        }
+        return null
+    }
+
     companion object {
+        private const val ANGLE_EPSILON_DEG = 0.5
+
         /**
          * 각도 차이를 -180 ~ +180 범위로 정규화.
          * bearing2 - bearing1 결과가 350° 처럼 나와도 -10° 로 바꿔 같은 방향임을 인식할 수 있게 한다.
          */
-        fun normalizeAngle(deg: Double): Double {
-            var result = deg % 360.0
-            if (result > 180.0) result -= 360.0
-            if (result < -180.0) result += 360.0
-            return result
-        }
+        fun normalizeAngle(deg: Double): Double = normalizedAngle(deg)
     }
 }
