@@ -351,6 +351,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     //   시연/강의실 신호등 사진 인식 테스트 시에만 true 로 켜고, 외출 전 다시 false 로 되돌릴 것.
     private val TEST_MODE_FORCE_ML_ON = false
 
+    // ──────────────────────────────────────────────────────────────────────
+    // 부스/행사 데모 모드. true 면 GPS·횡단보도 zone 을 무시하고 앱 실행 즉시 카메라+AI 를 켠다.
+    // 신호등(실물/영상/사진)을 비추면 바로 인식해 음성·진동으로 알린다.
+    // 행사장엔 횡단보도가 없어 평소 zone 게이팅으론 아무것도 안 뜨므로 SF 데모엔 필수.
+    // ⚠️ 실사용/배포 빌드에서는 반드시 false (zone gating 안전 정책이 꺼진다).
+    // 신호 판정은 평소처럼 shared/SignalDecisionEngine 이 담당한다.
+    private val BOOTH_MODE = false
+
     // 시연 영상 촬영 모드 — DEBUG 빌드여도 하단 디버그 박스 (STATE/GPS/AI/crosswalkDist 등) 를 숨김.
     // bbox 오버레이는 그대로 유지하여 신호등 검출 시각화는 보이게 한다.
     // 시연 영상 촬영 후 일반 디버깅이 필요해지면 false 로 되돌릴 것.
@@ -650,7 +658,32 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         checkAndEnableGPS()
         setupTouchArea()
         //observeGuidance()
-        showState(AppState.IDLE)
+        if (BOOTH_MODE) {
+            enterBoothMode()
+        } else {
+            showState(AppState.IDLE)
+        }
+    }
+
+    /**
+     * 부스/행사 데모 진입 (BOOTH_MODE=true). GPS·네비 없이 카메라+AI 만 켠다.
+     * 신호 판정·발화·진동은 평소 파이프라인(SignalDecisionEngine) 그대로.
+     */
+    private fun enterBoothMode() {
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        beforeContainer.visibility = View.GONE
+        compassContainer.visibility = View.GONE
+        resultsContainer.visibility = View.GONE
+        arrivedContainer.visibility = View.GONE
+        cameraPreviewContainer.visibility = View.VISIBLE
+        rootLayout.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        if (ActivityCompat.checkSelfPermission(
+                this, Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            startCamera()
+        }
+        speakTTS("데모 모드입니다. 신호등을 비춰 주세요.")
     }
 
     override fun onResume() {
@@ -1998,7 +2031,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                             detector = detector,
                             // 횡단보도 zone + 10m 이내 신호등일 때만 ML 추론. 테스트 모드는 예외.
                             isActive = {
-                                (inCrosswalkZone && hasNearbyTrafficSignalForCamera) || TEST_MODE_FORCE_ML_ON
+                                (inCrosswalkZone && hasNearbyTrafficSignalForCamera) || TEST_MODE_FORCE_ML_ON || BOOTH_MODE
                             },
                         ) { detections ->
                             runOnUiThread { onTrafficLightDetected(detections) }
@@ -2075,7 +2108,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         } else {
             "TL_DIAG zone=$inCrosswalkZone signal10m=$hasNearbyTrafficSignalForCamera raw=${detections.size} stats=null"
         }
-        val trafficLightAiActive = inCrosswalkZone && hasNearbyTrafficSignalForCamera
+        val trafficLightAiActive = (inCrosswalkZone && hasNearbyTrafficSignalForCamera) || BOOTH_MODE
         val aiResultLine = if (stats != null) {
             "AI ${if (trafficLightAiActive) "ON" else "OFF"} | raw=${detections.size} " +
                     "above=${stats.rawCandidatesAboveThreshold} " +
@@ -2544,6 +2577,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 checkAndEnableGPS()
             } else {
                 speakTTS("위치 권한이 필요합니다. 설정에서 허용해주세요.")
+            }
+            // 부스 모드: 카메라 권한이 이번에 허용됐으면 즉시 카메라 시작
+            if (BOOTH_MODE && ActivityCompat.checkSelfPermission(
+                    this, Manifest.permission.CAMERA
+                ) == PackageManager.PERMISSION_GRANTED
+            ) {
+                startCamera()
             }
         }
     }
