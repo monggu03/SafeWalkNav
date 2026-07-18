@@ -2118,46 +2118,18 @@ class NavigationManager(
         userLon: Double,
         @Suppress("UNUSED_PARAMETER") userBearing: Float,
     ) {
-        val route = currentRoute ?: return
-        val nextWp = route.waypoints.getOrNull(currentWaypointIndex) ?: return
         virtualPassCount++
-
-        // (1) 이탈 보정 — 비프 제거, 음성만. 5m 이상이면 방향 없이 "이탈하셨습니다".
-        val crossM = computeSignedCrossTrack(
-            currentLat = userLat,
-            currentLon = userLon,
-            routePoints = listOf(
-                LatLng(passed.lat, passed.lon),
-                LatLng(nextWp.lat, nextWp.lon),
-            ),
-            currentRoutePointIndex = 0,
-        )
-        if (kotlin.math.abs(crossM) >= navigatorConfig.curveDeviationCriticalM) {
-            speak("이탈하셨습니다")
-            return
-        }
-
-        // (2) 곡선 방향 음성 — "○○ 방향", 곡선당 최대 N회
-        val curveDir = passed.curveDirection ?: return
-        val side = when (curveDir) {
-            "RIGHT" -> "오른쪽"
-            "LEFT"  -> "왼쪽"
-            else    -> return
-        }
-
-        // 곡선 경계 감지: 직전 가상 통과와 인덱스 차가 1 초과(=실 waypoint가 끼임)거나
-        // 방향이 바뀌면 새 곡선 → 카운터 리셋.
-        val isNewCurve = (currentWaypointIndex - lastVirtualWpIndex) > 1 ||
-                curveDir != lastCurveReminderDirection
-        if (isNewCurve) curveAnnounceCount = 0
         lastVirtualWpIndex = currentWaypointIndex
 
-        if (curveAnnounceCount < navigatorConfig.curveMaxAnnouncementsPerCurve) {
-            // A-3: 가상 wp 통과 시점 1회 곡선 방향 리마인더 — 일회성.
-            announceEvent("${side} 방향", forceRepeat = false, interrupt = false)
-            curveAnnounceCount++
-        }
-        lastCurveReminderDirection = curveDir
+        // 2026-07 OKO식 단순화 — 이 함수의 발화를 전부 제거했다.
+        //
+        //  (1) 보행 쏠림(좌우 이탈) 보정 폐기: 흰지팡이 사용자는 좌우 탐지 보행이 정상인데
+        //      cross-track 이탈로 오판해 "이탈하셨습니다"를 반복 발화하던 문제가 있었다.
+        //  (2) 가상 waypoint(약 5m 간격) 통과마다 "오른쪽 방향/왼쪽 방향"을 반복하던 곡선
+        //      리마인더도 제거. 몇 걸음마다 말이 나와 사용자가 피로해진다.
+        //
+        // 회전/곡선 안내는 RouteAnnotator 의 사전 예고(15~30m 전, 회전당 최대 2회)만 남긴다.
+        // 이 함수는 이제 가상 waypoint 통과 카운트만 갱신한다(발화 없음).
     }
 
     /**

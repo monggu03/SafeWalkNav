@@ -50,7 +50,6 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.safewalknav.location.LocationTracker
-import com.example.safewalknav.compass.CompassView
 import com.example.safewalknav.ml.BoundingBoxOverlay
 import com.example.safewalknav.ml.TrafficLightAnalyzer
 import com.example.safewalknav.ml.TrafficLightDetection
@@ -154,13 +153,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private lateinit var rootLayout: View
     private lateinit var cameraPreviewContainer: FrameLayout
+    // 부스 데모 오버레이 (카메라 위 전체화면 색 + 큰 글씨)
+    private var boothOverlayContainer: View? = null
+    private var boothColorView: View? = null
+    private var boothStatusText: android.widget.TextView? = null
     private lateinit var beforeContainer: ViewGroup
     private lateinit var tvBeforeHint: TextView
     private lateinit var resultsContainer: LinearLayout
     private lateinit var arrivedContainer: ViewGroup
     private lateinit var tvArrivedName: TextView
     private lateinit var compassContainer: ViewGroup
-    private lateinit var compassView: CompassView
     private lateinit var tvCompassGuidance: TextView
     private lateinit var tvCompassSubInfo: TextView
     private lateinit var debugContainer: ViewGroup
@@ -357,7 +359,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // 행사장엔 횡단보도가 없어 평소 zone 게이팅으론 아무것도 안 뜨므로 SF 데모엔 필수.
     // ⚠️ 실사용/배포 빌드에서는 반드시 false (zone gating 안전 정책이 꺼진다).
     // 신호 판정은 평소처럼 shared/SignalDecisionEngine 이 담당한다.
-    private val BOOTH_MODE = false
+    private var boothModeActive = false
 
     // 시연 영상 촬영 모드 — DEBUG 빌드여도 하단 디버그 박스 (STATE/GPS/AI/crosswalkDist 등) 를 숨김.
     // bbox 오버레이는 그대로 유지하여 신호등 검출 시각화는 보이게 한다.
@@ -557,14 +559,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     // 벌어지면 LEFT/RIGHT_LEAN 누적 → 3회 도달 시 음성 보정 안내.
                     // 휴대폰 자세 가정: 평평하게 눕혀서 들고 있음 (Step 2 에서 자세 토글 추가 예정).
                     if (::navigationManager.isInitialized) {
+                        // 방위각은 신호등 시계방향 조준에만 쓴다 (나침반 UI 는 2026-07 제거).
                         navigationManager.updateCompassHeading(currentAzimuth, now)
-                        // 나침반 UI 갱신 — 사용자 방향(흰 화살표) + 도로 방향(초록 화살표) 동시 push.
-                        // 나침반 컨테이너가 GONE 일 때도 invalidate 비용은 미미.
-                        // 시각 표시는 onboarding 중에도 유지 (사용자 회전 확인용).
-                        if (::compassView.isInitialized) {
-                            val target = navigationManager.targetBearing.value
-                            compassView.setHeading(currentAzimuth, target)
-                        }
                     }
                 }
 
@@ -619,13 +615,17 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         arrivedContainer = findViewById(R.id.arrivedContainer)
         tvArrivedName = findViewById(R.id.tvArrivedName)
         compassContainer = findViewById(R.id.compassContainer)
-        compassView = findViewById(R.id.compassView)
         tvCompassGuidance = findViewById(R.id.tvCompassGuidance)
         tvCompassSubInfo = findViewById(R.id.tvCompassSubInfo)
         debugContainer = findViewById(R.id.debugContainer)
         tvDebugStatus = findViewById(R.id.tvDebugStatus)
         tvDebugGuidance = findViewById(R.id.tvDebugGuidance)
         tvDebugAiResult = findViewById(R.id.tvDebugAiResult)
+        boothOverlayContainer = findViewById(R.id.boothOverlayContainer)
+        boothColorView = findViewById(R.id.boothColorView)
+        boothStatusText = findViewById(R.id.boothStatusText)
+        findViewById<android.widget.Button>(R.id.btnBoothDemo).setOnClickListener { enterBoothMode() }
+        findViewById<android.widget.Button>(R.id.btnBoothExit).setOnClickListener { exitBoothMode() }
 
         // DEBUG 빌드만 디버그 박스 표시 + 시각 힌트 텍스트 표시.
         // DEMO_MODE=true 이면 디버그 박스는 숨기고 (시연 영상용) 시각 힌트는 유지한다.
@@ -658,24 +658,25 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         checkAndEnableGPS()
         setupTouchArea()
         //observeGuidance()
-        if (BOOTH_MODE) {
-            enterBoothMode()
-        } else {
-            showState(AppState.IDLE)
-        }
+        showState(AppState.IDLE)
     }
 
     /**
-     * 부스/행사 데모 진입 (BOOTH_MODE=true). GPS·네비 없이 카메라+AI 만 켠다.
-     * 신호 판정·발화·진동은 평소 파이프라인(SignalDecisionEngine) 그대로.
+     * 부스/행사 데모 진입 (화면 '부스 데모 시작' 버튼). GPS·네비 없이 카메라+AI 만 켠다.
+     * 신호 판정·발화·진동은 평소 파이프라인(SignalDecisionEngine) 그대로,
+     * 화면엔 전체화면 색 + 큰 글씨를 얹는다. 인터뷰/부스 데모 전용(상용 아님).
      */
     private fun enterBoothMode() {
+        boothModeActive = true
+        signalDecisionEngine.reset()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         beforeContainer.visibility = View.GONE
         compassContainer.visibility = View.GONE
         resultsContainer.visibility = View.GONE
         arrivedContainer.visibility = View.GONE
         cameraPreviewContainer.visibility = View.VISIBLE
+        boothOverlayContainer?.visibility = View.VISIBLE
+        setBoothIdleVisual()
         rootLayout.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         if (ActivityCompat.checkSelfPermission(
                 this, Manifest.permission.CAMERA
@@ -684,6 +685,43 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             startCamera()
         }
         speakTTS("데모 모드입니다. 신호등을 비춰 주세요.")
+    }
+
+    /** 부스 데모 종료 ('데모 종료' 버튼) → 평소 대기 화면으로. */
+    private fun exitBoothMode() {
+        boothModeActive = false
+        stopCamera()
+        signalDecisionEngine.reset()
+        boothOverlayContainer?.visibility = View.GONE
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        showState(AppState.IDLE)
+        speakTTS("데모를 종료했습니다.")
+    }
+
+    /** 부스 화면: 신호 없음 상태 (투명 + 안내 문구). */
+    private fun setBoothIdleVisual() {
+        boothColorView?.setBackgroundColor(0x00000000)
+        boothStatusText?.text = "신호등을 비춰 주세요"
+    }
+
+    /** 부스 화면 갱신 — 엔진 결정에 따라 전체화면 색 + 큰 글씨. */
+    private fun updateBoothVisual(decision: SignalDecision) {
+        if (!boothModeActive) return
+        val RED = 0x66D50000.toInt()
+        val GREEN = 0x6600C853.toInt()
+        val CLEAR = 0x00000000
+        when (decision) {
+            is SignalDecision.Announce -> when (decision.transition) {
+                SignalTransition.RED_TO_GREEN -> { boothColorView?.setBackgroundColor(GREEN); boothStatusText?.text = "초록불 · WALK\n건너세요" }
+                SignalTransition.STATIC_GREEN -> { boothColorView?.setBackgroundColor(GREEN); boothStatusText?.text = "초록불 · WAIT\n다음 신호 대기" }
+                else -> { boothColorView?.setBackgroundColor(RED); boothStatusText?.text = "빨간불 · STOP\n정지" }
+            }
+            is SignalDecision.Repeat ->
+                if (decision.color == 0) { boothColorView?.setBackgroundColor(RED); boothStatusText?.text = "빨간불 · STOP\n정지" }
+                else { boothColorView?.setBackgroundColor(GREEN); boothStatusText?.text = "초록불 · WALK" }
+            is SignalDecision.Flicker -> { boothColorView?.setBackgroundColor(RED); boothStatusText?.text = "신호 깜빡임 · WAIT" }
+            is SignalDecision.Silent -> { /* 확신 부족/안정성 대기 등 — 현재 화면 유지 */ }
+        }
     }
 
     override fun onResume() {
@@ -1536,9 +1574,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
 
                 val interval = when {
-                    dist <= 3f -> 400L
-                    dist <= 5f -> 800L
-                    dist <= 10f -> 1500L
+                    dist <= 3f -> 700L
+                    dist <= 5f -> 1100L
+                    dist <= 10f -> 1800L
                     else -> 3000L
                 }
 
@@ -1556,13 +1594,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 } catch (_: Exception) {
                 }
 
-                if (dist <= 10f) {
-                    val intensity = when {
-                        dist <= 3f -> 255
-                        dist <= 5f -> 180
-                        else -> 100
-                    }
-                    vibrator.vibrate(VibrationEffect.createOneShot(60, intensity))
+                // 진동은 5m 이내에서만, 강도도 낮춘다 (매 비프 진동이 과했음).
+                if (dist <= 5f) {
+                    val intensity = if (dist <= 3f) 180 else 120
+                    vibrator.vibrate(VibrationEffect.createOneShot(50, intensity))
                 }
 
                 delay(interval)
@@ -1616,16 +1651,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                 if (abs(angleDiff) > 135f) {
                     val now = System.currentTimeMillis()
-                    if (now - lastBehindAnnounceTime > 4000L) {
+                    if (now - lastBehindAnnounceTime > 6000L) {
                         lastBehindAnnounceTime = now
                         runOnUiThread { speakTTS("목적지는 뒤쪽입니다. 몸을 돌려주세요.") }
                     }
                 }
 
                 val interval = when {
-                    abs(angleDiff) < 15f -> 300L
-                    abs(angleDiff) < 45f -> 500L
-                    else -> 700L
+                    abs(angleDiff) < 15f -> 600L
+                    abs(angleDiff) < 45f -> 800L
+                    else -> 1000L
                 }
                 delay(interval)
             }
@@ -1738,10 +1773,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     if (message.contains("이탈")) {
                         vibrateWarning()
                         playToneWarning()
-                    } else if (message.contains("횡단보도") || message.contains("계단")) {
-                        vibrateMedium()
-                        playToneAlert()
                     }
+                    // 횡단보도/계단 진동·톤은 navEvents 핸들러 한 곳에서만 낸다 (이중 발동 제거)
                 }
             }
         }
@@ -1854,18 +1887,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 applyNavigatingMode(inCrosswalkZone)
                 applyTrafficSignalCameraZoom()
                 updateCompactDebugGuidance()
-            }
-        }
-
-        // 도로 진행 방향 (targetBearing) StateFlow — 2초 GPS tick 주기로 갱신됨.
-        // 나침반 화면의 초록 화살표가 이 값을 따라가게 한다.
-        // (사용자 방향 흰 화살표는 orientationListener 가 더 자주 갱신하므로
-        //  여기선 도로 방향이 바뀔 때만 추가 invalidate.)
-        lifecycleScope.launch {
-            navigationManager.targetBearing.collectLatest { roadBearing ->
-                if (::compassView.isInitialized) {
-                    compassView.setHeading(currentAzimuth, roadBearing)
-                }
             }
         }
 
@@ -2031,7 +2052,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                             detector = detector,
                             // 횡단보도 zone + 10m 이내 신호등일 때만 ML 추론. 테스트 모드는 예외.
                             isActive = {
-                                (inCrosswalkZone && hasNearbyTrafficSignalForCamera) || TEST_MODE_FORCE_ML_ON || BOOTH_MODE
+                                (inCrosswalkZone && hasNearbyTrafficSignalForCamera) || TEST_MODE_FORCE_ML_ON || boothModeActive
                             },
                         ) { detections ->
                             runOnUiThread { onTrafficLightDetected(detections) }
@@ -2108,7 +2129,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         } else {
             "TL_DIAG zone=$inCrosswalkZone signal10m=$hasNearbyTrafficSignalForCamera raw=${detections.size} stats=null"
         }
-        val trafficLightAiActive = (inCrosswalkZone && hasNearbyTrafficSignalForCamera) || BOOTH_MODE
+        val trafficLightAiActive = (inCrosswalkZone && hasNearbyTrafficSignalForCamera) || boothModeActive
         val aiResultLine = if (stats != null) {
             "AI ${if (trafficLightAiActive) "ON" else "OFF"} | raw=${detections.size} " +
                     "above=${stats.rawCandidatesAboveThreshold} " +
@@ -2131,6 +2152,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // ──── 안내 흐름 (기존 로직, 단 reason 명시) ────
 
         if (detections.isEmpty()) {
+            if (boothModeActive) setBoothIdleVisual()
             // 모델이 신호등을 못 봄 (또는 threshold 미달).
             // iOS TrafficLightDetector 와 동일하게 AI 활성 상태에서는 단계형 카메라 조작 안내를 낸다.
             if (stats != null && stats.peakConfidence >= NO_DET_SUPPRESS_PEAK_CONFIDENCE) {
@@ -2170,6 +2192,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             RawSignalDetection(it.classId, it.confidence, it.bbox.width, it.bbox.height)
         }
         val decision = signalDecisionEngine.decide(rawSignals, System.currentTimeMillis())
+        if (boothModeActive) updateBoothVisual(decision)
 
         // 로그·Firebase 표기용 대표 검출 (판정은 엔진이 이미 끝냄 — 표시 전용)
         val nearest = detections.maxByOrNull { it.confidence }
@@ -2203,7 +2226,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             is SignalDecision.Repeat -> {
                 resetTrafficLightNoDetectionEscalation()
-                speakTrafficLightTTS(repeatTrafficLightMessage(decision.color), interrupt = decision.color == 0)
+                // 반복 안내는 다른 발화를 끊지 않는다 (interrupt=false). 빨간불이라도 큐에 얹기만.
+                speakTrafficLightTTS(repeatTrafficLightMessage(decision.color), interrupt = false)
                 appendNavLog("TL_DIAG  └─ REPEAT_TTS color=${classLabel(decision.color)}")
                 if (BuildConfig.DEBUG) {
                     updateAiDebugResult("$aiResultLine | action=REPEAT_TTS label=${classLabel(decision.color)}")
@@ -2579,7 +2603,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 speakTTS("위치 권한이 필요합니다. 설정에서 허용해주세요.")
             }
             // 부스 모드: 카메라 권한이 이번에 허용됐으면 즉시 카메라 시작
-            if (BOOTH_MODE && ActivityCompat.checkSelfPermission(
+            if (boothModeActive && ActivityCompat.checkSelfPermission(
                     this, Manifest.permission.CAMERA
                 ) == PackageManager.PERMISSION_GRANTED
             ) {

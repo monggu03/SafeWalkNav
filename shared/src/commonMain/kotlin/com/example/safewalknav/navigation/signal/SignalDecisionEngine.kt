@@ -338,9 +338,10 @@ data class SignalDecisionConfig(
     // 타이밍
     //   heartbeat < timeout 이어야 한다: 같은 색을 계속 보고 있는데(연속 프레임)
     //   heartbeat 가 timeout 이상이면, heartbeat 직전에 timeout 리셋이 먼저 걸려
-    //   반복 안내가 영영 안 나갈 수 있다. 8초 반복 / 12초 타임아웃으로 여유를 둔다.
-    val heartbeatIntervalMs: Long = 8_000L,
-    val detectionTimeoutMs: Long = 12_000L,
+    //   반복 안내가 영영 안 나갈 수 있다.
+    //   2026-07: 같은 신호 반복이 잦다는 피드백 → 8초 → 12초로 완화 (timeout 도 20초로 상향).
+    val heartbeatIntervalMs: Long = 12_000L,
+    val detectionTimeoutMs: Long = 20_000L,
     val minPhaseDurationMs: Long = 4_000L,   // 정상 phase 최소 지속 (이보다 짧은 전환 = 점멸)
     val flickerLockoutMs: Long = 6_000L,     // 점멸 감지 후 안내 차단 기간
 )
