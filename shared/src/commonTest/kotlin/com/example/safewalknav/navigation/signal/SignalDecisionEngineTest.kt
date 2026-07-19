@@ -103,7 +103,7 @@ class SignalDecisionEngineTest {
         val engine = SignalDecisionEngine(cfg)
         var t = 1000L
         var last: SignalDecision = SignalDecision.Silent(SilentReason.NO_DETECTION)
-        repeat(3) { last = engine.decide(listOf(green()), t); t += 100 }
+        repeat(cfg.greenStabilityFrames) { last = engine.decide(listOf(green()), t); t += 100 }
         assertIs<SignalDecision.Announce>(last)
         assertEquals(SignalTransition.STATIC_GREEN, last.transition)
         assertTrue(!last.vibrate, "정적 초록은 진동하면 안 된다 (출발 신호로 오인 위험)")

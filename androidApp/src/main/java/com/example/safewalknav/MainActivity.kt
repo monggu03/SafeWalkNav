@@ -50,7 +50,6 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.example.safewalknav.location.LocationTracker
-import com.example.safewalknav.ml.BoundingBoxOverlay
 import com.example.safewalknav.ml.TrafficLightAnalyzer
 import com.example.safewalknav.ml.TrafficLightDetection
 import com.example.safewalknav.onboarding.AutoOnboardingCoordinator
@@ -201,6 +200,19 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // NAVIGATING 시작 시 파일 열고, isInCrosswalkZone / guidance / TL 검출 / 경로 dump 모두 기록.
     // 외장 저장소: /sdcard/Android/data/com.example.safewalknav/files/walk_logs/walk_<ts>.log
     private var navLogFile: File? = null
+
+    // ==================== 발화(TTS) 로그 ====================
+    // 목적: "말이 너무 많다" 를 감각이 아니라 데이터로 판단한다.
+    // 모든 TTS 출구를 speakLogged() 하나로 모아, 발화마다 직전 발화와의 간격을 기록한다.
+    // 파일은 walk_logs 와 분리(GPS 좌표가 섞이지 않아 그대로 공유해도 안전)하고,
+    // 동시에 logcat 태그 SW_SPEECH 로도 흘려서 adb 로 바로 받아볼 수 있게 한다.
+    private var speechLogFile: File? = null
+    private var speechSeq = 0
+    private var speechStartMs = 0L
+    private var lastSpeechMs = 0L
+    private val speechCounts = LinkedHashMap<String, Int>()   // 메시지별 횟수
+    private val speechBySource = LinkedHashMap<String, Int>() // 발화 지점별 횟수
+    private val speechGaps = mutableListOf<Long>()            // 직전 발화와의 간격(ms)
     private val tsFormat = SimpleDateFormat("HH:mm:ss.SSS")
 
     // ==================== Firebase Analytics 클라우드 집계 (2026-05-29) ====================
@@ -298,6 +310,97 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    /** 발화 로그 시작. 외출·부스 어느 쪽으로 진입하든 호출된다(중복 호출 안전). */
+    private fun startSpeechLog() {
+        if (speechLogFile != null) return
+        try {
+            val dir = getExternalFilesDir("speech_logs")
+            dir?.mkdirs()
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss").format(Date())
+            speechStartMs = System.currentTimeMillis()
+            lastSpeechMs = 0L
+            speechSeq = 0
+            speechCounts.clear(); speechBySource.clear(); speechGaps.clear()
+            speechLogFile = File(dir, "speech_$ts.log").apply {
+                writeText(
+                    "=== SafeWalk 발화 로그 ${Date()} ===\n" +
+                    "형식: [시각] #번호 (+직전발화후 경과s) [발화지점] {FLUSH=끊고말함|ADD=대기열} \"메시지\"\n" +
+                    "----------------------------------------------------------------\n"
+                )
+            }
+            Log.d("SW_SPEECH", "log file = ${speechLogFile?.absolutePath}")
+        } catch (e: Exception) {
+            Log.e("SafeWalkNav", "speech log create failed", e)
+        }
+    }
+
+    /**
+     * 모든 TTS 의 단일 출구. 여기를 통과하지 않는 발화가 있으면 로그가 거짓말을 하게 되므로
+     * tts.speak() 직접 호출을 새로 추가하지 말 것.
+     *
+     * @param source 어느 코드 경로에서 나온 말인지 (집계 기준)
+     */
+    private fun speakLogged(
+        message: String,
+        interrupt: Boolean,
+        utteranceId: String,
+        source: String,
+    ) {
+        val now = System.currentTimeMillis()
+        val gap = if (lastSpeechMs == 0L) -1L else now - lastSpeechMs
+        speechSeq++
+        if (gap >= 0) speechGaps += gap
+        speechCounts[message] = (speechCounts[message] ?: 0) + 1
+        speechBySource[source] = (speechBySource[source] ?: 0) + 1
+        lastSpeechMs = now
+
+        val gapText = if (gap < 0) "  시작" else String.format("+%5.1fs", gap / 1000.0)
+        val mode = if (interrupt) "FLUSH" else "ADD  "
+        val line = "#%03d (%s) [%-18s] {%s} \"%s\"".format(speechSeq, gapText, source, mode, message)
+        Log.d("SW_SPEECH", line)
+        try {
+            speechLogFile?.appendText("[${tsFormat.format(Date(now))}] $line\n")
+        } catch (_: Exception) {
+        }
+
+        tts.speak(
+            message,
+            if (interrupt) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
+            null,
+            utteranceId,
+        )
+    }
+
+    /** 세션 종료 시 집계. 이 요약만 봐도 어디서 말이 새는지 판단할 수 있어야 한다. */
+    private fun writeSpeechSummary() {
+        val f = speechLogFile ?: return
+        try {
+            val totalMs = System.currentTimeMillis() - speechStartMs
+            val minutes = totalMs / 60000.0
+            val sb = StringBuilder()
+            sb.append("\n================ 발화 요약 ================\n")
+            sb.append("총 발화 : ${speechSeq}회\n")
+            sb.append("총 시간 : ${"%.1f".format(minutes)}분\n")
+            sb.append("분당 발화: ${if (minutes > 0) "%.1f".format(speechSeq / minutes) else "-"}회/분\n")
+            if (speechGaps.isNotEmpty()) {
+                sb.append("발화 간격: 평균 ${"%.1f".format(speechGaps.average() / 1000.0)}s / ")
+                sb.append("최소 ${"%.1f".format((speechGaps.min()) / 1000.0)}s\n")
+                sb.append("3초 이내 연속 발화: ${speechGaps.count { it < 3000 }}회\n")
+            }
+            sb.append("\n--- 발화 지점별 ---\n")
+            speechBySource.entries.sortedByDescending { it.value }
+                .forEach { sb.append("  %-20s %d회\n".format(it.key, it.value)) }
+            sb.append("\n--- 메시지별 (많은 순) ---\n")
+            speechCounts.entries.sortedByDescending { it.value }.take(25)
+                .forEach { sb.append("  %3d회  %s\n".format(it.value, it.key)) }
+            sb.append("==========================================\n")
+            f.appendText(sb.toString())
+            Log.d("SW_SPEECH", sb.toString())
+        } catch (_: Exception) {
+        }
+        speechLogFile = null
+    }
+
     private fun appendNavLog(msg: String) {
         try {
             navLogFile?.appendText("[${tsFormat.format(Date())}] $msg\n")
@@ -306,6 +409,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun closeNavLog() {
+        // 발화 요약은 navLogFile 유무와 무관하게 먼저 처리한다.
+        // (부스 데모만 쓴 세션은 navLogFile 이 없어서 아래 early return 에 걸린다)
+        writeSpeechSummary()
         if (navLogFile == null) return   // 이미 닫혔으면 no-op (idempotent)
         // 종료 직전 SUMMARY 블록 자동 출력 — 실 사용자 테스트 후 walk_log 마지막에
         // 그대로 슬라이드/리포트에 인용할 수 있는 정량 데이터.
@@ -328,11 +434,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private var trafficLightDetector: TrafficLightDetector? = null
     private var analysisExecutor: ExecutorService? = null
-
-    // ==================== 발표/시연용 바운딩박스 오버레이 (DEBUG only) ====================
-    // PreviewView 위에 한 겹 add 해서 모델이 검출한 신호등 위치를 빨강/초록 사각형으로 표시.
-    // Release 빌드에서는 add 자체를 안 한다 — 실 사용자(시각장애인)에겐 의미 없으므로.
-    private var boundingBoxOverlay: BoundingBoxOverlay? = null
 
     // ⚠️ 시연/테스트용 토글 — true 면 횡단보도 zone gate 를 우회해서 ML 추론 + 안내가 항상 작동.
     // 강의실/카페에서 신호등 사진/영상 비추면서 인식 정확도/박스 시각화/TTS 발화를 종합 점검할 때 사용.
@@ -362,16 +463,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var boothModeActive = false
 
     // 시연 영상 촬영 모드 — DEBUG 빌드여도 하단 디버그 박스 (STATE/GPS/AI/crosswalkDist 등) 를 숨김.
-    // bbox 오버레이는 그대로 유지하여 신호등 검출 시각화는 보이게 한다.
     // 시연 영상 촬영 후 일반 디버깅이 필요해지면 false 로 되돌릴 것.
     private val DEMO_MODE = true
 
-    // 시연용 박스 표시 임계값 — 이 값 이상의 confidence 만 BoundingBoxOverlay 에 그린다.
-    // 2026-06-06: 운영 임계 0.2 와 일치시켜 0.6 → 0.2 로 낮춤. 이전에는 인식은 됐는데
-    // (예: conf 0.5) 박스가 안 그려지는 현상이 있어 시연 영상에서 가끔 박스 누락되었다.
-    // 진단 로그(TL_DIAG)는 그대로 모든 추론 기록.
-    // 시연 환경에 따라 0.2 (관대) ~ 0.5 (엄격) 사이로 조정 가능.
-    private val OVERLAY_MIN_CONFIDENCE = 0.2f
 
     // 신호등 안전 정책 state machine — PR-SAFETY (2026-05-29)
     //
@@ -412,13 +506,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // ──────────────────────────────────────────────────────────────────────
     private val signalDecisionEngine = SignalDecisionEngine()
 
-    // iOS TrafficLightDetector 와 동일한 미탐지 단계 안내.
-    // AI가 켜진 상태에서 신호등을 계속 못 잡으면 3/6/9초에 한 번씩 카메라 조작 안내를 낸다.
-    private var noDetectionStage: Int = 0
+    // 미탐지 안내 (2026-07 재설계).
+    //  구: 3/6/9초에 서로 다른 3문장을 연타 → 부스에서 카메라 겨누는 사이 세 번 다 나가 시끄러웠다.
+    //  신: 카메라 켜고 6초까지 조용히 기다렸다가, 한 문장을 12초 간격으로만 반복.
+    //      20초 넘게 계속 못 잡으면 한 번에 한해 '소리 주의' 폴백을 낸다.
     private var noDetectionStartedAt: Long = 0L
-    private val NO_DET_STAGE1_MS = 3_000L
-    private val NO_DET_STAGE2_MS = 6_000L
-    private val NO_DET_STAGE3_MS = 9_000L
+    private var noDetectionLastSpeechAt: Long = 0L
+    private var noDetectionSafetyFallbackDone: Boolean = false
+    private val NO_DET_FIRST_MS = 6_000L        // 첫 안내까지 대기 (겨눌 시간)
+    private val NO_DET_REPEAT_MS = 12_000L       // 이후 반복 간격
+    private val NO_DET_SAFETY_MS = 20_000L       // 이 시간 넘게 못 잡으면 소리주의 1회
     private val NO_DET_SUPPRESS_PEAK_CONFIDENCE = 0.25f
     private val NO_DET_SPEECH_HOLD_AFTER_CAMERA_ENTRY_MS = 5_000L
     private var noDetectionSpeechHoldUntil: Long = 0L
@@ -668,6 +765,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      */
     private fun enterBoothMode() {
         boothModeActive = true
+        startSpeechLog()   // 부스 데모도 발화 집계 대상
         signalDecisionEngine.reset()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         beforeContainer.visibility = View.GONE
@@ -689,6 +787,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     /** 부스 데모 종료 ('데모 종료' 버튼) → 평소 대기 화면으로. */
     private fun exitBoothMode() {
+        writeSpeechSummary()   // 데모 구간의 발화 집계를 즉시 파일에 남긴다
         boothModeActive = false
         stopCamera()
         signalDecisionEngine.reset()
@@ -1301,6 +1400,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
                 // 파일 로깅 시작 + 경로 정보 dump
                 startNavLog()
+                startSpeechLog()
                 val route = navigationManager.currentRoute
                 if (route != null) {
                     val crosswalks = route.waypoints.count {
@@ -1815,11 +1915,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     return@collectLatest
                 }
 
-                if (event.interrupt) {
-                    tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, message.hashCode().toString())
-                } else {
-                    speakTTS(message)
-                }
+                speakLogged(
+                    message,
+                    interrupt = event.interrupt,
+                    utteranceId = message.hashCode().toString(),
+                    source = "내비이벤트",
+                )
                 Log.d("SafeWalkNav", "NavEvent: $message")
                 appendNavLog("NavEvent: $message")
 
@@ -1995,20 +2096,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         cameraPreviewContainer.removeAllViews()
         cameraPreviewContainer.addView(pv)
 
-        // 발표/시연·평가용 바운딩박스 오버레이 — PreviewView 위에 한 겹 add.
-        // onTrafficLightDetected 가 setDetections() 로 검출 결과를 푸시 → 카메라 영상 위에 빨강/초록 박스.
-        // 2026-06-06: 평가자 일관성 확보를 위해 Release 빌드에서도 add (시연 영상과 동작 일치).
-        // 향후 실 시각장애인 사용자 일반 배포 시에는 BuildConfig.DEBUG 조건을 다시 복원할 것.
-        val overlay = BoundingBoxOverlay(this).apply {
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        }
-        cameraPreviewContainer.addView(overlay)
-        boundingBoxOverlay = overlay
-        appendNavLog("BoundingBoxOverlay attached")
-
         // 검출기/executor 초기화 (재사용)
         if (trafficLightDetector == null) {
             try {
@@ -2082,7 +2169,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      * 신호등 검출 결과 처리 (PR-SAFETY 2026-05-29 — state machine 기반).
      *
      * 단계:
-     *   (0) raw detection 들 → BoundingBoxOverlay (시연용, OVERLAY_MIN_CONFIDENCE 필터)
      *   (1) detections.isEmpty / zone gate
      *   (2) 6% bbox 필터 → validated
      *   (3) Detection 타임아웃 체크 → state reset 여부
@@ -2103,17 +2189,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      */
     private fun onTrafficLightDetected(detections: List<TrafficLightDetection>) {
         val stats = trafficLightDetector?.lastStats
-
-        // ──── 발표/시연용 바운딩박스 오버레이 갱신 ────
-        // OVERLAY_MIN_CONFIDENCE 이상의 검출만 그린다 — 진단 임계(0.3)에 잡힌 noise 박스
-        // (빨간 점/표지판/간판 등) 가 화면을 덮는 걸 방지. 진단 로그(TL_DIAG)는 그대로 모두 기록.
-        // 6% bbox 필터 / cooldown 같은 TTS 후처리는 의도적으로 적용 안 함 — "모델이 신뢰도 높게
-        // 잡은 객체는 무엇인가" 를 시연에 정직하게 보여주기 위함.
-        // empty 리스트가 들어가도 setDetections 가 알아서 박스를 지운다.
-        // boundingBoxOverlay 자체가 DEBUG 빌드에서만 attach 되므로 release 빌드에서는 자동으로 no-op.
-        boundingBoxOverlay?.setDetections(
-            detections.filter { it.confidence >= OVERLAY_MIN_CONFIDENCE }
-        )
 
         // ──── 진단 통계 헤더 (zone 진입 후 매 inference 기록) ────
         // zone=false 일 땐 spam 방지 위해 기록 안 함. zone=true 인데 detections=0 면 모델이 신호등을
@@ -2304,8 +2379,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun resetTrafficLightNoDetectionEscalation() {
-        noDetectionStage = 0
         noDetectionStartedAt = 0L
+        noDetectionLastSpeechAt = 0L
+        noDetectionSafetyFallbackDone = false
     }
 
     private fun handleTrafficLightNoDetection(
@@ -2333,33 +2409,27 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (noDetectionStartedAt == 0L) {
             noDetectionStartedAt = now
         }
-
         val elapsed = now - noDetectionStartedAt
-        val stageMessage = when {
-            elapsed >= NO_DET_STAGE3_MS && noDetectionStage < 3 -> {
-                noDetectionStage = 3
-                "신호등이 감지되지 않습니다. 주변의 소리에 주의하세요."
-            }
-            elapsed >= NO_DET_STAGE2_MS && noDetectionStage < 2 -> {
-                noDetectionStage = 2
-                "각도를 바꿔서 다시 왼쪽에서 오른쪽으로 카메라를 이동해 주세요."
-            }
-            elapsed >= NO_DET_STAGE1_MS && noDetectionStage < 1 -> {
-                noDetectionStage = 1
-                "신호등이 보이지 않습니다. 왼쪽에서 오른쪽으로 천천히 카메라를 이동해 주세요."
-            }
-            else -> null
+
+        // 아직 첫 안내 시점(6초) 이전이면 조용히 대기 — 겨눌 시간을 준다.
+        if (elapsed < NO_DET_FIRST_MS) return
+
+        // 20초 넘게 계속 못 잡으면 '소리 주의' 폴백을 딱 한 번.
+        if (elapsed >= NO_DET_SAFETY_MS && !noDetectionSafetyFallbackDone) {
+            noDetectionSafetyFallbackDone = true
+            noDetectionLastSpeechAt = now
+            speakTrafficLightTTS("신호등이 잘 잡히지 않습니다. 주변 소리에 주의하세요.", interrupt = false)
+            appendNavLog("TL_DIAG  └─ NO_DET_SAFETY reason=$reason elapsed=${elapsed / 1000}s")
+            return
         }
 
-        if (stageMessage != null) {
-            speakTrafficLightTTS(stageMessage, interrupt = false)
-            appendNavLog(
-                "TL_DIAG  └─ NO_DET_STAGE stage=$noDetectionStage reason=$reason elapsed=${elapsed / 1000}s"
-            )
+        // 그 외에는 같은 문장을 12초 간격으로만 반복 (연타 금지).
+        if (noDetectionLastSpeechAt == 0L || now - noDetectionLastSpeechAt >= NO_DET_REPEAT_MS) {
+            noDetectionLastSpeechAt = now
+            speakTrafficLightTTS("신호등을 찾고 있습니다. 카메라를 천천히 좌우로 움직여 주세요.", interrupt = false)
+            appendNavLog("TL_DIAG  └─ NO_DET_REPEAT reason=$reason elapsed=${elapsed / 1000}s")
             if (BuildConfig.DEBUG) {
-                updateAiDebugResult(
-                    "$aiResultLine | action=NO_DET_STAGE stage=$noDetectionStage reason=$reason"
-                )
+                updateAiDebugResult("$aiResultLine | action=NO_DET_REPEAT reason=$reason")
             }
         }
     }
@@ -2386,8 +2456,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         cameraProvider = null
         camera = null
         cameraPreviewContainer.removeAllViews()
-        // removeAllViews() 가 오버레이 View 자체는 제거하지만 reference 는 명시적으로 비워 GC 친화적으로.
-        boundingBoxOverlay = null
 
         // 신호등 안전 state machine 리셋 — 다음 NAVIGATING 진입 시 깨끗한 상태로 시작
         signalDecisionEngine.reset()
@@ -2502,13 +2570,16 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun speakTTS(message: String) {
-        tts.speak(message, TextToSpeech.QUEUE_ADD, null, message.hashCode().toString())
+        speakLogged(message, interrupt = false, utteranceId = message.hashCode().toString(), source = "일반")
     }
 
     private fun speakTrafficLightTTS(message: String, interrupt: Boolean = true) {
-        val queueMode = if (interrupt) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-        val utteranceId = if (interrupt) "traffic_light_urgent" else "traffic_light"
-        tts.speak(message, queueMode, null, utteranceId)
+        speakLogged(
+            message,
+            interrupt = interrupt,
+            utteranceId = if (interrupt) "traffic_light_urgent" else "traffic_light",
+            source = "신호등",
+        )
     }
 
     /**
@@ -2517,7 +2588,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      */
     private fun speakAndListenIdle(message: String) {
         showState(AppState.IDLE)
-        tts.speak(message, TextToSpeech.QUEUE_ADD, null, "auto_listen")
+        speakLogged(message, interrupt = false, utteranceId = "auto_listen", source = "재청취유도")
     }
 
     // ==================== GPS ====================

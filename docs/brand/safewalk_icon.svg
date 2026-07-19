@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="SafeWalk 앱 아이콘 — 횡단보도를 걷는 보행 신호 인물">
+  <title>SafeWalk</title>
+  <desc>검은 배경 위, 초록색 보행 신호 인물이 노란 횡단보도 줄무늬 위를 걷는 모습.</desc>
+  <defs>
+    <radialGradient id="bg" cx="38%" cy="28%" r="88%">
+      <stop offset="0%" stop-color="#1C1F26"/>
+      <stop offset="100%" stop-color="#080A0D"/>
+    </radialGradient>
+    <filter id="glow" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur stdDeviation="7" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <g fill="#FFD700">
+    <rect x="150" y="404" width="212" height="20" rx="10" opacity="0.42"/>
+    <rect x="122" y="438" width="268" height="21" rx="10.5" opacity="0.70"/>
+    <rect x="92"  y="473" width="328" height="22" rx="11"/>
+  </g>
+  <g filter="url(#glow)">
+    <g fill="#00CC66" stroke="#00CC66" stroke-width="18" stroke-linejoin="round">
+      <!-- 몸통: 어깨 넓고 골반 좁은 사다리꼴. 같은 색 stroke 로 모서리를 둥글린다. -->
+      <path d="M246 196 L312 210 L288 306 L240 296 Z"/>
+    </g>
+    <g stroke="#00CC66" stroke-linecap="round" stroke-linejoin="round" fill="none">
+      <!-- 뒤로 스윙한 팔 / 뒤로 뻗은 다리 -->
+      <path d="M252 218 L198 262" stroke-width="30"/>
+      <path d="M248 302 L200 352 L154 394" stroke-width="36"/>
+      <!-- 앞으로 스윙한 팔 / 앞으로 내딛는 다리 -->
+      <path d="M302 218 L358 240" stroke-width="30"/>
+      <path d="M272 304 L322 354 L338 408" stroke-width="36"/>
+    </g>
+    <circle cx="278" cy="134" r="43" fill="#00CC66"/>
+  </g>
+</svg>

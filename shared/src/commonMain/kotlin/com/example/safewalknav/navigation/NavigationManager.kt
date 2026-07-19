@@ -103,7 +103,7 @@ class NavigationManager(
     val compassHeading: StateFlow<Float> = _compassHeading.asStateFlow()
 
     // 현재 도로 진행 방향 (computeRouteBearingAhead 결과, 매 GPS tick 갱신).
-    // CompassView 가 이 값과 compassHeading 두 화살표를 한 원에 그려 방향 비교를 시각화.
+    // 2026-07: CompassView(나침반 화면) 삭제됨. 이 값은 AppScreenState.NavMode.Walking 배선용으로 남긴다.
     private val _targetBearing = MutableStateFlow(0f)
     val targetBearing: StateFlow<Float> = _targetBearing.asStateFlow()
     private var currentTargetBearing: Float
@@ -235,7 +235,6 @@ class NavigationManager(
     private var lastCurveReminderDirection: String? = null
 
     // 곡선당 "○○ 방향" 발화 횟수 카운터 (곡선 진입 시 0으로 리셋).
-    private var curveAnnounceCount = 0
     // 직전 가상 waypoint 통과 시점의 currentWaypointIndex (곡선 경계 감지용).
     private var lastVirtualWpIndex = -1
 
@@ -314,7 +313,7 @@ class NavigationManager(
 
     fun updateCompassHeading(azimuth: Float, currentTime: Long) {
         latestCompassHeading = azimuth
-        _compassHeading.value = azimuth   // CompassView 흰 화살표 계속 작동
+        _compassHeading.value = azimuth   // 신호등 조준용 시계방향(getClockDirection) 에 계속 필요
 
     }
 
@@ -783,7 +782,6 @@ class NavigationManager(
         virtualPassCount = 0
         lastCurveReminderTime = 0L
         lastCurveReminderDirection = null
-        curveAnnounceCount = 0
         lastVirtualWpIndex = -1
         spatialBeeper.stop()
         _annotations.value = emptyList()
@@ -827,7 +825,6 @@ class NavigationManager(
         virtualPassCount = 0
         lastCurveReminderTime = 0L
         lastCurveReminderDirection = null
-        curveAnnounceCount = 0
         lastVirtualWpIndex = -1
         spatialBeeper.stop()
         _annotations.value = emptyList()
@@ -2106,11 +2103,9 @@ class NavigationManager(
     /**
      * 가상 waypoint 통과 시 호출.
      *
-     * (2026-05-30 버전):
-     *   - 비프음 제거. 곡선 방향을 짧은 음성("오른쪽 방향"/"왼쪽 방향")으로 안내.
-     *   - 곡선당 최대 curveMaxAnnouncementsPerCurve(기본 3)회까지만 발화.
-     *   - 이탈(cross-track ≥ curveDeviationCriticalM=5m) 시 방향 없이 "이탈하셨습니다".
-     *     이탈 발화한 통과에서는 곡선 방향 발화를 생략(이중 발화 방지).
+     * (2026-07 현재) **발화 없음.** 통과 카운트만 갱신한다.
+     * 과거 이 지점에서 하던 "이탈하셨습니다"(cross-track 쏠림)와
+     * "오른쪽/왼쪽 방향"(곡선 리마인더)은 아래 본문 주석의 이유로 모두 제거됐다.
      */
     private fun handleVirtualWaypointPassed(
         passed: Waypoint,

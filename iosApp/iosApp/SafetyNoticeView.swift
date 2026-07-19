@@ -112,3 +112,15 @@ struct ConsentBlockedView: View {
         }
     }
 }
+
+// MARK: - Color(hex:) 확장
+// SwiftUI 기본 Color 에는 hex 초기화가 없다. 이 파일이 Color(hex: 0xFFD700) 을 쓰므로
+// 여기에 정의한다. 0xRRGGBB (24bit) 형식만 받는다.
+extension Color {
+    init(hex: UInt32) {
+        let r = Double((hex >> 16) & 0xFF) / 255.0
+        let g = Double((hex >> 8) & 0xFF) / 255.0
+        let b = Double(hex & 0xFF) / 255.0
+        self.init(red: r, green: g, blue: b)
+    }
+}

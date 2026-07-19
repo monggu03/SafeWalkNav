@@ -12,9 +12,14 @@ package com.example.safewalknav.navigation.tbfw
  * 2026-05-26 — 곡선 진행 중 방향 리마인더 추가.
  *   사유: 사전 안내(15~25m 전 1회)만으로는 긴 곡선 중간에 사용자가 방향을 잊을 수 있고,
  *   GPS sideways pass 로 가상 waypoint 통과 판정이 누락될 수 있어 정보 우선으로 발화.
+ *
+ * 2026-07 — 위 곡선 리마인더 **폐기**. 가상 waypoint(약 5m)마다 "오른쪽 방향"이 반복돼
+ *   이동 내내 말이 끊이지 않았다. 정보량보다 조용함이 우선이라는 판단.
+ *   회전/곡선 안내는 RouteAnnotator 의 사전 예고(announceDistance*M) 만 남는다.
  */
 data class NavigatorConfig(
-    // ─── 보행 쏠림 보정 (Path Annotation) ───
+    // ─── 경로 형상 분석 (Path Annotation) ───
+    // (구 "보행 쏠림 보정" — 쏠림 보정 자체는 2026-07 폐기, 곡선/회전 분류 용도로만 남음)
     // RouteAnnotator 가 waypoint 시퀀스를 곡선/회전으로 분류할 때 쓰는 임계값.
     val minSegmentDistanceM: Double = 3.0,
     val noiseAngleThresholdDeg: Double = 10.0,
@@ -69,6 +74,9 @@ data class NavigatorConfig(
     val curveReminderCooldownMs: Long = 8_000L,
 
     // 곡선당 "○○ 방향" 음성 최대 발화 횟수. 같은 곡선 안에서 N회까지만 안내.
+    // 2026-07 폐기된 곡선 리마인더의 잔여 설정. 현재 어디서도 읽지 않는다.
+    //         (외부 호출부 호환을 위해 필드만 유지)
+    @Deprecated("곡선 진행 중 리마인더 폐기 (2026-07). 사용처 없음.")
     val curveMaxAnnouncementsPerCurve: Int = 3,
 
     // 완만 곡선 승급 기준 (CURVE promotion).

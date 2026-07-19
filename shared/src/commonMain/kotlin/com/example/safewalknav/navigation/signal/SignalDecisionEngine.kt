@@ -329,9 +329,13 @@ data class SignalDecisionConfig(
     // 크기 하한 (서브픽셀 노이즈 제거용, 두 색 공통). 0.008 ≈ 27m
     val minBoxDimension: Float = 0.008f,
     // 안정성 (연속 프레임)
-    val redStabilityFrames: Int = 2,
-    val greenStabilityFrames: Int = 3,
-    val greenTransitionStabilityFrames: Int = 2,
+    // 2026-07: 추론이 3fps(약 333ms/프레임)라 프레임 수가 곧 시간이다.
+    //   구값(빨강 2·초록 3)은 0.67~1.0초라, 화면에 색이 잠깐만 스쳐도 확정돼
+    //   "켜자마자 빨간불" · "깜빡이지 않는데 깜빡임" 오작동을 냈다(모델 순간 오탐이 상태로 굳음).
+    //   시간 기준으로 올려 순간 노이즈를 걸러낸다. 빨강 4≈1.3s / 초록 5≈1.7s / 전환 4≈1.3s.
+    val redStabilityFrames: Int = 4,
+    val greenStabilityFrames: Int = 5,
+    val greenTransitionStabilityFrames: Int = 4,
     // 선택 단계 R→G 안전 바이어스 (빨강·초록 동시 검출 시 초록이 이기는 조건)
     val greenTransitionMinConfidence: Float = 0.55f,
     val greenOverRedConfidenceMargin: Float = 0.05f,
