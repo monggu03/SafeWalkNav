@@ -78,7 +78,6 @@ final class TrafficLightDetector: NSObject, ObservableObject {
 
     // MARK: - 햅틱 (iOS 에는 원래 진동이 없었음 — 통일 작업에서 추가)
     private let impactStrong = UIImpactFeedbackGenerator(style: .heavy)
-    private let notificationHaptic = UINotificationFeedbackGenerator()
 
     // MARK: - TTS (통합 앱에서는 TtsManager 사용)
     /// nil이면 자체 synthesizer 사용 (단독 실행 시), 주입되면 TtsManager 사용
@@ -89,19 +88,21 @@ final class TrafficLightDetector: NSObject, ObservableObject {
     private var frameLogCounter: Int = 0
     private let logEveryNFrames: Int = 30   // 30프레임당 1번 (약 1초)
 
-    // MARK: - 미탐지 처리
-    private var lastDetectionTime: Date = Date()
-
-    // MARK: - 미탐지 단계 안내 (no-detection escalation) — 엔진과 별개, 기존 유지
-    private var noDetectionStage: Int = 0          // 0=안내 전, 1·2·3=해당 단계까지 안내함
-    private let noDetStage1: TimeInterval = 3.0    // 1단계: 좌→우 이동 안내
-    private let noDetStage2: TimeInterval = 6.0    // 2단계: 각도 바꿔 재시도
-    private let noDetStage3: TimeInterval = 9.0    // 3단계: 포기 + 주변 소리 주의, 이후 침묵
-
-    // MARK: - 미탐지 안내 디바운스 (단계 안내 전용)
-    private var lastSpokenSignal: String = ""
-    private var lastSpeakTime: Date = .distantPast
-    private let speakInterval: TimeInterval = 3.0
+    // MARK: - 미탐지 안내 (2026-07 Android 와 통일)
+    //   구: 3/6/9초에 서로 다른 3문장을 연타하고 9초 후 영구 침묵 → 부스에서 말이 폭주했다.
+    //   신(Android handleTrafficLightNoDetection 과 동일):
+    //     · 카메라 켜고 6초까지는 침묵 (겨눌 시간). → 첫 6초가 Android 의 5초 speech-hold 를 겸함.
+    //     · 이후 한 문장을 12초 간격으로만 반복.
+    //     · 20초 넘게 계속 못 잡으면 '소리 주의' 폴백을 딱 한 번. 이후에도 12초 반복은 계속.
+    private var noDetectionStartedAt: Date? = nil
+    private var noDetectionLastSpeakAt: Date = .distantPast
+    private var noDetectionSafetyDone: Bool = false
+    private let noDetFirst: TimeInterval = 6.0     // 첫 안내까지 대기
+    private let noDetRepeat: TimeInterval = 12.0   // 이후 반복 간격
+    private let noDetSafety: TimeInterval = 20.0   // 이 시간 넘으면 소리주의 1회
+    /// 신뢰도가 floor 미만이라도 화면에 신호등스러운 후보가 보이면 미탐지 안내를 억제한다
+    /// (Android WEAK_CANDIDATE_SUPPRESS_NO_DET, peakConfidence>=0.25 와 동형).
+    private let weakCandidateFloor: Float = 0.15
 
     // MARK: - Init
 
@@ -185,11 +186,9 @@ final class TrafficLightDetector: NSObject, ObservableObject {
     // MARK: - Public API
 
     func startDetection() {
-        noDetectionStage = 0          // 단계 초기화 — 깨끗하게 1단계부터
-        lastDetectionTime = Date()    // 경과 시간 0부터 — 진입 후 3초 뒤 1단계 안내
+        resetNoDetection()            // 미탐지 상태 초기화 — 진입 후 6초 침묵부터 시작
         signalEngine.reset()          // 안전 판정 상태도 깨끗이 (Android zone 진입과 동형)
         impactStrong.prepare()        // 햅틱 예열 (첫 진동 지연 방지)
-        notificationHaptic.prepare()
         DispatchQueue.global(qos: .userInitiated).async {
             self.captureSession.startRunning()
         }
@@ -246,12 +245,17 @@ final class TrafficLightDetector: NSObject, ObservableObject {
 
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
 
+        // 약한 후보(floor 미만이지만 화면엔 신호등스러운 게 보임) 여부 — 미탐지 안내 억제용.
+        let weakCandidatePresent = observations.contains { obs in
+            (obs.labels.first?.confidence ?? 0) >= weakCandidateFloor
+        }
+
         DispatchQueue.main.async {
             self.detections = filtered   // 바운딩 박스 오버레이
 
             if raw.isEmpty {
-                // 신호등 후보가 하나도 없음 → 미탐지 단계 안내 (기존 로직)
-                self.handleNoDetection()
+                // 신호등 후보가 하나도 없음 → 미탐지 안내 (Android 와 동일한 6/12/20초 로직)
+                self.handleNoDetection(weakCandidatePresent: weakCandidatePresent)
                 return
             }
 
@@ -264,9 +268,8 @@ final class TrafficLightDetector: NSObject, ObservableObject {
     // MARK: - 엔진 결정 → 부수효과 (Android MainActivity 의 when(decision) 과 동형)
 
     private func applyDecision(_ decision: SignalDecision) {
-        // 후보를 봤으므로 미탐지 상태 해제
-        self.lastDetectionTime = Date()
-        self.noDetectionStage = 0
+        // 후보를 봤으므로 미탐지 상태 해제 (Android: 각 결정 분기의 resetTrafficLightNoDetectionEscalation)
+        self.resetNoDetection()
 
         switch decision {
         case let a as SignalDecisionAnnounce:
@@ -278,14 +281,23 @@ final class TrafficLightDetector: NSObject, ObservableObject {
             self.speakEngine(mapped.message, interrupt: a.interrupt)
 
         case let r as SignalDecisionRepeat:
-            // 같은 색 유지 반복 안내 (heartbeat). 빨강만 인터럽트.
-            self.speakEngine(self.repeatMessage(r.color), interrupt: r.color == 0)
+            // 같은 색 유지 반복 안내 (heartbeat).
+            // Android 와 동일: 반복 안내는 다른 발화를 끊지 않는다(interrupt=false), 빨강이라도.
+            // 부스 화면이 색을 유지하도록 signalColor/statusText 도 갱신.
+            if r.color == 0 {
+                self.signalColor = .red
+                self.statusText = "빨간불 — 정지"
+            } else {
+                self.signalColor = .green
+                self.statusText = "초록불 — 다음 신호 대기"
+            }
+            self.speakEngine(self.repeatMessage(r.color), interrupt: false)
 
         case is SignalDecisionFlicker:
-            // 점멸 감지 → 경고 + 강한 햅틱. "건너세요" 아님.
+            // 점멸 감지 → 경고 + 강한 햅틱(3연속 펄스, Android vibrateWarning 과 동형). "건너세요" 아님.
             self.statusText = "신호 깜빡임 — 대기"
             self.signalColor = .red
-            self.notificationHaptic.notificationOccurred(.warning)
+            self.triggerWarningHaptic()
             self.speakEngine("신호가 깜빡입니다. 멈춰서 다음 신호를 기다리세요.", interrupt: true)
 
         case is SignalDecisionSilent:
@@ -321,28 +333,44 @@ final class TrafficLightDetector: NSObject, ObservableObject {
         return color == 0 ? "빨간불입니다. 정지하세요." : "초록불입니다."
     }
 
-    // MARK: - 미탐지 단계 안내 (엔진과 별개)
+    // MARK: - 미탐지 안내 (Android handleTrafficLightNoDetection 과 동일 로직)
 
-    private func handleNoDetection() {
+    /// 미탐지 상태를 깨끗이 (진입 시 / 실제 결정이 나올 때마다).
+    private func resetNoDetection() {
+        noDetectionStartedAt = nil
+        noDetectionLastSpeakAt = .distantPast
+        noDetectionSafetyDone = false
+    }
+
+    private func handleNoDetection(weakCandidatePresent: Bool) {
         self.confidence = 0
-        let elapsed = Date().timeIntervalSince(self.lastDetectionTime)
 
-        if elapsed >= noDetStage3 && noDetectionStage < 3 {
-            noDetectionStage = 3
-            statusText = "신호등 감지 안 됨"
-            signalColor = .gray
-            detections = []
-            speak("신호등이 감지되지 않습니다. 주변의 소리에 주의하세요.", signal: "none3")
-            // 이후 침묵 — 재탐지 전까지 추가 발화 없음
-        } else if elapsed >= noDetStage2 && noDetectionStage < 2 {
-            noDetectionStage = 2
-            speak("각도를 바꿔서 다시 왼쪽에서 오른쪽으로 카메라를 이동해 주세요.", signal: "none2")
-        } else if elapsed >= noDetStage1 && noDetectionStage < 1 {
-            noDetectionStage = 1
-            statusText = "신호등이 보이지 않습니다"
-            signalColor = .gray
-            detections = []
-            speak("신호등이 보이지 않습니다. 왼쪽에서 오른쪽으로 천천히 카메라를 이동해 주세요.", signal: "none1")
+        // 약한 후보가 화면에 보이면 "못 찾겠다" 안내를 억제 (Android WEAK_CANDIDATE_SUPPRESS_NO_DET).
+        if weakCandidatePresent { return }
+
+        let now = Date()
+        if noDetectionStartedAt == nil { noDetectionStartedAt = now }
+        let elapsed = now.timeIntervalSince(noDetectionStartedAt!)
+
+        // 첫 6초는 침묵 — 겨눌 시간을 준다 (Android 의 5초 speech-hold 겸함).
+        if elapsed < noDetFirst { return }
+
+        statusText = "신호등을 찾는 중..."
+        signalColor = .gray
+        detections = []
+
+        // 20초 넘게 계속 못 잡으면 '소리 주의' 폴백을 딱 한 번.
+        if elapsed >= noDetSafety && !noDetectionSafetyDone {
+            noDetectionSafetyDone = true
+            noDetectionLastSpeakAt = now
+            speakEngine("신호등이 잘 잡히지 않습니다. 주변 소리에 주의하세요.", interrupt: false)
+            return
+        }
+
+        // 그 외에는 같은 문장을 12초 간격으로만 반복 (연타 금지).
+        if now.timeIntervalSince(noDetectionLastSpeakAt) >= noDetRepeat {
+            noDetectionLastSpeakAt = now
+            speakEngine("신호등을 찾고 있습니다. 카메라를 천천히 좌우로 움직여 주세요.", interrupt: false)
         }
     }
 
@@ -354,6 +382,14 @@ final class TrafficLightDetector: NSObject, ObservableObject {
         }
     }
 
+    /// 점멸 경고 햅틱 — 3연속 펄스 (Android vibrateWarning 파형과 동형).
+    private func triggerWarningHaptic() {
+        let gen = impactStrong
+        gen.impactOccurred()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { gen.impactOccurred() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.50) { gen.impactOccurred() }
+    }
+
     // MARK: - TTS
 
     /// 엔진 결정 발화 — 반복/디바운스는 엔진이 이미 관리하므로 시간 기반 억제 없이 바로 말한다.
@@ -363,27 +399,6 @@ final class TrafficLightDetector: NSObject, ObservableObject {
             tts.speak(text, priority: interrupt ? .high : .normal)
         } else {
             if interrupt && fallbackSynthesizer.isSpeaking {
-                fallbackSynthesizer.stopSpeaking(at: .immediate)
-            }
-            let utterance = AVSpeechUtterance(string: text)
-            utterance.voice = AVSpeechSynthesisVoice(language: "ko-KR")
-            utterance.rate = 0.5
-            utterance.pitchMultiplier = 1.1
-            fallbackSynthesizer.speak(utterance)
-        }
-    }
-
-    /// 미탐지 단계 안내 발화 — 같은 signal 반복 억제(디바운스) 유지.
-    private func speak(_ text: String, signal: String) {
-        let now = Date()
-        if signal == lastSpokenSignal && now.timeIntervalSince(lastSpeakTime) < speakInterval { return }
-        lastSpokenSignal = signal
-        lastSpeakTime = now
-
-        if let tts = tts {
-            tts.speak(text, priority: .normal)
-        } else {
-            if fallbackSynthesizer.isSpeaking {
                 fallbackSynthesizer.stopSpeaking(at: .immediate)
             }
             let utterance = AVSpeechUtterance(string: text)
