@@ -272,7 +272,7 @@ final class TrafficLightDetector: NSObject, ObservableObject {
         self.resetNoDetection()
 
         switch decision {
-        case let a as SignalDecisionAnnounce:
+        case let a as SignalDecision.Announce:
             let mapped = self.messageForTransition(a.transition)
             self.statusText = mapped.status
             self.signalColor = mapped.color
@@ -280,7 +280,7 @@ final class TrafficLightDetector: NSObject, ObservableObject {
             if a.vibrate { self.triggerHaptic(strong: true) }
             self.speakEngine(mapped.message, interrupt: a.interrupt)
 
-        case let r as SignalDecisionRepeat:
+        case let r as SignalDecision.Repeat:
             // 같은 색 유지 반복 안내 (heartbeat).
             // Android 와 동일: 반복 안내는 다른 발화를 끊지 않는다(interrupt=false), 빨강이라도.
             // 부스 화면이 색을 유지하도록 signalColor/statusText 도 갱신.
@@ -293,14 +293,14 @@ final class TrafficLightDetector: NSObject, ObservableObject {
             }
             self.speakEngine(self.repeatMessage(r.color), interrupt: false)
 
-        case is SignalDecisionFlicker:
+        case is SignalDecision.Flicker:
             // 점멸 감지 → 경고 + 강한 햅틱(3연속 펄스, Android vibrateWarning 과 동형). "건너세요" 아님.
             self.statusText = "신호 깜빡임 — 대기"
             self.signalColor = .red
             self.triggerWarningHaptic()
             self.speakEngine("신호가 깜빡입니다. 멈춰서 다음 신호를 기다리세요.", interrupt: true)
 
-        case is SignalDecisionSilent:
+        case is SignalDecision.Silent:
             // 확신 부족 / 안정성 대기 / 락아웃 / 같은색 조용 → 발화 없음.
             // 현재 표시를 유지한다(놀라게 하지 않음). 침묵도 정보다.
             break
