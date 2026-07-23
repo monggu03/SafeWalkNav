@@ -17,13 +17,10 @@
 
 ## 핵심 기능
 
-- **보행 신호등 색 인식 (AI)** — 자체 설계 **YOLOv11n + P2 Head** 모델로 `ped_red` / `ped_green` 검출. 작은 객체(원거리 신호등) 검출에 강한 고해상도 검출 헤드(P2)를 추가하고, 온디바이스 추론을 위해 경량화했습니다.
+- **보행 신호등 색 인식 (AI)** — 스마트폰 카메라 프레임에서 보행 신호등(빨강/초록)을 온디바이스로 검출. 서버·인터넷 없이 폰 안에서 추론합니다.
 - **안전 우선 판정 엔진** — 빨강/초록 비대칭 신뢰도(초록 오탐이 더 위험), 연속 프레임 안정화, 점멸 감지·락아웃. 정적 초록에는 "건너세요"를 말하지 않고, **빨강→초록 전환을 직접 포착한 순간에만** 강한 진동으로 알립니다. 이 로직은 Android/iOS 공용 모듈(`shared`)에 있어 두 플랫폼 동작이 일치합니다.
-- **횡단보도 Zone Gating** — 횡단보도 25m 이내에서만 카메라·추론을 켜서 배터리·발열 억제.
-- **시계 방향 조준 안내** — 카메라를 어디로 향할지 모르는 문제를 `"3시 방향에 카메라를 들어주세요"` 형태로 해결.
-- **출발 전 방향 정렬** — 경로 요약 → 평평 자세 → 회전 → 정면 확인 → 출발. 목표 방향에 가까울수록 빨라지는 실시간 스테레오 비프로 멈출 타이밍을 안내.
-- **도보 내비게이션** — TMap 보행자 경로 REST API, 4단계 도착 안내(FAR / APPROACHING / NEAR / ARRIVED), 거리 기반 오디오 비콘(스테레오 패닝).
-- **신호등 4단계 매칭** — 광폭 도로에서 사용자 바로 앞이 아닌 **반대편 신호등**(20~50m)을 우선 선택.
+- **사용자 주도 신호등 확인** — 횡단보도에 접근하면 알리고, 사용자가 연석에서 멈춰 **'신호등 확인' 버튼**을 눌렀을 때만 카메라·추론을 켭니다(TalkBack 더블탭). 걸어오는 도중 미리 카메라를 흔들 필요가 없고, 배터리·발열도 억제됩니다.
+- **도보 내비게이션** — TMap 보행자 경로 REST API, 4단계 도착 안내(FAR / APPROACHING / NEAR / ARRIVED), 거리 기반 오디오 비콘(스테레오 패닝), 횡단보도 접근 시 좌/우/전방 위치 안내.
 - **음성 입출력** — 한국어 TTS 안내 / STT 음성 목적지 입력.
 
 ---
@@ -40,16 +37,13 @@ SafeWalkNav/
 │       ├── signal/SignalDecisionEngine.kt   # 신호 안전 판정 (순수 로직 + 단위 테스트)
 │       ├── geo/      # 좌표·방위·Kalman 필터 (순수 함수)
 │       ├── tmap/     # TMap 보행자 경로 REST API
-│       ├── signal/   # 서울 신호제어기 API · 신호등 매칭
-│       ├── walking/  # 횡단보도 Zone Gating
+│       ├── walking/  # 횡단보도 Zone 판정
 │       └── tbfw/     # 경로 사전 분석 (곡선/회전 예고)
 │
 ├── androidApp/      # Android 앱 (Kotlin)
 │   └── .../safewalknav/
 │       ├── MainActivity.kt           # UI·센서·오디오·TTS/STT 오케스트레이터
 │       ├── ml/       # TFLite(NNAPI) 신호등 검출 + CameraX
-│       ├── onboarding/               # 출발 전 방향 정렬
-│       ├── traffic/  # 신호등 위치 로컬 캐시 (Room)
 │       └── location/ # FusedLocationProvider
 │
 └── iosApp/          # iOS 앱 (SwiftUI) — CoreML+Vision 추론, shared 엔진 연동
@@ -68,8 +62,6 @@ SafeWalkNav/
 | ML | YOLOv11n + P2 Head — TFLite Float16 + NNAPI (Android) / CoreML + Vision (iOS) |
 | HTTP · 직렬화 | Ktor Client, kotlinx-serialization |
 | 비동기 | Coroutines + Flow |
-| 로컬 캐시 | Room (Android) / JSON (iOS) |
-| 좌표 변환 | proj4j (EPSG:5186 → WGS84) |
 | GPS · 센서 | FusedLocationProvider · SensorManager (Android) / CoreLocation · CoreMotion (iOS) |
 | TTS · STT | TextToSpeech · SpeechRecognizer (Android) / AVSpeech · SFSpeech (iOS) |
 
@@ -93,12 +85,10 @@ git clone https://github.com/monggu03/SafeWalkNav.git
 cd SafeWalkNav
 ```
 
-루트의 `local.properties`에 API 키를 등록합니다([TMap 개발자센터](https://tmapapi.tmapmobility.com/), [서울 열린데이터광장](https://data.seoul.go.kr/)에서 발급):
+루트의 `local.properties`에 TMap API 키를 등록합니다([TMap 개발자센터](https://tmapapi.tmapmobility.com/)에서 발급):
 
 ```properties
 TMAP_APP_KEY=발급받은_TMap_앱_키
-T_DATA_API_KEY=발급받은_서울_T-data_키
-SEOUL_API_KEY=발급받은_서울_열린데이터_키
 ```
 
 [Firebase Console](https://console.firebase.google.com/)에서 `google-services.json`을 받아 `androidApp/`에 배치합니다. 두 파일 모두 `.gitignore` 처리되어 커밋되지 않습니다.
@@ -114,7 +104,7 @@ SEOUL_API_KEY=발급받은_서울_열린데이터_키
 
 1. macOS + Xcode 15+
 2. `iosApp/iosApp.xcodeproj`를 열고 Run — 빌드 시 `shared` 프레임워크가 자동 생성됩니다.
-3. `iosApp/iosApp/Secrets.plist`에 `TMapAppKey` / `TDataApiKey` / `SeoulApiKey` 입력 (gitignored)
+3. `iosApp/iosApp/Secrets.plist`에 `TMapAppKey` 입력 (gitignored)
 
 ### 테스트
 
@@ -122,7 +112,7 @@ SEOUL_API_KEY=발급받은_서울_열린데이터_키
 ./gradlew :shared:allTests
 ```
 
-`shared/src/commonTest/`가 신호 판정 엔진과 내비게이션 알고리즘(경로 분석·신호등 매칭·Zone Gating 등)의 핵심을 단위 테스트로 커버합니다.
+`shared/src/commonTest/`가 신호 판정 엔진과 내비게이션 알고리즘(경로 분석·Zone 판정·화면 상태 기계 등)의 핵심을 단위 테스트로 커버합니다.
 
 ---
 
@@ -131,8 +121,8 @@ SEOUL_API_KEY=발급받은_서울_열린데이터_키
 | 권한 | 용도 |
 |---|---|
 | `ACCESS_FINE_LOCATION` / `ACCESS_COARSE_LOCATION` | GPS 위치 |
-| `CAMERA` | 신호등 인식 (횡단보도 25m 이내에서만 활성화) |
-| `INTERNET` / `ACCESS_NETWORK_STATE` | TMap · 서울 신호 API |
+| `CAMERA` | 신호등 인식 (사용자가 '신호등 확인' 버튼을 눌렀을 때만 활성화) |
+| `INTERNET` / `ACCESS_NETWORK_STATE` | TMap 보행자 경로·검색 API |
 | `VIBRATE` | 진동 피드백 |
 | `FOREGROUND_SERVICE` | 백그라운드 TTS |
 
@@ -156,4 +146,4 @@ SEOUL_API_KEY=발급받은_서울_열린데이터_키
 | 구성요소 | 라이선스 |
 |---|---|
 | Ultralytics YOLO | AGPL-3.0 |
-| TensorFlow Lite · Ktor · kotlinx-serialization · Coroutines · AndroidX · proj4j | Apache-2.0 |
+| TensorFlow Lite · Ktor · kotlinx-serialization · Coroutines · AndroidX | Apache-2.0 |

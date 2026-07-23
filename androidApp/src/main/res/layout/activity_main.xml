@@ -129,7 +129,7 @@
             android:id="@+id/btnBoothDemo"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="부스 데모 시작"
+            android:text="신호등 확인"
             android:textSize="20sp"
             android:textStyle="bold"
             android:textColor="#000000"
@@ -139,7 +139,7 @@
             android:paddingRight="32dp"
             android:paddingTop="16dp"
             android:paddingBottom="16dp"
-            android:contentDescription="부스 데모 모드 시작. 신호등 인식을 바로 시작합니다." />
+            android:contentDescription="신호등 확인. 신호등 인식을 바로 시작합니다." />
     </LinearLayout>
 
     <!-- ========== 검색 결과 컨테이너 ==========
@@ -187,6 +187,36 @@
             android:layout_marginTop="16dp"
             tools:text="스타벅스 강남점에 도착했습니다" />
     </LinearLayout>
+
+    <!-- ========== 신호등 확인 버튼 (수동 트리거) ==========
+         NAVIGATING + 횡단보도 zone 안에서 표시. 예전엔 zone 진입 시 카메라가 자동으로
+         켜져 사용자가 횡단보도 한참 전부터 폰을 흔들게 됐다. 이제 사용자가 연석에서
+         멈춰 이 버튼을 눌러야(TalkBack 더블탭) 카메라+신호 인식이 시작된다.
+         화면 전체가 버튼이라 시각장애인이 위치 신경 안 쓰고 탐색 후 더블탭 가능. -->
+    <Button
+        android:id="@+id/btnSignalCheck"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:text="신호등 확인"
+        android:textSize="44sp"
+        android:textStyle="bold"
+        android:textColor="#000000"
+        android:backgroundTint="#FFD700"
+        android:visibility="gone"
+        android:contentDescription="신호등 확인. 화면을 두 번 누르면 카메라로 신호등 색을 인식합니다." />
+
+    <!-- 신호등 확인 종료 버튼 (확인 중 우상단). 크로스워크 통과 시 자동 종료도 됨. -->
+    <Button
+        android:id="@+id/btnSignalCheckStop"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="16dp"
+        android:text="확인 종료"
+        android:textColor="#FFFFFF"
+        android:backgroundTint="#333333"
+        android:visibility="gone"
+        android:contentDescription="신호등 확인 종료" />
 
     <!-- ========== DEBUG 디버그 정보 박스 ==========
          BuildConfig.DEBUG 일 때만 visibility=VISIBLE (코드에서 제어).

@@ -52,7 +52,6 @@ import androidx.lifecycle.lifecycleScope
 import com.example.safewalknav.location.LocationTracker
 import com.example.safewalknav.ml.TrafficLightAnalyzer
 import com.example.safewalknav.ml.TrafficLightDetection
-import com.example.safewalknav.onboarding.AutoOnboardingCoordinator
 import com.example.safewalknav.ml.TrafficLightDetector
 import com.google.firebase.analytics.FirebaseAnalytics
 import com.google.firebase.analytics.ktx.analytics
@@ -67,7 +66,6 @@ import com.example.safewalknav.navigation.AndroidHeadingLogger
 import com.example.safewalknav.navigation.tmap.ArrivalState
 import com.example.safewalknav.navigation.NavigationManager
 import com.example.safewalknav.navigation.tmap.POIResult
-import com.example.safewalknav.navigation.signal.SignalApiClient
 import com.example.safewalknav.navigation.signal.SignalDecisionEngine
 import com.example.safewalknav.navigation.signal.SignalDecision
 import com.example.safewalknav.navigation.signal.SignalTransition
@@ -89,10 +87,6 @@ import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
-import com.example.safewalknav.navigation.signal.TrafficSignalLocation
-import com.example.safewalknav.traffic.TrafficSignalDatabase
-import com.example.safewalknav.traffic.TrafficSignalRepository
-import com.example.safewalknav.navigation.signal.SeoulTrafficSignalLocationApiClient
 
 
 /**
@@ -164,6 +158,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var compassContainer: ViewGroup
     private lateinit var tvCompassGuidance: TextView
     private lateinit var tvCompassSubInfo: TextView
+    // 신호등 확인 수동 트리거 버튼 (zone 안에서 노출) + 확인 중 종료 버튼
+    private lateinit var btnSignalCheck: Button
+    private lateinit var btnSignalCheckStop: Button
     private lateinit var debugContainer: ViewGroup
     private lateinit var tvDebugStatus: TextView
     private lateinit var tvDebugGuidance: TextView
@@ -173,7 +170,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private val LOCATION_PERMISSION_CODE = 1001
     private var trackingJob: Job? = null
-    private var onboardingCoordinator: AutoOnboardingCoordinator? = null
     private var ttsReady = false
     private var gpsReady = false
     private var welcomePlayed = false
@@ -427,8 +423,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // PR-AI: ImageAnalysis use case 추가 — TrafficLightDetector 로 보행자 신호등 색 검출
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
-    private var hasNearbyTrafficSignalForCamera = false
-    private val TRAFFIC_SIGNAL_CAMERA_ZOOM_RATIO = 3f
 
     // ==================== 신호등 검출 (PR-AI) ====================
 
@@ -461,6 +455,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // ⚠️ 실사용/배포 빌드에서는 반드시 false (zone gating 안전 정책이 꺼진다).
     // 신호 판정은 평소처럼 shared/SignalDecisionEngine 이 담당한다.
     private var boothModeActive = false
+
+    // 신호등 확인 수동 모드 — 사용자가 '신호등 확인' 버튼을 눌러 카메라+AI 를 켠 상태.
+    // 예전의 zone 자동 활성화를 대체. 이 값이 true 일 때만 신호 인식·발화가 동작한다.
+    private var signalCheckActive = false
 
     // 시연 영상 촬영 모드 — DEBUG 빌드여도 하단 디버그 박스 (STATE/GPS/AI/crosswalkDist 등) 를 숨김.
     // 시연 영상 촬영 후 일반 디버깅이 필요해지면 false 로 되돌릴 것.
@@ -625,7 +623,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
 
-    /** 가속도계 + 자력계 → 방위각 (저역 통과 필터). 보행쏠림 보정용 — NavigationManager 로 전달. */
+    /** 가속도계 + 자력계 → 방위각 (저역 통과 필터). 신호등 시계방향 조준 안내용 — NavigationManager 로 전달. */
     private val orientationListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent?) {
             event ?: return
@@ -641,7 +639,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
             }
             if (hasAccel && hasMag) {
-                val now = System.currentTimeMillis()
                 val r = FloatArray(9)
                 if (SensorManager.getRotationMatrix(r, null, accelValues, magValues)) {
                     val orient = FloatArray(3)
@@ -650,14 +647,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     if (az < 0) az += 360f
                     val delta = ((az - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.15f * delta + 360f) % 360f
-                    // Step 1 (2026-05-29) — IMU heading 보정 안내 복원.
-                    // NavigationManager 가 currentTargetBearing 을 매 GPS tick 마다 도로 방향으로
-                    // 갱신하므로, 이 호출이 walkingDiagnostic.analyzeLeanStatus 를 거쳐 25° 이상
-                    // 벌어지면 LEFT/RIGHT_LEAN 누적 → 3회 도달 시 음성 보정 안내.
-                    // 휴대폰 자세 가정: 평평하게 눕혀서 들고 있음 (Step 2 에서 자세 토글 추가 예정).
+                    // 방위각은 이제 CSV 진단 로깅(latestCompassHeading)에만 쓴다.
+                    // (신호등 시계방향 조준·보행 쏠림 보정·나침반 UI 는 2026-07 폐기.)
                     if (::navigationManager.isInitialized) {
-                        // 방위각은 신호등 시계방향 조준에만 쓴다 (나침반 UI 는 2026-07 제거).
-                        navigationManager.updateCompassHeading(currentAzimuth, now)
+                        navigationManager.updateCompassHeading(currentAzimuth)
                     }
                 }
 
@@ -682,24 +675,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         navigationManager = NavigationManager(
                 tMapApiClient = TMapApiClient(BuildConfig.TMAP_APP_KEY),
-                signalApiClient = SignalApiClient(BuildConfig.T_DATA_API_KEY),
                 headingLogger = headingLogger,
-                trafficSignals = emptyList()
             )
-
-        // 2026-06-15 정리 — 신호등 위치 로딩이 여기서 한 번, 아래에서 또 한 번 실행되어
-        // 앱 시작 시 Room/네트워크 조회가 2회 발생하던 중복 제거. 아래 블록 하나로 통일.
 
         observeGuidance()
-
-        lifecycleScope.launch {
-            val trafficSignals = loadTrafficSignalLocations()
-            Log.d(
-                "TrafficSignalAPI",
-                "loaded to MainActivity: ${trafficSignals.size}"
-            )
-            navigationManager.updateTrafficSignals(trafficSignals)
-        }
 
 
 
@@ -723,6 +702,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         boothStatusText = findViewById(R.id.boothStatusText)
         findViewById<android.widget.Button>(R.id.btnBoothDemo).setOnClickListener { enterBoothMode() }
         findViewById<android.widget.Button>(R.id.btnBoothExit).setOnClickListener { exitBoothMode() }
+        btnSignalCheck = findViewById(R.id.btnSignalCheck)
+        btnSignalCheckStop = findViewById(R.id.btnSignalCheckStop)
+        btnSignalCheck.setOnClickListener { startSignalCheck() }
+        btnSignalCheckStop.setOnClickListener { stopSignalCheck() }
 
         // DEBUG 빌드만 디버그 박스 표시 + 시각 힌트 텍스트 표시.
         // DEMO_MODE=true 이면 디버그 박스는 숨기고 (시연 영상용) 시각 힌트는 유지한다.
@@ -808,7 +791,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (!boothModeActive) return
         val RED = 0x66D50000.toInt()
         val GREEN = 0x6600C853.toInt()
-        val CLEAR = 0x00000000
         when (decision) {
             is SignalDecision.Announce -> when (decision.transition) {
                 SignalTransition.RED_TO_GREEN -> { boothColorView?.setBackgroundColor(GREEN); boothStatusText?.text = "초록불 · WALK\n건너세요" }
@@ -832,7 +814,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         //     sensorManager.registerListener(shakeListener, it, SensorManager.SENSOR_DELAY_UI)
         // }
 
-        // 방위각 (보행쏠림 보정) — 항상 등록
+        // 방위각 (신호등 시계방향 조준) — 항상 등록
         accelerometer?.let {
             sensorManager.registerListener(orientationListener, it, SensorManager.SENSOR_DELAY_UI)
         }
@@ -848,8 +830,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     override fun onDestroy() {
         super.onDestroy()
-        onboardingCoordinator?.stop()   // 센서 리스너 해제 (lifecycleScope 취소로는 unregister 안 됨)
-        onboardingCoordinator = null
         trackingJob?.cancel()
         autoRepeatJob?.cancel()
         beaconJob?.cancel()
@@ -901,12 +881,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
 
             AppState.NAVIGATING -> {
-                // 2026-05-29 — NAVIGATING 진입 시 기본은 나침반 모드.
-                // 횡단보도 zone + 10m 이내 신호등이면 카메라 모드로 전환.
+                // NAVIGATING 진입 시 '신호등 확인' 전체화면 버튼을 바로 노출.
                 beforeContainer.visibility = View.GONE
                 resultsContainer.visibility = View.GONE
                 arrivedContainer.visibility = View.GONE
-                applyNavigatingMode(inCrosswalkZone)
+                applyNavigatingMode()
             }
 
             AppState.ARRIVED -> {
@@ -923,10 +902,12 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             resultsContainer.removeAllViews()
         }
 
-        // 카메라 lifecycle — 이제 NAVIGATING 자체가 아니라 inCrosswalkZone 변화에 따라 토글.
-        // NAVIGATING 진입 시점엔 zone=false 가정이라 나침반만 표시, 카메라는 zone 진입 시 startCamera().
-        // NAVIGATING 이탈 시 카메라가 켜져 있으면 정리.
+        // 카메라 lifecycle — 카메라는 사용자가 '신호등 확인' 버튼을 눌러야(startSignalCheck) 켜진다.
+        // NAVIGATING 이탈 시 확인 모드/카메라가 켜져 있으면 정리.
         if (previous == AppState.NAVIGATING && state != AppState.NAVIGATING) {
+            signalCheckActive = false
+            if (::btnSignalCheck.isInitialized) btnSignalCheck.visibility = View.GONE
+            if (::btnSignalCheckStop.isInitialized) btnSignalCheckStop.visibility = View.GONE
             stopCamera()
         }
 
@@ -951,39 +932,67 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     /**
-     * NAVIGATING 상태일 때 inZone 에 따라 카메라/나침반 화면을 토글한다.
+     * NAVIGATING 상태의 화면을 토글한다.
      *
-     * inZone=false → 나침반 모드 (compassContainer VISIBLE, 카메라 OFF)
-     * inZone=true  → 카메라 모드 (cameraPreviewContainer VISIBLE, startCamera 호출)
+     * - 신호등 확인 중(signalCheckActive) → 카메라 화면.
+     * - 그 외(안내 중) → '신호등 확인' 전체화면 버튼을 항상 노출.
      *
-     * NAVIGATING 진입 시 showState 가 inCrosswalkZone 값으로 1회 호출 (초기 false 가정).
-     * 이후 inCrosswalkZone StateFlow collect 가 transition 마다 다시 호출.
+     * 버튼을 zone 에 묶지 않는 이유: GPS/경로 waypoint 로 판정하는 crosswalk zone 이
+     * 부정확하거나 실패하면 사용자가 신호를 확인할 방법이 아예 사라진다. 안내 중엔 항상
+     * 버튼을 띄워 사용자가 횡단보도 앞에서 언제든 직접 켤 수 있게 한다.
      */
-    private fun applyNavigatingMode(inZone: Boolean) {
+    private fun applyNavigatingMode() {
         if (appState != AppState.NAVIGATING) return
-        val shouldUseCamera = inZone && hasNearbyTrafficSignalForCamera
-        if (shouldUseCamera) {
+        if (signalCheckActive) {
             compassContainer.visibility = View.GONE
+            btnSignalCheck.visibility = View.GONE
             cameraPreviewContainer.visibility = View.VISIBLE
-            startCamera()
         } else {
             cameraPreviewContainer.visibility = View.GONE
-            compassContainer.visibility = View.VISIBLE
+            compassContainer.visibility = View.GONE
+            btnSignalCheck.visibility = View.VISIBLE
             stopCamera()
         }
     }
 
-    private fun applyTrafficSignalCameraZoom() {
-        val camera = camera ?: return
-        val targetZoom = if (hasNearbyTrafficSignalForCamera) TRAFFIC_SIGNAL_CAMERA_ZOOM_RATIO else 1f
-        val zoomState = camera.cameraInfo.zoomState.value
-        val clampedZoom = if (zoomState != null) {
-            targetZoom.coerceIn(zoomState.minZoomRatio, zoomState.maxZoomRatio)
-        } else {
-            targetZoom
+    /**
+     * 사용자가 '신호등 확인' 버튼을 눌렀을 때 — 카메라+신호 인식 시작.
+     * 예전 zone 자동 활성화를 대체한다. 사용자가 연석에서 멈춰 직접 켜므로,
+     * 횡단보도 한참 전부터 카메라를 흔들 일이 없다.
+     */
+    private fun startSignalCheck() {
+        if (signalCheckActive) return
+        signalCheckActive = true
+        signalDecisionEngine.reset()
+        resetTrafficLightNoDetectionEscalation()
+        noDetectionSpeechHoldUntil =
+            System.currentTimeMillis() + NO_DET_SPEECH_HOLD_AFTER_CAMERA_ENTRY_MS
+        btnSignalCheck.visibility = View.GONE
+        compassContainer.visibility = View.GONE
+        cameraPreviewContainer.visibility = View.VISIBLE
+        btnSignalCheckStop.visibility = View.VISIBLE
+        if (ActivityCompat.checkSelfPermission(
+                this, Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            startCamera()
         }
-        camera.cameraControl.setZoomRatio(clampedZoom)
-        appendNavLog("Camera zoom=${"%.1f".format(clampedZoom)} signalNearby=$hasNearbyTrafficSignalForCamera")
+        appendNavLog("SignalCheck START (수동 버튼)")
+        speakTTS("신호등을 확인합니다. 휴대폰을 세로로 들어 주세요.")
+    }
+
+    /** 신호등 확인 종료 — '확인 종료' 버튼 또는 횡단보도 통과 시. */
+    private fun stopSignalCheck(announce: Boolean = true) {
+        if (!signalCheckActive) return
+        signalCheckActive = false
+        stopCamera()
+        signalDecisionEngine.reset()
+        btnSignalCheckStop.visibility = View.GONE
+        cameraPreviewContainer.visibility = View.GONE
+        appendNavLog("SignalCheck STOP")
+        // 확인 종료 → 다시 '신호등 확인' 버튼 화면으로.
+        applyNavigatingMode()
+        if (announce) speakTTS("신호등 확인을 종료했습니다.")
     }
 
     private fun updateDebugInfo() {
@@ -992,7 +1001,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val talkback = if (isTalkBackEnabled()) "ON" else "OFF"
         val gps = if (gpsReady) "OK" else "?"
         val last = lastSearchKeyword.ifEmpty { "-" }
-        val ai = if (inCrosswalkZone && hasNearbyTrafficSignalForCamera) "ON" else "OFF"
+        val ai = if (signalCheckActive || boothModeActive) "ON" else "OFF"
         tvDebugStatus.text = "STATE=${appState.name} | GPS=$gps | AI=$ai | TalkBack=$talkback | last=$last"
     }
 
@@ -1054,11 +1063,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         lines.add("횡단보도=$inCrosswalkZone")
         lines.add("crosswalkDist=${crosswalkDist?.let { "${it}m" } ?: "-"}")
         if (state != null) lines.add("crosswalkState=$state")
-        lines.add("signal10m=$hasNearbyTrafficSignalForCamera")
         if (aiLines.isNotEmpty()) {
             lines.addAll(aiLines)
         } else {
-            lines.add("AI=${if (inCrosswalkZone && hasNearbyTrafficSignalForCamera) "ON" else "OFF"}")
+            lines.add("AI=${if (signalCheckActive || boothModeActive) "ON" else "OFF"}")
         }
         tvDebugGuidance.text = lines.joinToString("\n")
     }
@@ -1421,61 +1429,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
 
                 val summary = navigationManager.buildInitialSummary().ifEmpty { getRouteSummary() }
-                // 주의: waypoints[0] 은 TMap "출발점"(= 현재 위치)이라 방위 계산이 무의미함
-                // (bearing(현재,현재) → 엉뚱한 값 → 회전 없이 즉시 "정면입니다" 버그).
-                // 현재 위치에서 8m 이상 떨어진 첫 waypoint 를 목표 방향 기준점으로 사용한다.
-                val firstWaypoint = run {
-                    val wps = navigationManager.currentRoute?.waypoints ?: emptyList()
-                    wps.firstOrNull { wp ->
-                        val dLat = (wp.lat - currentLocation.latitude) * 111320.0
-                        val dLon = (wp.lon - currentLocation.longitude) * 111320.0 *
-                            kotlin.math.cos(currentLocation.latitude * kotlin.math.PI / 180.0)
-                        kotlin.math.sqrt(dLat * dLat + dLon * dLon) >= 8.0
-                    } ?: wps.firstOrNull()
-                }
-
-                if (firstWaypoint != null) {
-                    // 안내 시작 직후 자동 온보딩 (iOS AutoOnboardingCoordinator 와 동일 흐름):
-                    // 요약 발화 → 평평 자세 → 회전 → 정면 일치 1초 유지 → 본격 보행 안내.
-                    // 요약 발화는 coordinator 가 담당하므로 여기선 speakTTS 하지 않는다.
-                    appendNavLog("AutoOnboarding 시작 (요약→자세→회전→정면)")
-                    android.util.Log.d(
-                        "Onboarding",
-                        "start — firstWp=(${firstWaypoint.lat}, ${firstWaypoint.lon}) " +
-                            "cur=(${currentLocation.latitude}, ${currentLocation.longitude})"
-                    )
-                    onboardingCoordinator?.stop()
-                    onboardingCoordinator = AutoOnboardingCoordinator(
-                        context = applicationContext,
-                        scope = lifecycleScope,
-                        speak = { msg -> speakTTS(msg) },
-                        // 실시간 방향 비프 — 기존 방향성 비콘 오디오 재사용.
-                        // 좌우 패닝으로 회전 방향, 정면(±15°)이면 높은 피치로 "멈춰" 신호.
-                        beep = { diffDeg ->
-                            val (l, r, facing) = computeStereoPan(diffDeg.toFloat())
-                            playStereoBeep(l, r, facing)
-                        },
-                    ).apply {
-                        start(
-                            summary = summary,
-                            currentLat = currentLocation.latitude,
-                            currentLon = currentLocation.longitude,
-                            firstWaypointLat = firstWaypoint.lat,
-                            firstWaypointLon = firstWaypoint.lon,
-                            onCompleted = {
-                                appendNavLog("AutoOnboarding 완료 → 보행 안내 시작")
-                                startLocationTracking()
-                                startAutoRepeat()
-                            },
-                        )
-                    }
-                } else {
-                    // waypoint 가 비어있는 예외적 경우 — 온보딩 생략하고 즉시 안내.
-                    appendNavLog("waypoint 없음 — 온보딩 생략, 즉시 안내")
-                    if (summary.isNotEmpty()) speakTTS(summary)
-                    startLocationTracking()
-                    startAutoRepeat()
-                }
+                // 출발 전 방향 정렬(온보딩) 제거 — 경로 요약만 말하고 곧바로 보행 안내를 시작한다.
+                appendNavLog("경로 요약 발화 → 보행 안내 시작")
+                if (summary.isNotEmpty()) speakTTS(summary)
+                startLocationTracking()
+                startAutoRepeat()
             } else {
                 playToneError()
                 speakAndListenIdle("경로를 찾을 수 없습니다. 다른 목적지를 말씀해주세요.")
@@ -1552,9 +1510,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun stopNavigationFull() {
         appendNavLog("stopNavigationFull (사용자 중단 또는 음성 명령)")
         closeNavLog()
-        // 온보딩 도중 중단 시 coordinator 즉시 정리 (onCompleted 는 호출 안 됨 → 보행 안내 시작 안 함).
-        onboardingCoordinator?.stop()
-        onboardingCoordinator = null
         trackingJob?.cancel()
         stopAutoRepeat()
         stopBeacon()
@@ -1584,11 +1539,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     val gpsBearing = location.bearing
                     val delta = ((gpsBearing - currentAzimuth + 540f) % 360f) - 180f
                     currentAzimuth = (currentAzimuth + 0.3f * delta + 360f) % 360f
-                    // Step 1 (2026-05-29) — 자력계 없는 디바이스에서 GPS bearing 으로 azimuth 추정 후
-                    // 같은 lean 보정 채널로 전달. magnetometerAvailable=true 인 경우는
-                    // orientationListener 가 매 sensor tick 마다 별도로 호출하고 있으므로 중복 없음.
+                    // 자력계 없는 디바이스에서 GPS bearing 으로 azimuth 추정 후 전달(CSV 진단용).
+                    // magnetometerAvailable=true 면 orientationListener 가 매 tick 별도 호출 → 중복 없음.
                     if (::navigationManager.isInitialized) {
-                        navigationManager.updateCompassHeading(currentAzimuth, System.currentTimeMillis())
+                        navigationManager.updateCompassHeading(currentAzimuth)
                     }
                 }
 
@@ -1959,10 +1913,10 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         param("session_start_ms", metricStartMs)
                         param("zone_enter_count_in_session", metricZoneEnterCount.toLong())
                     }
-                    // 화면 모드 전환 — 나침반 → 카메라 (NAVIGATING 중일 때만)
+                    // 접근 안내 발화 — 화면엔 이미 '신호등 확인' 버튼이 떠 있다.
                     if (appState == AppState.NAVIGATING) {
-                        speakTTS("횡단보도가 가까워졌습니다. 휴대폰을 세로로 들어주세요.")
-                        applyNavigatingMode(inZone = true)
+                        speakTTS("횡단보도가 가까워졌습니다. 신호등을 확인하려면 화면의 신호등 확인 버튼을 두 번 누르세요.")
+                        applyNavigatingMode()
                     }
                 } else if (!inZone && wasIn) {
                     Log.d("SafeWalkNav", "Crosswalk zone EXIT | TrafficLight AI=OFF")
@@ -1971,22 +1925,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     deferredSignalDirectionJob?.cancel()
                     deferredSignalDirectionJob = null
                     crosswalkEntrySpeechHoldUntil = 0L
-                    // 화면 모드 전환 — 카메라 → 나침반 (NAVIGATING 중일 때만)
+                    // 통과 안내 — 확인 중이었으면 종료하고 버튼 화면으로 복귀.
                     if (appState == AppState.NAVIGATING) {
+                        if (signalCheckActive) stopSignalCheck(announce = false)
                         speakTTS("횡단보도를 지나갔습니다. 휴대폰을 평평하게 들고 계속 진행하세요.")
-                        applyNavigatingMode(inZone = false)
+                        applyNavigatingMode()
                     }
                 }
                 updateDebugInfo()
-                updateCompactDebugGuidance()
-            }
-        }
-
-        lifecycleScope.launch {
-            navigationManager.hasNearbyTrafficSignal.collectLatest { hasSignal ->
-                hasNearbyTrafficSignalForCamera = hasSignal
-                applyNavigatingMode(inCrosswalkZone)
-                applyTrafficSignalCameraZoom()
                 updateCompactDebugGuidance()
             }
         }
@@ -2072,7 +2018,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      */
     private fun startCamera() {
         if (cameraProvider != null) {
-            applyTrafficSignalCameraZoom()
             return
         }   // 이미 작동 중
 
@@ -2137,9 +2082,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         executor,
                         TrafficLightAnalyzer(
                             detector = detector,
-                            // 횡단보도 zone + 10m 이내 신호등일 때만 ML 추론. 테스트 모드는 예외.
+                            // 사용자가 '신호등 확인'을 켰을 때만 ML 추론. 테스트/부스 모드는 예외.
                             isActive = {
-                                (inCrosswalkZone && hasNearbyTrafficSignalForCamera) || TEST_MODE_FORCE_ML_ON || boothModeActive
+                                signalCheckActive || boothModeActive || TEST_MODE_FORCE_ML_ON
                             },
                         ) { detections ->
                             runOnUiThread { onTrafficLightDetected(detections) }
@@ -2155,7 +2100,6 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     CameraSelector.DEFAULT_BACK_CAMERA,
                     *useCases.toTypedArray()
                 )
-                applyTrafficSignalCameraZoom()
                 Log.d("SafeWalkNav", "Camera bound (use cases: ${useCases.size})")
             } catch (e: Exception) {
                 Log.e("SafeWalkNav", "Camera bind failed", e)
@@ -2194,7 +2138,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // zone=false 일 땐 spam 방지 위해 기록 안 함. zone=true 인데 detections=0 면 모델이 신호등을
         // 못 보고 있다는 강력한 신호.
         val statsLine = if (stats != null) {
-            "TL_DIAG zone=$inCrosswalkZone signal10m=$hasNearbyTrafficSignalForCamera " +
+            "TL_DIAG zone=$inCrosswalkZone check=$signalCheckActive " +
                     "raw=${detections.size} " +
                     "aboveTh=${stats.rawCandidatesAboveThreshold} " +
                     "peakConf=${"%.2f".format(stats.peakConfidence)} " +
@@ -2202,9 +2146,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     "th=${"%.2f".format(stats.confidenceThresholdUsed)}${if (stats.diagnosticMode) "[DIAG]" else ""} " +
                     "inferMs=${stats.inferenceMs}"
         } else {
-            "TL_DIAG zone=$inCrosswalkZone signal10m=$hasNearbyTrafficSignalForCamera raw=${detections.size} stats=null"
+            "TL_DIAG zone=$inCrosswalkZone check=$signalCheckActive raw=${detections.size} stats=null"
         }
-        val trafficLightAiActive = (inCrosswalkZone && hasNearbyTrafficSignalForCamera) || boothModeActive
+        val trafficLightAiActive = signalCheckActive || boothModeActive
         val aiResultLine = if (stats != null) {
             "AI ${if (trafficLightAiActive) "ON" else "OFF"} | raw=${detections.size} " +
                     "above=${stats.rawCandidatesAboveThreshold} " +
@@ -2222,6 +2166,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // 테스트 모드면 zone 무관하게 로깅 (인식 정확도 검증을 위해 모든 추론 라인 필요).
         if (trafficLightAiActive || TEST_MODE_FORCE_ML_ON) {
             appendNavLog(statsLine)
+        }
+        // 임시 진단(logcat) — 데모 세션은 파일 로그를 안 만들어 TL_DIAG 가 안 보이므로
+        // AI 활성 상태에서는 무조건 logcat 에도 찍는다. 검증 끝나면 이 줄 삭제.
+        if (BuildConfig.DEBUG && (trafficLightAiActive || TEST_MODE_FORCE_ML_ON)) {
+            Log.d("TL_DIAG", statsLine)
         }
 
         // ──── 안내 흐름 (기존 로직, 단 reason 명시) ────
@@ -2673,26 +2622,13 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             } else {
                 speakTTS("위치 권한이 필요합니다. 설정에서 허용해주세요.")
             }
-            // 부스 모드: 카메라 권한이 이번에 허용됐으면 즉시 카메라 시작
-            if (boothModeActive && ActivityCompat.checkSelfPermission(
+            // 부스 모드 / 신호등 확인 모드: 카메라 권한이 이번에 허용됐으면 즉시 카메라 시작
+            if ((boothModeActive || signalCheckActive) && ActivityCompat.checkSelfPermission(
                     this, Manifest.permission.CAMERA
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
                 startCamera()
             }
         }
-    }
-
-    private suspend fun loadTrafficSignalLocations(): List<TrafficSignalLocation> {
-        val db = TrafficSignalDatabase.getInstance(this)
-
-        val repository = TrafficSignalRepository(
-            dao = db.trafficSignalDao(),
-            apiClient = SeoulTrafficSignalLocationApiClient(
-                apiKey = BuildConfig.SEOUL_API_KEY
-            )
-        )
-
-        return repository.getTrafficSignals()
     }
 }

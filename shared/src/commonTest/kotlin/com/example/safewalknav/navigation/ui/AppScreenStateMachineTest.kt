@@ -18,14 +18,13 @@ class AppScreenStateMachineTest {
     private fun navOn(
         arrived: Boolean = false,
         zone: Boolean = false,
-        signal: Boolean = false,
         guidance: String = "직진",
         dist: Int? = 50,
         bearing: Float? = 90f,
         dest: String = "도서관",
     ) = NavSnapshot(
         isNavigating = true, isArrived = arrived, inCrosswalkZone = zone,
-        hasNearbyTrafficSignal = signal, guidance = guidance,
+        guidance = guidance,
         distanceToDestinationMeters = dist, targetBearingDeg = bearing, destinationName = dest,
     )
 
@@ -59,19 +58,19 @@ class AppScreenStateMachineTest {
     // ── 내비 하위 모드 ──
 
     @Test fun 평상이동은_Walking모드() {
-        val s = AppScreenStateMachine.reduce(VoicePhase.Idle, navOn(zone = false, signal = false, bearing = 45f))
+        val s = AppScreenStateMachine.reduce(VoicePhase.Idle, navOn(zone = false, bearing = 45f))
         assertIs<AppScreenState.Navigating>(s)
         assertIs<NavMode.Walking>(s.mode)
         assertEquals(45f, (s.mode as NavMode.Walking).targetBearingDeg)
     }
 
-    @Test fun 횡단보도_zone과_신호등_모두일때만_Crosswalk모드() {
-        // zone 만: 아직 Walking
-        val onlyZone = AppScreenStateMachine.reduce(VoicePhase.Idle, navOn(zone = true, signal = false))
-        assertIs<NavMode.Walking>((onlyZone as AppScreenState.Navigating).mode)
-        // zone + 신호등: Crosswalk
-        val both = AppScreenStateMachine.reduce(VoicePhase.Idle, navOn(zone = true, signal = true))
-        assertEquals(NavMode.Crosswalk, (both as AppScreenState.Navigating).mode)
+    @Test fun 횡단보도_zone이면_Crosswalk모드() {
+        // zone 밖: Walking
+        val walking = AppScreenStateMachine.reduce(VoicePhase.Idle, navOn(zone = false))
+        assertIs<NavMode.Walking>((walking as AppScreenState.Navigating).mode)
+        // zone 안: Crosswalk (신호 공공데이터 폐기 후 zone 진입만으로 전환)
+        val crosswalk = AppScreenStateMachine.reduce(VoicePhase.Idle, navOn(zone = true))
+        assertEquals(NavMode.Crosswalk, (crosswalk as AppScreenState.Navigating).mode)
     }
 
     // ── 도착 ──
@@ -104,7 +103,7 @@ class AppScreenStateMachineTest {
         assertEquals("왼쪽으로", nav.guidance)
 
         // 횡단보도 진입
-        m.updateNavigation(navOn(zone = true, signal = true))
+        m.updateNavigation(navOn(zone = true))
         assertEquals(NavMode.Crosswalk, (m.state.value as AppScreenState.Navigating).mode)
 
         // 도착

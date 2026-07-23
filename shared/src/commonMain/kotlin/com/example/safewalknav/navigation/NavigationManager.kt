@@ -1,7 +1,5 @@
 package com.example.safewalknav.navigation
 
-import com.example.safewalknav.audio.BeepTone
-import com.example.safewalknav.audio.SpatialBeeper
 import com.example.safewalknav.navigation.geo.KalmanHeading
 import com.example.safewalknav.navigation.geo.RouteBearingProfile
 import com.example.safewalknav.navigation.geo.alongTrackMeters
@@ -14,12 +12,6 @@ import com.example.safewalknav.navigation.geo.distanceBetween
 import com.example.safewalknav.navigation.geo.getClockDirection
 import com.example.safewalknav.navigation.platform.GpsLocation
 import com.example.safewalknav.navigation.platform.currentTimeMillis
-import com.example.safewalknav.navigation.signal.SignalApiClient
-import com.example.safewalknav.navigation.signal.SignalRemainingInfo
-import com.example.safewalknav.navigation.signal.TrafficIntersectionParser
-import com.example.safewalknav.navigation.signal.TrafficSignalLocation
-import com.example.safewalknav.navigation.signal.TrafficSignalMatcher
-import com.example.safewalknav.navigation.signal.TrafficSignalRemainingTimeParser
 import com.example.safewalknav.navigation.tbfw.AnnouncementStage
 import com.example.safewalknav.navigation.tbfw.MessageBuilder
 import com.example.safewalknav.navigation.tbfw.NavigatorConfig
@@ -94,14 +86,8 @@ interface Cancellable {
  */
 class NavigationManager(
     private val tMapApiClient: TMapApiClient,
-    private val signalApiClient: SignalApiClient,
     private val headingLogger: HeadingLogger = NoopHeadingLogger,
-    private var trafficSignals: List<TrafficSignalLocation> = emptyList(), //횡단보도 주변 신호등 데이터
 ) {
-    // 사용자 휴대폰 자력계+가속도 fusion azimuth (MainActivity 가 매 sensor tick 마다 push)
-    private val _compassHeading = MutableStateFlow(0f)
-    val compassHeading: StateFlow<Float> = _compassHeading.asStateFlow()
-
     // 현재 도로 진행 방향 (computeRouteBearingAhead 결과, 매 GPS tick 갱신).
     // 2026-07: CompassView(나침반 화면) 삭제됨. 이 값은 AppScreenState.NavMode.Walking 배선용으로 남긴다.
     private val _targetBearing = MutableStateFlow(0f)
@@ -135,11 +121,6 @@ class NavigationManager(
 
     // 외부에서 관찰할 수 있는 StateFlow (필요시)
 
-    fun updateTrafficSignals(signals: List<TrafficSignalLocation>) {
-        trafficSignals = signals
-        _debugMessage.value = "signals=${signals.size}"
-    }
-
     var currentRoute: TMapRoute? = null
         private set
 
@@ -166,9 +147,6 @@ class NavigationManager(
     // iOS: 동일 로직 적용 가능 (이지민 협업).
     private val _isInCrosswalkZone = MutableStateFlow(false)
     val isInCrosswalkZone: StateFlow<Boolean> = _isInCrosswalkZone
-
-    private val _hasNearbyTrafficSignal = MutableStateFlow(false)
-    val hasNearbyTrafficSignal: StateFlow<Boolean> = _hasNearbyTrafficSignal
 
     // 안내 메시지
     private val _guidanceMessage = MutableStateFlow("")
@@ -214,18 +192,6 @@ class NavigationManager(
     // RouteAnnotator/announceDistance 등 TBFW 튜닝 상수 묶음 — 매번 생성하지 않고 인스턴스 보관.
     private val navigatorConfig = NavigatorConfig()
 
-    /**
-     * 가상 waypoint 통과 시 스테레오 비프 안내를 담당.
-     *
-     * 플랫폼별 동작:
-     *   - iOS: 생성만 해두고 Swift SpatialBeeperImpl 가 iosImpl 콜백을 채워야 실제 소리가 남.
-     *     (AppDependencies 가 책임)
-     *   - Android: actual 자체가 AudioTrack 으로 사인파를 합성하므로 즉시 작동.
-     *
-     * 외부에서 콜백을 주입해야 하는 iOS 를 위해 public 으로 노출한다.
-     */
-    val spatialBeeper: SpatialBeeper = SpatialBeeper()
-
     // 가상 waypoint 통과 카운터 — "잘 가고 있을 때" 무음 vs 가벼운 확인음 토글에 사용.
     private var virtualPassCount = 0
 
@@ -263,24 +229,9 @@ class NavigationManager(
     // 시각장애인이 어느 방향에 횡단보도가 있는지 모르므로 zone 진입 transition 에서 발화.
     private var wasInCrosswalkZone = false
     private var lastCrosswalkAnnouncedWpIdx = -1
-    private var lastSignalPresenceAnnouncedWpIdx = -1
-    private var lastSignalDirectionAnnouncedWpIdx = -1
-    // 2026-06-05 외출 버그 #2 — 사용자 위치 10m 내 신호등만 매칭하면 *반대편 신호등 (20~30m)*
-    // 이 누락되어 hasNearbyTrafficSignal=false → 카메라 OFF.
-    // 30m → 50m 재확대 — 강남대로 같은 10차선+ 광폭 도로 (35~50m) 반대편 신호등 포함.
-    // 한국 도로 폭 reference: 2~4차선 14m / 6차선 21m / 8차선 28m / 10차선+ 35~50m.
-    private val SIGNAL_CAMERA_MATCH_RADIUS_M = 50f
-    private val SIGNAL_DIRECTION_MATCH_RADIUS_M = 50f
     private val ARRIVAL_DISTANCE_M = 5f
     private val NEAR_DISTANCE_M = 10f
     private val APPROACHING_DISTANCE_M = 20f
-    // 2026-06-05 외출 버그 #1 — 좌우 보정 임계값.
-    // 25°: route bearing 과 user heading 차이가 이 이상이면 좌우 누적 시작.
-
-    //클래스 변수 추가
-    private var lastSignalApiCallTime = 0L
-    private var lastSignalItstId: String? = null
-    private val signalApiCooldownMs = 60_000L
 
     // ========== Heading Smoothing (Circular Kalman Filter) ==========
     // 알고리즘 본체는 shared/commonMain/.../navigation/KalmanHeading.kt 에 분리됨.
@@ -311,10 +262,8 @@ class NavigationManager(
      * CSV `rotation_vector_heading` 필드 기록용. heading 판정 로직 자체는 GPS bearing 기반 그대로 유지.
      */
 
-    fun updateCompassHeading(azimuth: Float, currentTime: Long) {
-        latestCompassHeading = azimuth
-        _compassHeading.value = azimuth   // 신호등 조준용 시계방향(getClockDirection) 에 계속 필요
-
+    fun updateCompassHeading(azimuth: Float) {
+        latestCompassHeading = azimuth   // CSV rotation_vector_heading 기록용
     }
 
     // ========== 경로 탐색 ==========
@@ -381,13 +330,10 @@ class NavigationManager(
         lastCurveReminderDirection = null
         wasInCrosswalkZone = false
         lastCrosswalkAnnouncedWpIdx = -1
-        lastSignalPresenceAnnouncedWpIdx = -1
-        lastSignalDirectionAnnouncedWpIdx = -1
         _isNavigating.value = true
         _arrivalState.value = ArrivalState.FAR
         _distanceToDestination.value = Float.MAX_VALUE
         _isInCrosswalkZone.value = false
-        _hasNearbyTrafficSignal.value = false
         // 새 경로 시작 — 도로 방향은 첫 GPS tick 들어올 때까지 미정.
         hasRoadBearing = false
         currentTargetBearing = 0f
@@ -638,116 +584,10 @@ class NavigationManager(
                 "${side}에 횡단보도가 있습니다. 신호를 확인하고 건너세요."
             }
         }
-        val message = if (findSignalForCrosswalkIndex(route, crosswalkIdx, currentLat, currentLon, userBearing) != null) {
-            lastSignalPresenceAnnouncedWpIdx = crosswalkIdx
-            "$baseMessage 신호등이 있습니다."
-        } else {
-            baseMessage
-        }
-
         // A-3: 일회성 이벤트 채널로 발화. _guidanceMessage 덮어쓰기에 영향받지 않음.
-        announceEvent(message, forceRepeat = true, interrupt = false)
-    }
-
-    private fun announceSignalPresenceIfNeeded(
-        crosswalkZoneInfo: CrosswalkZoneInfo,
-        currentLat: Double,
-        currentLon: Double,
-        userBearing: Float,
-    ) {
-        val route = currentRoute ?: return
-        val crosswalkIdx = crosswalkZoneInfo.crosswalkIndex
-            ?: findNearbyCrosswalkWaypointIndex(route)
-            ?: return
-        if (crosswalkIdx == lastSignalPresenceAnnouncedWpIdx) return
-        if (findSignalForCrosswalkIndex(route, crosswalkIdx, currentLat, currentLon, userBearing) == null) return
-
-        lastSignalPresenceAnnouncedWpIdx = crosswalkIdx
-        // A-3: 일회성 이벤트 채널.
-        announceEvent("신호등이 있습니다.", forceRepeat = true, interrupt = false)
-    }
-
-    private fun announceSignalDirectionIfNeeded(
-        crosswalkZoneInfo: CrosswalkZoneInfo,
-        currentLat: Double,
-        currentLon: Double,
-        userBearing: Float,
-    ) {
-        val route = currentRoute ?: return
-        val crosswalkIdx = crosswalkZoneInfo.crosswalkIndex
-            ?: findNearbyCrosswalkWaypointIndex(route)
-            ?: return
-        if (crosswalkIdx == lastSignalDirectionAnnouncedWpIdx) return
-
-        val signal = findSignalForCrosswalkIndex(
-            route,
-            crosswalkIdx,
-            currentLat,
-            currentLon,
-            userBearing,
-            matchRadiusMeters = SIGNAL_DIRECTION_MATCH_RADIUS_M,
-        )
-            ?: return
-
-        lastSignalDirectionAnnouncedWpIdx = crosswalkIdx
-        val directionReferenceBearing = if (latestCompassHeading >= 0f) {
-            latestCompassHeading
-        } else {
-            userBearing
-        }
-        val clockDirection = getClockDirection(
-            currentLat = currentLat,
-            currentLon = currentLon,
-            targetLat = signal.lat,
-            targetLon = signal.lon,
-            userBearing = directionReferenceBearing,
-        )
-        // A-3: 일회성 이벤트 채널.
-        announceEvent("신호등은 ${clockDirection} 방향으로 추정됩니다. 휴대폰을 해당 방향으로 향해 주세요.", forceRepeat = true, interrupt = false)
-    }
-
-    private fun findSignalForCrosswalkZone(
-        crosswalkZoneInfo: CrosswalkZoneInfo,
-        currentLat: Double,
-        currentLon: Double,
-        userBearing: Float,
-    ): TrafficSignalLocation? {
-        val route = currentRoute ?: return null
-        val crosswalkIdx = crosswalkZoneInfo.crosswalkIndex
-            ?: findNearbyCrosswalkWaypointIndex(route)
-            ?: return null
-        return findSignalForCrosswalkIndex(route, crosswalkIdx, currentLat, currentLon, userBearing)
-    }
-
-    private fun findSignalForCrosswalkIndex(
-        route: TMapRoute,
-        crosswalkIdx: Int,
-        currentLat: Double,
-        currentLon: Double,
-        userBearing: Float,
-        matchRadiusMeters: Float = SIGNAL_CAMERA_MATCH_RADIUS_M,
-    ): TrafficSignalLocation? {
-        val crosswalkWp = route.waypoints.getOrNull(crosswalkIdx) ?: return null
-        val routeBearing = computeRouteBearingAhead(15f) ?: userBearing
-        return TrafficSignalMatcher.findBestSignalForCrosswalk(
-            currentLat = currentLat,
-            currentLon = currentLon,
-            crosswalkLat = crosswalkWp.lat,
-            crosswalkLon = crosswalkWp.lon,
-            routeBearing = routeBearing,
-            signals = trafficSignals,
-            crosswalkRadiusMeters = matchRadiusMeters,
-            currentRadiusMeters = matchRadiusMeters,
-        )
-    }
-
-    private fun findNearbyCrosswalkWaypointIndex(route: TMapRoute): Int? {
-        val searchStart = maxOf(0, currentWaypointIndex - 1)
-        val searchEnd = minOf(currentWaypointIndex + 4, route.waypoints.size)
-        for (i in searchStart until searchEnd) {
-            if (isCrosswalkWaypoint(route.waypoints[i])) return i
-        }
-        return null
+        // (신호등 존재 여부는 서울 신호 공공데이터 API 폐기로 더 이상 안내하지 않는다 —
+        //  사용자가 횡단보도에서 '신호등 확인' 버튼을 눌러 카메라로 직접 확인한다.)
+        announceEvent(baseMessage, forceRepeat = true, interrupt = false)
     }
 
     fun stopNavigation() {
@@ -758,7 +598,6 @@ class NavigationManager(
         _arrivalState.value = ArrivalState.FAR
         _distanceToDestination.value = Float.MAX_VALUE
         _isInCrosswalkZone.value = false
-        _hasNearbyTrafficSignal.value = false
         _guidanceMessage.value = "안내를 종료합니다"
         lastSpokenMessage = ""
         lastGuidanceTime = 0L
@@ -769,8 +608,6 @@ class NavigationManager(
         lastRoadType = -1
         wasInCrosswalkZone = false
         lastCrosswalkAnnouncedWpIdx = -1
-        lastSignalPresenceAnnouncedWpIdx = -1
-        lastSignalDirectionAnnouncedWpIdx = -1
         cachedNearbyPOIs = emptyList()
         cachedAddress = null
         arrivalInfoLoaded = false
@@ -783,7 +620,6 @@ class NavigationManager(
         lastCurveReminderTime = 0L
         lastCurveReminderDirection = null
         lastVirtualWpIndex = -1
-        spatialBeeper.stop()
         _annotations.value = emptyList()
         _announcementLog.value = emptyList()
 
@@ -811,12 +647,9 @@ class NavigationManager(
         currentRoutePointIndex = 0
         _distanceToDestination.value = 0f
         _isInCrosswalkZone.value = false
-        _hasNearbyTrafficSignal.value = false
         lastSpokenMessage = ""
         wasInCrosswalkZone = false
         lastCrosswalkAnnouncedWpIdx = -1
-        lastSignalPresenceAnnouncedWpIdx = -1
-        lastSignalDirectionAnnouncedWpIdx = -1
         consecutiveDeviationCount = 0
         consecutiveRerouteCount = 0
         pathAnnotations = emptyList()
@@ -826,7 +659,6 @@ class NavigationManager(
         lastCurveReminderTime = 0L
         lastCurveReminderDirection = null
         lastVirtualWpIndex = -1
-        spatialBeeper.stop()
         _annotations.value = emptyList()
 
         // 도로 방향 상태 리셋
@@ -898,9 +730,8 @@ class NavigationManager(
         consecutiveRerouteCount = 0
 
         // Forward-Only Waypoint 동기화 (지나간 waypoint를 다시 잡는 문제 방지)
-        // userBearing 를 함께 전달 — 가상 waypoint 통과 시점에 비프 안내에 사용.
         currentRoute?.let {
-            syncWaypointIndexForwardOnly(it, currentLat, currentLon, userBearing)
+            syncWaypointIndexForwardOnly(it, currentLat, currentLon)
         }
 
         // ──── 도로 진행 방향 갱신 — IMU heading 보정 안내용 (Step 1, 2026-05-29) ────
@@ -929,21 +760,13 @@ class NavigationManager(
             currentWaypointIndex
         )
         val isInCrossWalkZone = crosswalkZoneInfo.isInZone
-        val hasNearbySignal = isInCrossWalkZone &&
-                findSignalForCrosswalkZone(crosswalkZoneInfo, currentLat, currentLon, userBearing) != null
         // 외부 (안드 ML 검출 게이팅 등) 가 collect 할 수 있게 state flow 갱신
         _isInCrosswalkZone.value = isInCrossWalkZone
-        _hasNearbyTrafficSignal.value = hasNearbySignal
 
         // zone 진입(false→true) 시점에 횡단 방향을 1회 안내 — 시각장애인이 어느 쪽에
         // 횡단보도가 있는지 모르기 때문. 매 update 마다 호출되므로 transition 만 잡는다.
         if (isInCrossWalkZone && !wasInCrosswalkZone) {
             announceCrosswalkDirection(route, currentLat, currentLon, userBearing, speed)
-            announceSignalDirectionIfNeeded(crosswalkZoneInfo, currentLat, currentLon, userBearing)
-        }
-        if (isInCrossWalkZone) {
-            announceSignalDirectionIfNeeded(crosswalkZoneInfo, currentLat, currentLon, userBearing)
-            announceSignalPresenceIfNeeded(crosswalkZoneInfo, currentLat, currentLon, userBearing)
         }
         wasInCrosswalkZone = isInCrossWalkZone
 
@@ -981,92 +804,6 @@ class NavigationManager(
                     "turnType=${currentWp?.turnType}\n" +
                     "desc=${currentWp?.description}\n" +
                     nearestCrosswalkInfo
-        val crosswalkDebugBase =
-            "scenario=${if (isInCrossWalkZone) "CROSSWALK_ZONE" else "NO_CROSSWALK_ZONE"}\n" +
-                    _debugMessage.value
-        _debugMessage.value = crosswalkDebugBase
-        if (isInCrossWalkZone) {
-            val nearest = trafficSignals.minByOrNull {
-                distanceBetween(currentLat, currentLon, it.lat, it.lon)
-            }
-
-            val nearestDist = nearest?.let {
-                distanceBetween(currentLat, currentLon, it.lat, it.lon)
-            }
-
-            val nearestSignal = TrafficSignalMatcher.findNearestSignal(
-                currentLat = currentLat,
-                currentLon = currentLon,
-                signals = trafficSignals,
-                radiusMeters = 10f
-            )
-
-            if (nearestSignal != null) {
-                _debugMessage.value =
-                    "횡단보도 감지됨\n" +
-                            "signals=${trafficSignals.size}\n" +
-                            "nearestId=${nearest?.itstId ?: "없음"}\n" +
-                            "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
-                            "nearestSignalLat=${nearestSignal.lat}\n" +
-                            "nearestSignalLon=${nearestSignal.lon}\n" +
-                            "교차로 매칭 시도"
-
-                _debugMessage.value =
-                    crosswalkDebugBase + "\n" +
-                            "scenario=CROSSWALK_SIGNAL_NEARBY\n" +
-                            "signals=${trafficSignals.size}\n" +
-                            "nearestId=${nearestSignal.itstId}\n" +
-                            "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
-                            "nearestSignalLat=${nearestSignal.lat}\n" +
-                            "nearestSignalLon=${nearestSignal.lon}\n" +
-                            "intersectionLookup=pending"
-
-                fetchTrafficSignalData(
-                    signalLat = nearestSignal.lat,
-                    signalLon = nearestSignal.lon,
-                    crosswalkZoneInfo = crosswalkZoneInfo,
-                    nearestSignalId = nearestSignal.itstId,
-                    nearestSignalDistance = nearestDist
-                )
-            } else {
-                _debugMessage.value =
-                    "횡단보도 감지됨\n" +
-                            "signals=${trafficSignals.size}\n" +
-                            "nearestId=${nearest?.itstId ?: "없음"}\n" +
-                            "nearestDist=${nearestDist?.toInt() ?: -1}m\n" +
-                            "10m 이내 신호등 없음"
-            }
-        }
-
-        // waypoint 안내
-        if (isInCrossWalkZone) {
-            val nearestSignalForScenario = TrafficSignalMatcher.findNearestSignal(
-                currentLat = currentLat,
-                currentLon = currentLon,
-                signals = trafficSignals,
-                radiusMeters = 10f
-            )
-            if (nearestSignalForScenario == null) {
-                val nearestForScenario = trafficSignals.minByOrNull {
-                    distanceBetween(currentLat, currentLon, it.lat, it.lon)
-                }
-                val nearestDistForScenario = nearestForScenario?.let {
-                    distanceBetween(currentLat, currentLon, it.lat, it.lon)
-                }
-                _debugMessage.value =
-                    crosswalkDebugBase + "\n" +
-                            "scenario=CROSSWALK_NO_SIGNAL\n" +
-                            "signalPresent=false\n" +
-                            "remainingTimeAvailable=false\n" +
-                            "reason=NO_NEARBY_SIGNAL\n" +
-                            "signals=${trafficSignals.size}\n" +
-                            "nearestId=${nearestForScenario?.itstId ?: "?놁쓬"}\n" +
-                            "nearestDist=${nearestDistForScenario?.toInt() ?: -1}m\n" +
-                            "signalRadius=10m\n" +
-                            "nearbySignal=false"
-            }
-        }
-
         updateWaypointGuidance(currentLat, currentLon, userBearing, speed)
 
         // RouteAnnotator 사전 안내 발화 — 폴리라인 기반 코너 즉석 감지를 대체함.
@@ -1183,235 +920,6 @@ class NavigationManager(
             )
             val message = "${clockDir} ${distToDestination.toInt()}미터"
             speak(message, forceRepeat = true)
-        }
-    }
-
-
-    suspend fun fetchTrafficSignalData(
-        signalLat: Double,
-        signalLon: Double,
-        crosswalkZoneInfo: CrosswalkZoneInfo? = null,
-        nearestSignalId: String? = null,
-        nearestSignalDistance: Float? = null
-    ) {
-        val signalDebugBase =
-            "crosswalkState=${crosswalkZoneInfo?.state ?: "?놁쓬"}\n" +
-                    "crosswalkIdx=${crosswalkZoneInfo?.crosswalkIndex ?: -1}\n" +
-                    "crosswalkDist=${crosswalkZoneInfo?.distanceMeters?.toInt() ?: -1}m\n" +
-                    "nearestSignalId=${nearestSignalId ?: "?놁쓬"}\n" +
-                    "nearestSignalDist=${nearestSignalDistance?.toInt() ?: -1}m\n" +
-                    "signalLat=$signalLat\n" +
-                    "signalLon=$signalLon"
-        _debugMessage.value = "fetchTrafficSignalData 진입"//위치 확인용 임시
-        _debugMessage.value =
-            signalDebugBase + "\n" +
-                    "scenario=CROSSWALK_SIGNAL_LOOKUP_PENDING\n" +
-                    "signalPresent=true\n" +
-                    "remainingTimeAvailable=unknown\n" +
-                    "intersectionLookup=pending"
-        val crossroadJson = signalApiClient.fetchIntersectionData()
-
-        if (crossroadJson == null) {
-            _debugMessage.value =
-                signalDebugBase + "\n" +
-                        "scenario=CROSSWALK_INTERSECTION_API_FAILED\n" +
-                        "signalPresent=true\n" +
-                        "remainingTimeAvailable=false\n" +
-                        "reason=INTERSECTION_API_NULL\n" +
-                        "intersectionApi=null"
-            return
-        }
-
-        if (crossroadJson.startsWith("ERROR")) {
-            _debugMessage.value =
-                signalDebugBase + "\n" +
-                        "scenario=CROSSWALK_INTERSECTION_API_FAILED\n" +
-                        "signalPresent=true\n" +
-                        "remainingTimeAvailable=false\n" +
-                        "reason=INTERSECTION_API_ERROR\n" +
-                        "intersectionApi=$crossroadJson"
-            return
-        }
-
-        val intersections = TrafficIntersectionParser.parse(crossroadJson)
-
-        val nearestIntersection = TrafficIntersectionParser.findNearest(
-            intersections = intersections,
-            lat = signalLat,
-            lon = signalLon,
-            radiusMeters = 10f
-        )
-
-        if (nearestIntersection == null) {
-            _debugMessage.value =
-                signalDebugBase + "\n" +
-                        "scenario=CROSSWALK_SIGNAL_NON_INTERSECTION\n" +
-                        "signalPresent=true\n" +
-                        "remainingTimeAvailable=false\n" +
-                        "reason=NO_INTERSECTION_MATCH\n" +
-                        "intersectionMatched=false\n" +
-                        "intersections=${intersections.size}"
-            return
-        }
-
-        val now = currentTimeMillis()
-
-        val isSameIntersection =
-            nearestIntersection.itstId == lastSignalItstId
-
-        val isCooldownActive =
-            now - lastSignalApiCallTime < signalApiCooldownMs
-
-        if (isSameIntersection && isCooldownActive) {
-            _debugMessage.value = "잔여시간 API 쿨다운 중"
-            return
-        }
-
-        lastSignalItstId = nearestIntersection.itstId
-        lastSignalApiCallTime = now
-
-        val remainJson = signalApiClient.fetchSignalRemainingData(
-            itstId = nearestIntersection.itstId
-        )
-
-        val parsedSignals = remainJson?.let {
-            TrafficSignalRemainingTimeParser.parse(it)
-
-        } ?: emptyList()
-
-        val routeBearing = computeRouteBearingAhead(15f)
-
-        val selectedSignal = if (routeBearing != null) {
-            selectSignalForRouteDirection(
-                routeBearing = routeBearing,
-                signals = parsedSignals
-            )
-        } else {
-            parsedSignals.firstOrNull {
-                it.remainingSeconds != null
-            }
-        }
-        val allPedestrianSignals = buildPedestrianSignalDebug(parsedSignals)
-        val targetDirection = routeBearing?.let { bearingToSignalDirection(it) }
-        val signalScenario = when {
-            remainJson == null || remainJson.startsWith("ERROR") ->
-                "CROSSWALK_SIGNAL_REMAINING_API_FAILED"
-            parsedSignals.isEmpty() ->
-                "CROSSWALK_SIGNAL_NO_PEDESTRIAN_DATA"
-            selectedSignal == null ->
-                "CROSSWALK_SIGNAL_DIRECTION_MISSING"
-            selectedSignal.remainingSeconds == null ->
-                "CROSSWALK_SIGNAL_SELECTED_NO_REMAINING"
-            else ->
-                "CROSSWALK_SIGNAL_SELECTED"
-        }
-        val signalReason = when (signalScenario) {
-            "CROSSWALK_SIGNAL_SELECTED_NO_REMAINING" ->
-                "NO_REMAINING_TIME_FOR_SELECTED_SIGNAL"
-            else -> signalScenario
-        }
-
-        _debugMessage.value =
-            "교차로 매칭 성공\n" +
-                    "itstId=${nearestIntersection.itstId}\n" +
-                    "name=${nearestIntersection.itstNm}\n" +
-                    "routeBearing=${routeBearing?.toInt() ?: -1}\n" +
-                    "targetDirection=${routeBearing?.let { bearingToSignalDirection(it) } ?: "없음"}\n" +
-                    "selectedDirection=${selectedSignal?.direction ?: "없음"}\n" +
-                    "보행신호=${selectedSignal?.stateName ?: "없음"}\n" +
-                    "raw=${selectedSignal?.remainingRaw ?: -1}\n" +
-                    "남은시간=${selectedSignal?.remainingSeconds ?: -1}초\n" +
-                    "parsedSignals=${parsedSignals.size}\n" +
-                    "allPdsg=$allPedestrianSignals"
-
-        _debugMessage.value =
-            signalDebugBase + "\n" +
-                    "scenario=$signalScenario\n" +
-                    "signalPresent=true\n" +
-                    "remainingTimeAvailable=${selectedSignal?.remainingSeconds != null}\n" +
-                    "reason=$signalReason\n" +
-                    "intersectionMatched=true\n" +
-                    "itstId=${nearestIntersection.itstId}\n" +
-                    "name=${nearestIntersection.itstNm ?: "?놁쓬"}\n" +
-                    "routeBearing=${routeBearing?.toInt() ?: -1}\n" +
-                    "targetDirection=${targetDirection ?: "?놁쓬"}\n" +
-                    "selectedDirection=${selectedSignal?.direction ?: "?놁쓬"}\n" +
-                    "walkSignal=${selectedSignal?.stateName ?: "?놁쓬"}\n" +
-                    "remainingRaw=${selectedSignal?.remainingRaw ?: -1}\n" +
-                    "remainingSeconds=${selectedSignal?.remainingSeconds ?: -1}\n" +
-                    "parsedSignals=${parsedSignals.size}\n" +
-                    "allPdsg=$allPedestrianSignals"
-    }
-
-    private fun buildPedestrianSignalDebug(
-        signals: List<SignalRemainingInfo>
-    ): String {
-        val byDirection = signals.associateBy { it.direction }
-        return listOf("nt", "ne", "et", "se", "st", "sw", "wt", "nw")
-            .joinToString(" | ") { direction ->
-                val signal = byDirection[direction]
-                if (signal == null) {
-                    "$direction=-"
-                } else {
-                    val raw = signal.remainingRaw?.toString() ?: "-"
-                    val seconds = signal.remainingSeconds?.toString() ?: "-"
-                    "$direction=${signal.stateName},raw=$raw,sec=$seconds"
-                }
-            }
-    }
-
-    private fun selectSignalForRouteDirection(
-        routeBearing: Float,
-        signals: List<SignalRemainingInfo>
-    ): SignalRemainingInfo? {
-        val targetDirection = bearingToSignalDirection(routeBearing)
-
-        val exact = signals.firstOrNull { signal ->
-            signal.direction == targetDirection
-        }
-
-        if (exact != null) {
-            return exact
-        }
-
-        val fallbackDirections = adjacentSignalDirections(targetDirection)
-
-        return fallbackDirections
-            .asSequence()
-            .mapNotNull { fallbackDirection ->
-                signals.firstOrNull { signal ->
-                    signal.direction == fallbackDirection
-                }
-            }
-            .firstOrNull()
-    }
-
-    private fun bearingToSignalDirection(bearing: Float): String {
-        val normalized = ((bearing % 360f) + 360f) % 360f
-
-        return when {
-            normalized >= 337.5f || normalized < 22.5f -> "nt"
-            normalized < 67.5f -> "ne"
-            normalized < 112.5f -> "et"
-            normalized < 157.5f -> "se"
-            normalized < 202.5f -> "st"
-            normalized < 247.5f -> "sw"
-            normalized < 292.5f -> "wt"
-            else -> "nw"
-        }
-    }
-
-    private fun adjacentSignalDirections(directionCode: String): List<String> {
-        return when (directionCode) {
-            "nt" -> listOf("nw", "ne")
-            "ne" -> listOf("nt", "et")
-            "et" -> listOf("ne", "se")
-            "se" -> listOf("et", "st")
-            "st" -> listOf("se", "sw")
-            "sw" -> listOf("st", "wt")
-            "wt" -> listOf("sw", "nw")
-            "nw" -> listOf("wt", "nt")
-            else -> emptyList()
         }
     }
 
@@ -1683,7 +1191,6 @@ class NavigationManager(
         route: TMapRoute,
         currentLat: Double,
         currentLon: Double,
-        userBearing: Float,
     ) {
         val waypoints = route.waypoints
         if (waypoints.isEmpty()) return
@@ -1794,7 +1301,7 @@ class NavigationManager(
         // 한 tick 에서 여러 가상 waypoint 를 한꺼번에 통과했더라도 비프는 마지막 1회만.
         // (연속 비프가 청각 피로를 유발하고 방향 의미도 마지막 점이 가장 최신이라.)
         if (lastVirtualPassedThisTick != null) {
-            handleVirtualWaypointPassed(lastVirtualPassedThisTick, currentLat, currentLon, userBearing)
+            handleVirtualWaypointPassed()
         }
     }
 
@@ -2026,7 +1533,8 @@ class NavigationManager(
 
         // 2026-06-15 — 보행 중 좌우 방향 보정("약간 오른쪽으로 가세요") 제거.
         // 서울임팩트 단계 결정: "걸으면서 방향 잡아주기" 기능 폐기.
-        // 신호등 조준용 나침반(compassHeading → getClockDirection)은 그대로 유지한다.
+        // 2026-07 — 나침반 기반 신호등 시계방향 조준 안내도 폐기(정지 시 자력계 부정확).
+        //           나침반 azimuth 는 CSV 진단 로깅(latestCompassHeading)에만 남는다.
 
         // 횡단보도 구간에서는 거리 안내 (직진 안내) 자체는 생략.
         if (onCrosswalk) return
@@ -2107,12 +1615,7 @@ class NavigationManager(
      * 과거 이 지점에서 하던 "이탈하셨습니다"(cross-track 쏠림)와
      * "오른쪽/왼쪽 방향"(곡선 리마인더)은 아래 본문 주석의 이유로 모두 제거됐다.
      */
-    private fun handleVirtualWaypointPassed(
-        passed: Waypoint,
-        userLat: Double,
-        userLon: Double,
-        @Suppress("UNUSED_PARAMETER") userBearing: Float,
-    ) {
+    private fun handleVirtualWaypointPassed() {
         virtualPassCount++
         lastVirtualWpIndex = currentWaypointIndex
 

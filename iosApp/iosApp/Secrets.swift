@@ -15,16 +15,6 @@ enum Secrets {
         return requiredValue(forKey: "TMapAppKey")
     }
 
-    /// 서울 T-Data 신호제어기 잔여시간 API 키 — 없어도 다른 기능은 동작.
-    static var tDataApiKey: String {
-        return optionalValue(forKey: "TDataApiKey")
-    }
-
-    /// 서울 열린데이터광장 API 키 (신호제어기 위치) — 없어도 다른 기능은 동작.
-    static var seoulApiKey: String {
-        return optionalValue(forKey: "SeoulApiKey")
-    }
-
     // MARK: - Private Helpers
 
     private static func requiredValue(forKey key: String) -> String {
@@ -37,14 +27,6 @@ enum Secrets {
                 2. Root에 '\(key)' (String) 항목이 있는지 확인
                 3. 값이 비어있지 않은지 확인
                 """)
-        }
-        return v
-    }
-
-    private static func optionalValue(forKey key: String) -> String {
-        guard let v = readPlistValue(forKey: key), !v.isEmpty else {
-            print("⚠️ [Secrets] '\(key)' 누락 — 관련 기능 비활성화됨")
-            return ""
         }
         return v
     }

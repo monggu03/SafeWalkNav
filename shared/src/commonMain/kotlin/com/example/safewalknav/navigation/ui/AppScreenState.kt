@@ -86,7 +86,6 @@ data class NavSnapshot(
     val isNavigating: Boolean = false,
     val isArrived: Boolean = false,             // arrivalState == ARRIVED
     val inCrosswalkZone: Boolean = false,
-    val hasNearbyTrafficSignal: Boolean = false,
     val guidance: String = "",
     val distanceToDestinationMeters: Int? = null,
     val targetBearingDeg: Float? = null,
@@ -158,7 +157,7 @@ class AppScreenStateMachine {
                 return when {
                     nav.isArrived ->
                         AppScreenState.Arrived(nav.destinationName)
-                    nav.inCrosswalkZone && nav.hasNearbyTrafficSignal ->
+                    nav.inCrosswalkZone ->
                         AppScreenState.Navigating(
                             mode = NavMode.Crosswalk,
                             guidance = nav.guidance,
