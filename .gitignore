@@ -88,3 +88,7 @@ DerivedData/
 Pods/
 *.xcodeproj/project.xcworkspace/xcuserdata/
 .claude/
+
+# 로컬 전용 (포트폴리오 관리 — 2026-07): 문서·인수인계 노트는 깃허브에 올리지 않음
+/docs/
+/CONTEXT.md
