@@ -227,13 +227,17 @@ final class TrafficLightDetector: NSObject, ObservableObject {
             )
         }
 
-        // 2) Detection → RawSignalDetection (엔진 입력). ped_red→0, ped_green→1. 그 외 라벨 무시.
+        // 2) Detection → RawSignalDetection (엔진 입력). 빨강→0, 초록→1. 그 외(횡단보도 등) 무시.
+        //    두 모델 라벨을 모두 받는다:
+        //      - 구 자체 모델: ped_red / ped_green
+        //      - kairess(한국 특화): R_Signal(빨강) / G_Signal(초록), Zebra_Cross 는 무시
+        //    (Android TrafficLightDetector 의 리매핑과 동일한 계약)
         let raw: [RawSignalDetection] = filtered.compactMap { det in
             let cls: Int32
             switch det.label {
-            case "ped_red":   cls = 0   // SignalDecisionEngine.COLOR_RED
-            case "ped_green": cls = 1   // SignalDecisionEngine.COLOR_GREEN
-            default:          return nil
+            case "ped_red", "R_Signal":   cls = 0   // SignalDecisionEngine.COLOR_RED
+            case "ped_green", "G_Signal": cls = 1   // SignalDecisionEngine.COLOR_GREEN
+            default:                      return nil
             }
             return RawSignalDetection(
                 classId: cls,

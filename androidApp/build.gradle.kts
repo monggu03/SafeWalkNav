@@ -3,7 +3,6 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    id("com.google.gms.google-services")
 }
 
 val tmapAppKey: String = run {
@@ -85,11 +84,7 @@ dependencies {
     // KMM 공통 모듈 (Kotlin Multiplatform shared)
     implementation(project(":shared"))
 
-    // Firebase BoM
-    implementation(platform("com.google.firebase:firebase-bom:32.7.0"))
-    implementation("com.google.firebase:firebase-analytics")
-    // KTX 확장 — Firebase.analytics + logEvent { param(...) } DSL 사용용 (2026-05-29 추가)
-    implementation("com.google.firebase:firebase-analytics-ktx")
+    // Firebase 제거 (2026-07) — 카메라-only 전환 후 미사용. 텔레메트리는 향후 자체 백엔드로.
 
     // Android Core
     implementation("androidx.core:core-ktx:1.12.0")
