@@ -17,7 +17,7 @@
 
 ## 핵심 기능
 
-- **보행 신호등 색 인식 (AI)** — 자체 설계 **YOLOv11n + P2 Head** 모델로 `ped_red` / `ped_green` 검출. 원거리(50m급) 검출률을 baseline 대비 **+12.4%p** 향상(mAP50 0.947), Float16 양자화로 모델 5.6 MB.
+- **보행 신호등 색 인식 (AI)** — 자체 설계 **YOLOv11n + P2 Head** 모델로 `ped_red` / `ped_green` 검출. 작은 객체(원거리 신호등) 검출에 강한 고해상도 검출 헤드(P2)를 추가하고, 온디바이스 추론을 위해 경량화했습니다.
 - **안전 우선 판정 엔진** — 빨강/초록 비대칭 신뢰도(초록 오탐이 더 위험), 연속 프레임 안정화, 점멸 감지·락아웃. 정적 초록에는 "건너세요"를 말하지 않고, **빨강→초록 전환을 직접 포착한 순간에만** 강한 진동으로 알립니다. 이 로직은 Android/iOS 공용 모듈(`shared`)에 있어 두 플랫폼 동작이 일치합니다.
 - **횡단보도 Zone Gating** — 횡단보도 25m 이내에서만 카메라·추론을 켜서 배터리·발열 억제.
 - **시계 방향 조준 안내** — 카메라를 어디로 향할지 모르는 문제를 `"3시 방향에 카메라를 들어주세요"` 형태로 해결.
@@ -52,9 +52,7 @@ SafeWalkNav/
 │       ├── traffic/  # 신호등 위치 로컬 캐시 (Room)
 │       └── location/ # FusedLocationProvider
 │
-├── iosApp/          # iOS 앱 (SwiftUI) — CoreML+Vision 추론, shared 엔진 연동
-├── ml_experiments/  # YOLO 학습·평가 스크립트 (gitignored)
-└── models/          # 학습된 모델 원본 (gitignored)
+└── iosApp/          # iOS 앱 (SwiftUI) — CoreML+Vision 추론, shared 엔진 연동
 ```
 
 > **플랫폼 현황**: Android는 전체 흐름(음성 목적지 → 도보 안내 → 신호 인식)이 동작합니다. iOS는 공유 판정 엔진과 카메라 데모가 동작하며, 메인 내비게이션 UI는 진행 중입니다.
