@@ -1,319 +1,50 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-시각장애인 풀스크린 UI — PR-UX1 (사용자 흐름 재설계)
+SafeWalk — 카메라 단일 기능 화면.
 
-상태별 화면 구성:
-  1. BEFORE (idle)
-     · 빈 화면 (시각장애인은 화면 안 봐도 OK)
-     · TTS: "내비게이션을 실행하시려면 화면을 꾹 눌러주세요"
-     · 트리거: 화면 전체 long press 2초 → STT
-     · DEBUG 빌드 한정: 하단에 작은 디버그 정보 박스 (GPS / TalkBack / 마지막 검색)
-
-  2. RESULTS (검색 결과)
-     · resultsContainer 가 화면 전체로 visible
-     · 코드에서 동적으로 1~5개 큰 버튼 추가 (위→아래로 균등 분배)
-     · 각 버튼은 contentDescription 풍부 → TalkBack 한 번 탭 = 읽기, 더블탭 = 선택
-
-  3. NAVIGATING (이동 중)
-     · cameraPreviewContainer 가 화면 전체로 차지 (PR-3 가 PreviewView 추가)
-     · BEFORE 영역 / 결과 영역 모두 hide
-     · 시각장애인은 화면 안 보고 음성/진동/비콘 안내만 사용
-
-  4. ARRIVED (도착)
-     · 짧게 도착 안내 (3초) 후 자동으로 BEFORE 로 복귀
-
-설계 근거:
-  · 화면 전체가 단일 long press 영역 — 위치 의존성 제거
-  · 검색 결과는 균등 분배 버튼 — TalkBack 표준 인터랙션 (탭→듣기, 더블탭→선택)
-  · 흔들기 폐기 — 가방/주머니 실수 트리거 위험 (향후 NAVIGATING 음성 명령용으로 재도입 가능)
-  · 카메라 풀스크린 — 시연자/보호자가 "작동 중" 즉시 인지
-
-색상 톤:
-  · 배경: #000000 (검정 — OLED 친화 + 저시력자 대비)
-  · 메인 텍스트: #FFFFFF (흰)
-  · 강조: #FFD700 (노랑)
-  · 도착: #00CC66 (초록)
-  · 디버그: #666666 (어두운 회색 — 사용자에 거의 안 보이지만 시연 시 충분)
+앱 실행 즉시 후방 카메라 프리뷰가 전체화면으로 뜨고, 그 위에 신호 색 오버레이 + 큰 상태
+글씨를 얹는다. 시각장애인은 화면을 안 봐도 음성·진동으로 안내받고, 저시력자/보호자/시연자는
+색과 글씨로 상태를 즉시 확인할 수 있다. (도보 내비게이션 UI 는 2026-07 제거.)
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/rootLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#000000"
-    android:clickable="true"
-    android:focusable="true"
-    android:contentDescription="화면을 2초간 길게 눌러 음성으로 목적지를 입력하세요">
+    android:background="#000000">
 
-    <!-- ========== 카메라 프리뷰 영역 ==========
-         NAVIGATING 상태 + 횡단보도 zone 안에서만 visibility=VISIBLE.
-         PR-3 (김수영) 가 이 안에 PreviewView + 인식 결과 오버레이 추가. -->
+    <!-- 후방 카메라 프리뷰 (코드에서 PreviewView 추가) -->
     <FrameLayout
         android:id="@+id/cameraPreviewContainer"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:background="#000000"
-        android:visibility="gone"
         android:importantForAccessibility="no" />
 
-    <!-- ========== 나침반 모드 컨테이너 (2026-05-29) ==========
-         NAVIGATING 상태에서 횡단보도 zone 밖일 때 visibility=VISIBLE.
-         횡단보도 zone(50m) 진입 시 카메라 모드로 전환되어 GONE.
-         시각장애인은 화면 안 봐도 음성/진동으로 안내 받지만, 저시력자/보호자/시연자가
-         "지금 어디로 가고 있는지" 시각적으로 확인할 수 있게 한다. -->
-    <LinearLayout
-        android:id="@+id/compassContainer"
+    <!-- 신호 색 전체화면 오버레이 (반투명 — 카메라가 비쳐 보임). 코드가 색 갱신. -->
+    <View
+        android:id="@+id/overlayColorView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:gravity="center"
-        android:background="#0A0A0A"
-        android:visibility="gone"
-        android:importantForAccessibility="no">
+        android:background="#00000000"
+        android:importantForAccessibility="no" />
 
-        <!-- 2026-07: 나침반(CompassView) 제거 — OKO식 단순화.
-             화살표 2개는 시각장애인에게 의미가 없고, 저시력자에겐 큰 글씨가 더 유용하다.
-             이동 중 화면은 "안내 문구 + 남은 거리" 두 줄만 크게 보여준다. -->
-        <TextView
-            android:id="@+id/tvCompassGuidance"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text=""
-            android:textSize="40sp"
-            android:textColor="#FFD700"
-            android:textStyle="bold"
-            android:gravity="center"
-            android:padding="24dp"
-            tools:text="200미터 직진" />
-
-        <TextView
-            android:id="@+id/tvCompassSubInfo"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text=""
-            android:textSize="24sp"
-            android:textColor="#CCCCCC"
-            android:gravity="center"
-            android:layout_marginTop="16dp"
-            tools:text="목적지까지 320m" />
-    </LinearLayout>
-
-    <!-- ========== BEFORE 화면 컨테이너 ==========
-         IDLE / LISTENING / SEARCHING 상태에서 visible.
-         시각장애인은 안 봐도 됨 — TTS 만으로 흐름 안내.
-         시연/저시력자용 큰 텍스트 한 줄만 (DEBUG 빌드만 표시). -->
-    <LinearLayout
-        android:id="@+id/beforeContainer"
+    <!-- 큰 상태 글씨 (빨간불/초록불/안내). 멀리서도 보이게 그림자 + 대형. -->
+    <TextView
+        android:id="@+id/overlayStatusText"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:gravity="center">
-
-        <TextView
-            android:id="@+id/tvBeforeHint"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text=""
-            android:textSize="28sp"
-            android:textColor="#FFD700"
-            android:textStyle="bold"
-            android:gravity="center"
-            android:padding="24dp"
-            android:visibility="gone"
-            tools:text="화면을 2초간 길게 눌러주세요"
-            tools:visibility="visible" />
-
-        <!-- 부스/행사 데모 시작 버튼 (인터뷰·데모 전용, 상용 아님).
-             누르면 GPS·횡단보도 조건 무시하고 카메라+AI 를 바로 켠다. -->
-        <Button
-            android:id="@+id/btnBoothDemo"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="신호등 확인"
-            android:textSize="20sp"
-            android:textStyle="bold"
-            android:textColor="#000000"
-            android:backgroundTint="#FFD700"
-            android:layout_marginTop="48dp"
-            android:paddingLeft="32dp"
-            android:paddingRight="32dp"
-            android:paddingTop="16dp"
-            android:paddingBottom="16dp"
-            android:contentDescription="신호등 확인. 신호등 인식을 바로 시작합니다." />
-    </LinearLayout>
-
-    <!-- ========== 검색 결과 컨테이너 ==========
-         RESULTS 상태에서 visible. 코드에서 LinearLayout 안에 1~5개 버튼 동적 추가.
-         각 버튼은 layout_weight=1 로 균등 분배 → TalkBack 으로 탐색 용이.
-         더블탭(TalkBack 표준)으로 선택. -->
-    <LinearLayout
-        android:id="@+id/resultsContainer"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:padding="8dp"
-        android:visibility="gone"
-        tools:visibility="gone" />
-
-    <!-- ========== ARRIVED 화면 컨테이너 ==========
-         도착 후 3초간 표시되고 자동으로 BEFORE 로 복귀. -->
-    <LinearLayout
-        android:id="@+id/arrivedContainer"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="vertical"
-        android:gravity="center"
-        android:padding="32dp"
-        android:visibility="gone">
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="✓ 도착"
-            android:textSize="48sp"
-            android:textStyle="bold"
-            android:textColor="#00CC66"
-            android:gravity="center"
-            android:contentDescription="목적지에 도착했습니다" />
-
-        <TextView
-            android:id="@+id/tvArrivedName"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text=""
-            android:textSize="28sp"
-            android:textColor="#FFFFFF"
-            android:gravity="center"
-            android:layout_marginTop="16dp"
-            tools:text="스타벅스 강남점에 도착했습니다" />
-    </LinearLayout>
-
-    <!-- ========== 신호등 확인 버튼 (수동 트리거) ==========
-         NAVIGATING + 횡단보도 zone 안에서 표시. 예전엔 zone 진입 시 카메라가 자동으로
-         켜져 사용자가 횡단보도 한참 전부터 폰을 흔들게 됐다. 이제 사용자가 연석에서
-         멈춰 이 버튼을 눌러야(TalkBack 더블탭) 카메라+신호 인식이 시작된다.
-         화면 전체가 버튼이라 시각장애인이 위치 신경 안 쓰고 탐색 후 더블탭 가능. -->
-    <Button
-        android:id="@+id/btnSignalCheck"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:text="신호등 확인"
-        android:textSize="44sp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:text="신호등을 비춰 주세요"
+        android:textSize="52sp"
         android:textStyle="bold"
-        android:textColor="#000000"
-        android:backgroundTint="#FFD700"
-        android:visibility="gone"
-        android:contentDescription="신호등 확인. 화면을 두 번 누르면 카메라로 신호등 색을 인식합니다." />
-
-    <!-- 신호등 확인 종료 버튼 (확인 중 우상단). 크로스워크 통과 시 자동 종료도 됨. -->
-    <Button
-        android:id="@+id/btnSignalCheckStop"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|end"
-        android:layout_margin="16dp"
-        android:text="확인 종료"
         android:textColor="#FFFFFF"
-        android:backgroundTint="#333333"
-        android:visibility="gone"
-        android:contentDescription="신호등 확인 종료" />
-
-    <!-- ========== DEBUG 디버그 정보 박스 ==========
-         BuildConfig.DEBUG 일 때만 visibility=VISIBLE (코드에서 제어).
-         Release 빌드에서는 진짜 빈 화면. -->
-    <LinearLayout
-        android:id="@+id/debugContainer"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:layout_gravity="bottom"
-        android:padding="8dp"
-        android:background="#1A1A1A"
-        android:visibility="gone"
-        android:importantForAccessibility="no"
-        tools:visibility="visible">
-
-        <TextView
-            android:id="@+id/tvDebugStatus"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text=""
-            android:textSize="11sp"
-            android:textColor="#666666"
-            android:fontFamily="monospace"
-            android:importantForAccessibility="no"
-            tools:text="STATE=IDLE | GPS=OK | TalkBack=OFF | last=충무로역" />
-
-        <TextView
-            android:id="@+id/tvDebugGuidance"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text=""
-            android:textSize="11sp"
-            android:textColor="#666666"
-            android:fontFamily="monospace"
-            android:layout_marginTop="2dp"
-            android:importantForAccessibility="no"
-            tools:text="guidance=목적지까지 200미터" />
-        <TextView
-            android:id="@+id/tvDebugAiResult"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text=""
-            android:textSize="11sp"
-            android:textColor="#FFD700"
-            android:fontFamily="monospace"
-            android:layout_marginTop="2dp"
-            android:importantForAccessibility="no"
-            tools:text="AI OFF" />
-    </LinearLayout>
-
-    <!-- ========== 부스/행사 데모 오버레이 ==========
-         화면 버튼으로 켜고 끔(런타임 토글). 카메라 프리뷰 위에 얹혀,
-         전체화면 신호 색 + 큰 글씨 + 종료 버튼을 보여준다.
-         상용이 아니라 인터뷰/부스 데모 전용. z-order 상 맨 위(마지막 자식). -->
-    <FrameLayout
-        android:id="@+id/boothOverlayContainer"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:visibility="gone">
-
-        <!-- 신호 색 전체화면 오버레이 (반투명 — 카메라가 비쳐 보임). 코드가 색 갱신. -->
-        <View
-            android:id="@+id/boothColorView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:background="#00000000"
-            android:importantForAccessibility="no" />
-
-        <!-- 큰 상태 글씨 (STOP / WALK / 안내). 멀리서도 보이게 그림자 + 대형. -->
-        <TextView
-            android:id="@+id/boothStatusText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:text="신호등을 비춰 주세요"
-            android:textSize="52sp"
-            android:textStyle="bold"
-            android:textColor="#FFFFFF"
-            android:gravity="center"
-            android:padding="24dp"
-            android:shadowColor="#000000"
-            android:shadowDx="0"
-            android:shadowDy="0"
-            android:shadowRadius="16" />
-
-        <!-- 종료 버튼 (우상단) -->
-        <Button
-            android:id="@+id/btnBoothExit"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="top|end"
-            android:layout_margin="16dp"
-            android:text="데모 종료"
-            android:textColor="#FFFFFF"
-            android:backgroundTint="#333333"
-            android:contentDescription="부스 데모 종료" />
-    </FrameLayout>
+        android:gravity="center"
+        android:padding="24dp"
+        android:shadowColor="#000000"
+        android:shadowDx="0"
+        android:shadowDy="0"
+        android:shadowRadius="16"
+        tools:text="빨간불 · 정지" />
 
 </FrameLayout>

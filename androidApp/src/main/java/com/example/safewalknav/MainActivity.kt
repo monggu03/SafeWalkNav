@@ -1,44 +1,19 @@
 package com.example.safewalknav
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
-import android.hardware.Sensor
-import android.hardware.SensorEvent
-import android.hardware.SensorEventListener
-import android.hardware.SensorManager
-import android.location.Location
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioManager
-import android.media.AudioTrack
-import android.media.ToneGenerator
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import android.util.Log
-import android.util.TypedValue
-import android.view.Gravity
-import android.view.MotionEvent
 import android.view.View
-import android.view.ViewGroup
 import android.view.WindowManager
-import android.view.accessibility.AccessibilityManager
-import android.widget.Button
 import android.widget.FrameLayout
-import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
-import androidx.activity.result.IntentSenderRequest
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
@@ -48,1986 +23,116 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
-import com.example.safewalknav.location.LocationTracker
 import com.example.safewalknav.ml.TrafficLightAnalyzer
 import com.example.safewalknav.ml.TrafficLightDetection
 import com.example.safewalknav.ml.TrafficLightDetector
-import com.google.firebase.analytics.FirebaseAnalytics
-import com.google.firebase.analytics.ktx.analytics
-import com.google.firebase.analytics.logEvent
-import com.google.firebase.ktx.Firebase
-import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
+import com.example.safewalknav.navigation.signal.RawSignalDetection
+import com.example.safewalknav.navigation.signal.SignalDecision
+import com.example.safewalknav.navigation.signal.SignalDecisionEngine
+import com.example.safewalknav.navigation.signal.SignalTransition
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import com.example.safewalknav.navigation.AndroidHeadingLogger
-import com.example.safewalknav.navigation.tmap.ArrivalState
-import com.example.safewalknav.navigation.NavigationManager
-import com.example.safewalknav.navigation.tmap.POIResult
-import com.example.safewalknav.navigation.signal.SignalDecisionEngine
-import com.example.safewalknav.navigation.signal.SignalDecision
-import com.example.safewalknav.navigation.signal.SignalTransition
-import com.example.safewalknav.navigation.signal.SilentReason
-import com.example.safewalknav.navigation.signal.RawSignalDetection
-import com.example.safewalknav.navigation.tmap.TMapApiClient
-import com.example.safewalknav.navigation.toGpsLocation
-import com.google.android.gms.common.api.ResolvableApiException
-import com.google.android.gms.location.LocationRequest
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.LocationSettingsRequest
-import com.google.android.gms.location.Priority
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.launch
-import java.util.Locale
-import kotlin.math.PI
-import kotlin.math.abs
-import kotlin.math.cos
-import kotlin.math.sin
-
 
 /**
- * 시각장애인 사용자 흐름 — PR-UX1 (사용자 합의안)
+ * SafeWalk — 시각장애인용 보행 신호등 인식 앱 (카메라 단일 기능).
  *
- * 상태 머신:
+ * 흐름: 앱 실행 → (SafetyNoticeActivity 고지 게이트) → MainActivity 진입 즉시
+ *       후방 카메라 + 신호등 인식 시작 → 색/전환을 음성·진동으로 안내.
  *
- *   IDLE  ─ long press 2s ─►  LISTENING (STT)
- *    ▲                              │
- *    │                              ▼
- *    │                         SEARCHING
- *    │                              │
- *    │                              ▼
- *    │      (0건, 3회 미만)    RESULTS  (1~5개 풀스크린 버튼, TalkBack 더블탭으로 선택)
- *    │      └── 자동 STT 재시도       │
- *    │                              │ 더블탭
- *    │                              ▼
- *    │                         NAVIGATING (카메라 풀스크린)
- *    │                              │
- *    │                              ▼
- *    │                          ARRIVED ── 3초 후 자동 ──┐
- *    │                                                  │
- *    └──────────────────────────────────────────────────┘
+ * 특별한 점: 한국 보행 신호등에 맞춘 모델(kairess, `crosswalk_kairess.tflite`)을 온디바이스로 사용.
+ * 판정 로직은 shared 모듈의 [SignalDecisionEngine] 에 있어 Android/iOS 동작이 일치한다.
  *
- * 화면:
- *   - IDLE/LISTENING/SEARCHING: 빈 화면 (DEBUG 빌드만 하단에 디버그 정보)
- *   - RESULTS: resultsContainer 에 동적으로 1~5개 버튼 (LinearLayout, weight=1 균등 분배)
- *   - NAVIGATING: cameraPreviewContainer 풀스크린 (PR-3 가 PreviewView 추가)
- *   - ARRIVED: 짧게 도착 안내 → 자동으로 IDLE 로 복귀
- *
- * 트리거:
- *   - 흔들기 폐기 (가방/주머니 실수 트리거 위험). shakeListener 코드는 보존하되 등록 안 함.
- *   - long press 2초 = 모든 상태에서 STT 활성화 (IDLE: 목적지 입력, NAVIGATING: 음성 명령)
+ * 2026-07 — 도보 내비게이션(TMap 경로·GPS·목적지 입력·상태기계)을 전면 제거하고
+ *           "열면 바로 신호 인식" 단일 기능으로 재구성. (OKO 식)
  */
 class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
-    // ==================== 상태 ====================
-
-    private enum class AppState {
-        IDLE,         // 빈 화면, long press 대기
-        LISTENING,    // STT 진행 중
-        SEARCHING,    // TMap API 호출 중
-        RESULTS,      // 검색 결과 풀스크린 버튼
-        NAVIGATING,   // 카메라 풀스크린 + 안내
-        ARRIVED       // 도착 후 짧은 안내 (3초 → IDLE)
-    }
-
-    private var appState: AppState = AppState.IDLE
-
-    // ==================== 매니저 ====================
-
-    private lateinit var locationTracker: LocationTracker
-    private lateinit var navigationManager: NavigationManager
-    private lateinit var tts: TextToSpeech
-
-    // ==================== UI 참조 ====================
-
-    private lateinit var rootLayout: View
+    // ===== 뷰 =====
     private lateinit var cameraPreviewContainer: FrameLayout
-    // 부스 데모 오버레이 (카메라 위 전체화면 색 + 큰 글씨)
-    private var boothOverlayContainer: View? = null
-    private var boothColorView: View? = null
-    private var boothStatusText: android.widget.TextView? = null
-    private lateinit var beforeContainer: ViewGroup
-    private lateinit var tvBeforeHint: TextView
-    private lateinit var resultsContainer: LinearLayout
-    private lateinit var arrivedContainer: ViewGroup
-    private lateinit var tvArrivedName: TextView
-    private lateinit var compassContainer: ViewGroup
-    private lateinit var tvCompassGuidance: TextView
-    private lateinit var tvCompassSubInfo: TextView
-    // 신호등 확인 수동 트리거 버튼 (zone 안에서 노출) + 확인 중 종료 버튼
-    private lateinit var btnSignalCheck: Button
-    private lateinit var btnSignalCheckStop: Button
-    private lateinit var debugContainer: ViewGroup
-    private lateinit var tvDebugStatus: TextView
-    private lateinit var tvDebugGuidance: TextView
-    private lateinit var tvDebugAiResult: TextView
+    private lateinit var overlayColorView: View
+    private lateinit var overlayStatusText: TextView
 
-    // ==================== 흐름 ====================
-
-    private val LOCATION_PERMISSION_CODE = 1001
-    private var trackingJob: Job? = null
-    private var ttsReady = false
-    private var gpsReady = false
-    private var welcomePlayed = false
-    private var gpsDialogDeniedTime = 0L
-    private var gpsCheckInProgress = false
-
-    // long press 2초 — 화면 어디든 터치하고 2초 유지하면 STT
-    private var longPressJob: Job? = null
-    private val LONG_PRESS_MS = 2000L
-
-    // STT 연속 실패 카운터 — 0건 결과 시 자동 재시도, 3회 누적 시 IDLE 로 복귀
-    private var sttFailureCount = 0
-    private val STT_FAILURE_LIMIT = 3
-
-    // 도착 후 자동 복귀 (3초)
-    private var arrivedReturnJob: Job? = null
-    private val ARRIVED_RETURN_MS = 3000L
-
-    // 마지막 검색어 (디버그 표시 + 0건 시 재시도 안내)
-    private var lastSearchKeyword: String = ""
-
-    // ==================== 외출 디버깅 파일 로깅 ====================
-    // logcat ring buffer 가 외출 동안 시스템 로그로 덮어써져서 우리 진단 로그가 사라지는 문제 회피.
-    // NAVIGATING 시작 시 파일 열고, isInCrosswalkZone / guidance / TL 검출 / 경로 dump 모두 기록.
-    // 외장 저장소: /sdcard/Android/data/com.example.safewalknav/files/walk_logs/walk_<ts>.log
-    private var navLogFile: File? = null
-
-    // ==================== 발화(TTS) 로그 ====================
-    // 목적: "말이 너무 많다" 를 감각이 아니라 데이터로 판단한다.
-    // 모든 TTS 출구를 speakLogged() 하나로 모아, 발화마다 직전 발화와의 간격을 기록한다.
-    // 파일은 walk_logs 와 분리(GPS 좌표가 섞이지 않아 그대로 공유해도 안전)하고,
-    // 동시에 logcat 태그 SW_SPEECH 로도 흘려서 adb 로 바로 받아볼 수 있게 한다.
-    private var speechLogFile: File? = null
-    private var speechSeq = 0
-    private var speechStartMs = 0L
-    private var lastSpeechMs = 0L
-    private val speechCounts = LinkedHashMap<String, Int>()   // 메시지별 횟수
-    private val speechBySource = LinkedHashMap<String, Int>() // 발화 지점별 횟수
-    private val speechGaps = mutableListOf<Long>()            // 직전 발화와의 간격(ms)
-    private val tsFormat = SimpleDateFormat("HH:mm:ss.SSS")
-
-    // ==================== Firebase Analytics 클라우드 집계 (2026-05-29) ====================
-    // 외출별 walk_log 는 디바이스 로컬에 저장되지만, Firebase 는 다중 사용자/다중 외출을
-    // 한 곳에 통합 집계해서 대시보드 그래프로 보여준다. capstone 발표 슬라이드에 그래프 캡처
-    // 인용 가능. 백엔드 진로 측면에서도 BaaS 통합 사례.
-    //
-    // 커스텀 이벤트 5종:
-    //   navigation_start      — 외출 시작 (목적지/거리/waypoint 수/횡단보도 수)
-    //   crosswalk_zone_enter  — 횡단보도 zone 진입
-    //   traffic_light_announced — ML 신호등 안내 (color/transition_type/confidence)
-    //   flicker_detected      — 점멸 phase 감지 (gap_ms)
-    //   navigation_arrival    — 도착 (소요시간/거리/lean 카운트/ML 카운트)
-    private val firebaseAnalytics: FirebaseAnalytics by lazy { Firebase.analytics }
-
-    // ==================== 외출 정량 평가 지표 (실 테스트용, 2026-05-29) ====================
-    // startNavLog 시점에 모두 reset, closeNavLog 시점에 walk_log 끝에 SUMMARY 블록으로 출력.
-    // Capstone 발표 / 시각장애인 사용자 테스트 분석 / 슬라이드 정량 인용용.
-    private var metricStartMs: Long = 0L
-    private var metricCurveCount = 0             // "휘어집니다" / "꺾습니다"
-    private var metricCrosswalkAnnounceCount = 0 // "횡단보도가 있습니다" / "휴대폰을 세로로"
-    private var metricMlRedCount = 0             // ANNOUNCED_RED 발화
-    private var metricMlGreenStaticCount = 0     // ANNOUNCED_STATIC_GREEN 발화
-    private var metricMlTransitionCount = 0      // ANNOUNCED_TRANSITION_R_TO_G 발화
-    private var metricMlGreenToRedCount = 0      // ANNOUNCED_TRANSITION_G_TO_R 발화
-    private var metricFlickerCount = 0           // FLICKER_DETECTED
-    private var metricRerouteCount = 0           // "경로를 다시 탐색" 류
-    private var metricZoneEnterCount = 0         // 횡단보도 zone 진입
-    private var metricDistanceM = 0.0            // 누적 GPS 거리 (m)
-    private var metricSpeedSum = 0.0             // 평균 속도용 누적
-    private var metricSpeedSamples = 0
-    private var metricLastLat = 0.0
-    private var metricLastLon = 0.0
-    private var metricHasLastGps = false
-
-    private fun resetMetrics() {
-        metricStartMs = System.currentTimeMillis()
-        metricCurveCount = 0
-        metricCrosswalkAnnounceCount = 0
-        metricMlRedCount = 0
-        metricMlGreenStaticCount = 0
-        metricMlTransitionCount = 0
-        metricMlGreenToRedCount = 0
-        metricFlickerCount = 0
-        metricRerouteCount = 0
-        metricZoneEnterCount = 0
-        metricDistanceM = 0.0
-        metricSpeedSum = 0.0
-        metricSpeedSamples = 0
-        metricHasLastGps = false
-    }
-
-    private fun writeWalkSummary() {
-        val elapsedMs = System.currentTimeMillis() - metricStartMs
-        val elapsedMin = elapsedMs / 60_000
-        val elapsedSec = (elapsedMs % 60_000) / 1000
-        val avgSpeed = if (metricSpeedSamples > 0) metricSpeedSum / metricSpeedSamples else 0.0
-        val totalMlAnnounces = metricMlRedCount + metricMlGreenStaticCount +
-                metricMlTransitionCount + metricMlGreenToRedCount
-        val mlSuccessRate = if (metricZoneEnterCount > 0)
-            (totalMlAnnounces * 100) / metricZoneEnterCount else 0
-        appendNavLog("===================== WALK SUMMARY =====================")
-        appendNavLog("총 시간: ${elapsedMin}분 ${elapsedSec}초 (${elapsedMs / 1000}초)")
-        appendNavLog("이동 거리(GPS 누적): ${metricDistanceM.toInt()}m")
-        appendNavLog("평균 속도: ${"%.2f".format(avgSpeed)} m/s")
-        appendNavLog("--- 보행 안내 ---")
-        appendNavLog("곡선/회전 안내: ${metricCurveCount}회")
-        appendNavLog("횡단보도 진입 안내: ${metricCrosswalkAnnounceCount}회")
-        appendNavLog("재라우팅: ${metricRerouteCount}회")
-        appendNavLog("--- ML 신호등 ---")
-        appendNavLog("횡단보도 zone 진입: ${metricZoneEnterCount}회")
-        appendNavLog("ML 안내 총합: ${totalMlAnnounces}회 (zone 대비 ${mlSuccessRate}%)")
-        appendNavLog("  · 빨간불(RED): ${metricMlRedCount}")
-        appendNavLog("  · 정적 초록(STATIC_GREEN): ${metricMlGreenStaticCount}")
-        appendNavLog("  · R→G 전환: ${metricMlTransitionCount}")
-        appendNavLog("  · G→R 전환: ${metricMlGreenToRedCount}")
-        appendNavLog("  · Flicker 감지: ${metricFlickerCount}")
-        appendNavLog("=======================================================")
-    }
-
-    private fun startNavLog() {
-        try {
-            val dir = getExternalFilesDir("walk_logs")
-            dir?.mkdirs()
-            @Suppress("SpellCheckingInspection")
-            val ts = SimpleDateFormat("yyyyMMdd_HHmmss").format(Date())
-            navLogFile = File(dir, "walk_$ts.log").apply {
-                writeText("=== SafeWalkNav 외출 로그 시작 ${Date()} ===\n")
-            }
-            Log.d("SafeWalkNav", "Nav log file: ${navLogFile?.absolutePath}")
-            // 정량 지표 카운터 reset — 매 외출마다 깨끗한 상태로 시작.
-            resetMetrics()
-        } catch (e: Exception) {
-            Log.e("SafeWalkNav", "Nav log file create failed", e)
-        }
-    }
-
-    /** 발화 로그 시작. 외출·부스 어느 쪽으로 진입하든 호출된다(중복 호출 안전). */
-    private fun startSpeechLog() {
-        if (speechLogFile != null) return
-        try {
-            val dir = getExternalFilesDir("speech_logs")
-            dir?.mkdirs()
-            val ts = SimpleDateFormat("yyyyMMdd_HHmmss").format(Date())
-            speechStartMs = System.currentTimeMillis()
-            lastSpeechMs = 0L
-            speechSeq = 0
-            speechCounts.clear(); speechBySource.clear(); speechGaps.clear()
-            speechLogFile = File(dir, "speech_$ts.log").apply {
-                writeText(
-                    "=== SafeWalk 발화 로그 ${Date()} ===\n" +
-                    "형식: [시각] #번호 (+직전발화후 경과s) [발화지점] {FLUSH=끊고말함|ADD=대기열} \"메시지\"\n" +
-                    "----------------------------------------------------------------\n"
-                )
-            }
-            Log.d("SW_SPEECH", "log file = ${speechLogFile?.absolutePath}")
-        } catch (e: Exception) {
-            Log.e("SafeWalkNav", "speech log create failed", e)
-        }
-    }
-
-    /**
-     * 모든 TTS 의 단일 출구. 여기를 통과하지 않는 발화가 있으면 로그가 거짓말을 하게 되므로
-     * tts.speak() 직접 호출을 새로 추가하지 말 것.
-     *
-     * @param source 어느 코드 경로에서 나온 말인지 (집계 기준)
-     */
-    private fun speakLogged(
-        message: String,
-        interrupt: Boolean,
-        utteranceId: String,
-        source: String,
-    ) {
-        val now = System.currentTimeMillis()
-        val gap = if (lastSpeechMs == 0L) -1L else now - lastSpeechMs
-        speechSeq++
-        if (gap >= 0) speechGaps += gap
-        speechCounts[message] = (speechCounts[message] ?: 0) + 1
-        speechBySource[source] = (speechBySource[source] ?: 0) + 1
-        lastSpeechMs = now
-
-        val gapText = if (gap < 0) "  시작" else String.format("+%5.1fs", gap / 1000.0)
-        val mode = if (interrupt) "FLUSH" else "ADD  "
-        val line = "#%03d (%s) [%-18s] {%s} \"%s\"".format(speechSeq, gapText, source, mode, message)
-        Log.d("SW_SPEECH", line)
-        try {
-            speechLogFile?.appendText("[${tsFormat.format(Date(now))}] $line\n")
-        } catch (_: Exception) {
-        }
-
-        tts.speak(
-            message,
-            if (interrupt) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
-            null,
-            utteranceId,
-        )
-    }
-
-    /** 세션 종료 시 집계. 이 요약만 봐도 어디서 말이 새는지 판단할 수 있어야 한다. */
-    private fun writeSpeechSummary() {
-        val f = speechLogFile ?: return
-        try {
-            val totalMs = System.currentTimeMillis() - speechStartMs
-            val minutes = totalMs / 60000.0
-            val sb = StringBuilder()
-            sb.append("\n================ 발화 요약 ================\n")
-            sb.append("총 발화 : ${speechSeq}회\n")
-            sb.append("총 시간 : ${"%.1f".format(minutes)}분\n")
-            sb.append("분당 발화: ${if (minutes > 0) "%.1f".format(speechSeq / minutes) else "-"}회/분\n")
-            if (speechGaps.isNotEmpty()) {
-                sb.append("발화 간격: 평균 ${"%.1f".format(speechGaps.average() / 1000.0)}s / ")
-                sb.append("최소 ${"%.1f".format((speechGaps.min()) / 1000.0)}s\n")
-                sb.append("3초 이내 연속 발화: ${speechGaps.count { it < 3000 }}회\n")
-            }
-            sb.append("\n--- 발화 지점별 ---\n")
-            speechBySource.entries.sortedByDescending { it.value }
-                .forEach { sb.append("  %-20s %d회\n".format(it.key, it.value)) }
-            sb.append("\n--- 메시지별 (많은 순) ---\n")
-            speechCounts.entries.sortedByDescending { it.value }.take(25)
-                .forEach { sb.append("  %3d회  %s\n".format(it.value, it.key)) }
-            sb.append("==========================================\n")
-            f.appendText(sb.toString())
-            Log.d("SW_SPEECH", sb.toString())
-        } catch (_: Exception) {
-        }
-        speechLogFile = null
-    }
-
-    private fun appendNavLog(msg: String) {
-        try {
-            navLogFile?.appendText("[${tsFormat.format(Date())}] $msg\n")
-        } catch (_: Exception) {
-        }
-    }
-
-    private fun closeNavLog() {
-        // 발화 요약은 navLogFile 유무와 무관하게 먼저 처리한다.
-        // (부스 데모만 쓴 세션은 navLogFile 이 없어서 아래 early return 에 걸린다)
-        writeSpeechSummary()
-        if (navLogFile == null) return   // 이미 닫혔으면 no-op (idempotent)
-        // 종료 직전 SUMMARY 블록 자동 출력 — 실 사용자 테스트 후 walk_log 마지막에
-        // 그대로 슬라이드/리포트에 인용할 수 있는 정량 데이터.
-        writeWalkSummary()
-        appendNavLog("=== 종료 ===")
-        navLogFile = null
-    }
-
-    // ==================== 카메라 (CameraX) ====================
-
-    // NAVIGATING 진입 시 후방 카메라 PreviewView 를 cameraPreviewContainer 에 attach.
-    // PR-UX2: 미리보기 use case
-    // PR-AI: ImageAnalysis use case 추가 — TrafficLightDetector 로 보행자 신호등 색 검출
+    // ===== 카메라 / 검출 =====
     private var cameraProvider: ProcessCameraProvider? = null
     private var camera: Camera? = null
-
-    // ==================== 신호등 검출 (PR-AI) ====================
-
-    private var trafficLightDetector: TrafficLightDetector? = null
     private var analysisExecutor: ExecutorService? = null
+    private var trafficLightDetector: TrafficLightDetector? = null
 
-    // ⚠️ 시연/테스트용 토글 — true 면 횡단보도 zone gate 를 우회해서 ML 추론 + 안내가 항상 작동.
-    // 강의실/카페에서 신호등 사진/영상 비추면서 인식 정확도/박스 시각화/TTS 발화를 종합 점검할 때 사용.
-    //
-    // ❗ 외출 운영 빌드 전에 반드시 false 로 되돌릴 것. true 인 채로 외출하면:
-    //   - GPS 없는 실내/지하/터널에서도 카메라 영상에 신호등 비슷한 게 잡히면 TTS 발화 (혼란)
-    //   - 배터리/CPU 사용량 ↑ (333ms 마다 매 프레임 추론)
-    //   - walk_*.log 에 TL_DIAG 가 zone 무관하게 폭증
-    //
-    // 안전망:
-    //   - 안정성 필터(3 frame) + 색 변경 시에만 TTS 정책이 살아있으므로 정적인 신호등 사진에 대고 TTS 가 폭주하진 않음
-    //   - bbox 6% 미만 필터도 그대로 적용 — 진짜 작은 noise 는 그래도 걸러짐
-    //   - DEBUG 빌드 전제 (release 빌드는 디버그 박스 안 보이므로 사실상 영향 적음)
-    //
-    // 2026-05-29 — 화면 모드 전환(zone 진입 시 카메라 ON / 이탈 시 카메라 OFF) 도입 후
-    //   실 외출에서도 zone 밖에선 카메라 자체가 꺼져 있으므로 ML 동작 안 함.
-    //   따라서 false 로 두는 게 실 외출의 정확한 의도(zone 안에서만 ML).
-    //   시연/강의실 신호등 사진 인식 테스트 시에만 true 로 켜고, 외출 전 다시 false 로 되돌릴 것.
-    private val TEST_MODE_FORCE_ML_ON = false
-
-    // ──────────────────────────────────────────────────────────────────────
-    // 부스/행사 데모 모드. true 면 GPS·횡단보도 zone 을 무시하고 앱 실행 즉시 카메라+AI 를 켠다.
-    // 신호등(실물/영상/사진)을 비추면 바로 인식해 음성·진동으로 알린다.
-    // 행사장엔 횡단보도가 없어 평소 zone 게이팅으론 아무것도 안 뜨므로 SF 데모엔 필수.
-    // ⚠️ 실사용/배포 빌드에서는 반드시 false (zone gating 안전 정책이 꺼진다).
-    // 신호 판정은 평소처럼 shared/SignalDecisionEngine 이 담당한다.
-    private var boothModeActive = false
-
-    // 신호등 확인 수동 모드 — 사용자가 '신호등 확인' 버튼을 눌러 카메라+AI 를 켠 상태.
-    // 예전의 zone 자동 활성화를 대체. 이 값이 true 일 때만 신호 인식·발화가 동작한다.
-    private var signalCheckActive = false
-
-    // 시연 영상 촬영 모드 — DEBUG 빌드여도 하단 디버그 박스 (STATE/GPS/AI/crosswalkDist 등) 를 숨김.
-    // 시연 영상 촬영 후 일반 디버깅이 필요해지면 false 로 되돌릴 것.
-    private val DEMO_MODE = true
-
-
-    // 신호등 안전 정책 state machine — PR-SAFETY (2026-05-29)
-    //
-    // 정책:
-    //   1. 빨간불 → "정지하세요" (안전 critical)
-    //   2. 정적 초록불 (전환 못 본 상태) → "일단 멈춰서 다음 신호를 기다리세요"
-    //      ❗ "건너세요" 절대 안 함. 사용자가 신호 시작점 타이밍 모르므로 다음 주기 대기.
-    //   3. 빨강→초록 전환 (직접 인식) → "방금 초록불로 바뀌었습니다. 안전을 확인하고 건너세요"
-    //      ✅ 유일하게 건너기를 안내하는 케이스. 강한 진동 동반.
-    //
-    // 안정성 필터:
-    //   - 3 frame 연속 같은 색이 validated 검출돼야 confirm (오분류 흔들림 방지, 약 1초 지연)
-    //
-    // 발화 빈도:
-    //   - 색 변경 시에만 TTS (반복 X)
-    //   - heartbeat 간격마다 같은 색상 신호를 TTS 반복 (SignalDecisionConfig.heartbeatIntervalMs)
-    //
-    // 검출 타임아웃:
-    //   - 일정 시간 validated 검출 없으면 state reset (SignalDecisionConfig.detectionTimeoutMs).
-    //     이유: 사용자가 잠시 카메라 돌렸다가 다시 신호등 향하면 그 사이 신호가 바뀌었을 수 있음 →
-    //     이전 확정색을 신뢰하지 않음.
-    //
-    // ⚠️ 위 상세 로직(임계·안정성·점멸·확정)은 모두 shared/SignalDecisionEngine 으로 이관됨.
-    //    아래 주석은 그 동작을 설명할 뿐, 여기(Android)에는 상태/상수가 없다.
-    // ──────────────────────────────────────────────────────────────────────
-    // 신호등 안내 결정 = 공유 엔진(shared/SignalDecisionEngine) 에 위임.
-    //
-    //   신뢰도 비대칭 필터(빨강0.25/초록0.45) · 크기 하한 · 3프레임 안정성 ·
-    //   점멸 감지 · 색 확정 상태기계 — 이 전부가 이제 shared/ 에 있다.
-    //   Android/iOS 가 이 하나를 공유하므로 두 플랫폼의 안전 동작이 갈라질 수 없다.
-    //   (예전엔 Android=상세 로직 / iOS=`confidence>=0.5` 한 줄 로 갈라져 있었음)
-    //
-    //   임계값의 유일한 원천은 SignalDecisionConfig 기본값이다. 여기서 상수를
-    //   따로 두지 않는다 — 두 벌이 존재하면 다시 갈라진다.
-    //
-    //   MainActivity 의 역할: 카메라 검출 → RawSignalDetection 변환 → 엔진 호출
-    //   → 결정(SignalDecision)을 부수효과(TTS·진동·Firebase·로그)로 변환.
-    // ──────────────────────────────────────────────────────────────────────
+    // ===== 신호 판정 (shared 공용 엔진) =====
     private val signalDecisionEngine = SignalDecisionEngine()
 
-    // 미탐지 안내 (2026-07 재설계).
-    //  구: 3/6/9초에 서로 다른 3문장을 연타 → 부스에서 카메라 겨누는 사이 세 번 다 나가 시끄러웠다.
-    //  신: 카메라 켜고 6초까지 조용히 기다렸다가, 한 문장을 12초 간격으로만 반복.
-    //      20초 넘게 계속 못 잡으면 한 번에 한해 '소리 주의' 폴백을 낸다.
-    private var noDetectionStartedAt: Long = 0L
-    private var noDetectionLastSpeechAt: Long = 0L
-    private var noDetectionSafetyFallbackDone: Boolean = false
-    private val NO_DET_FIRST_MS = 6_000L        // 첫 안내까지 대기 (겨눌 시간)
-    private val NO_DET_REPEAT_MS = 12_000L       // 이후 반복 간격
-    private val NO_DET_SAFETY_MS = 20_000L       // 이 시간 넘게 못 잡으면 소리주의 1회
-    private val NO_DET_SUPPRESS_PEAK_CONFIDENCE = 0.25f
-    private val NO_DET_SPEECH_HOLD_AFTER_CAMERA_ENTRY_MS = 5_000L
-    private var noDetectionSpeechHoldUntil: Long = 0L
-    private val CROSSWALK_ENTRY_SPEECH_HOLD_MS = 4_500L
-    private var crosswalkEntrySpeechHoldUntil: Long = 0L
-    private var deferredSignalDirectionJob: Job? = null
-
-    // Flicker(점멸) 감지 상태·임계는 SignalDecisionEngine 이 소유 (minPhaseDurationMs,
-    // flickerLockoutMs). 한국 보행 신호 종료 직전 깜빡임 phase 에서 "건너세요" 발화를 막는
-    // 안전 로직으로, 이제 iOS 와 공유된다.
-
-    // 횡단보도 zone 게이팅 — NavigationManager.isInCrosswalkZone (TMap waypoint 기반) 정확히 추적.
-    // GPS update 마다 NavigationManager 가 isOnCrosswalkSegment() 로 판정 → state flow emit.
-    // observeGuidance 의 collectLatest 로 갱신.
-    private var inCrosswalkZone: Boolean = false
-
-    // ==================== 진동 / 효과음 ====================
-
-    private lateinit var vibrator: Vibrator
-    private var toneGenerator: ToneGenerator? = null
-
-    // 스테레오 비프 재사용 AudioTrack
-    private val stereoSampleRate = 44100
-    private val stereoDurationMs = 120
-    private val stereoNumSamples = stereoSampleRate * stereoDurationMs / 1000
-    private val stereoBuffer = ShortArray(stereoNumSamples * 2)
-    private var stereoTrack: AudioTrack? = null
-
-    // ==================== 안내 비콘 ====================
-
-    private var autoRepeatJob: Job? = null
-    private var beaconJob: Job? = null
-
-    // 방향성 비콘 (NEAR 이후 입구 방향 유도)
-    private var directionalBeaconJob: Job? = null
-    private var lastBehindAnnounceTime = 0L
-
-    // ==================== 센서 (방위각 / 가속도) ====================
-
-    private lateinit var sensorManager: SensorManager
-    private var accelerometer: Sensor? = null
-    private var magnetometer: Sensor? = null
-    private val accelValues = FloatArray(3)
-    private val magValues = FloatArray(3)
-    private var hasAccel = false
-    private var hasMag = false
-    private var currentAzimuth = 0f
-    private val magnetometerAvailable: Boolean
-        get() = magnetometer != null
-
-    // ==================== TTS 상태 ====================
-
+    // ===== TTS / 진동 =====
+    private lateinit var tts: TextToSpeech
+    private var ttsReady = false
     private var ttsSpeaking = false
-    private var ttsSpeed = 1.0f
+    private lateinit var vibrator: Vibrator
+    private var introSpoken = false
 
-    // ==================== ActivityResultLaunchers ====================
+    // ===== 미탐지 안내 (카메라 켜고 6초 대기 → 12초 간격 반복 → 20초 넘으면 소리주의 1회) =====
+    private var noDetStartedAt = 0L
+    private var noDetLastSpeechAt = 0L
+    private var noDetSafetyDone = false
+    private val NO_DET_FIRST_MS = 6_000L
+    private val NO_DET_REPEAT_MS = 12_000L
+    private val NO_DET_SAFETY_MS = 20_000L
+    private val NO_DET_SUPPRESS_PEAK_CONFIDENCE = 0.25f
+    private var detectStartHoldUntil = 0L
+    private val DETECT_START_HOLD_MS = 3_000L   // 카메라 켠 직후 겨눌 시간
 
-    /** GPS 켜기 다이얼로그 결과 */
-    private val gpsEnableLauncher = registerForActivityResult(
-        ActivityResultContracts.StartIntentSenderForResult()
-    ) { result ->
-        gpsCheckInProgress = false
-        if (result.resultCode == RESULT_OK) {
-            Toast.makeText(this, "GPS가 켜졌습니다", Toast.LENGTH_SHORT).show()
-            onGPSEnabled()
-        } else {
-            gpsDialogDeniedTime = System.currentTimeMillis()
-            if (ttsReady && !welcomePlayed) {
-                welcomePlayed = true
-                speakTTS("SafeWalk입니다. GPS가 꺼져 있어 위치를 확인할 수 없습니다. 설정에서 GPS를 켜주세요.")
-            }
-        }
-    }
-
-    /** STT 결과 — 성공/실패 모두 처리 */
-    private val sttLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == RESULT_OK) {
-            val text = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-            if (!text.isNullOrBlank()) {
-                handleVoiceInput(text)
-            } else {
-                onSTTNoMatch()
-            }
-        } else {
-            // 사용자 취소 또는 타임아웃 — 재시도 카운터 영향 없음, 안내만
-            speakTTS("음성 입력이 취소되었습니다. 화면을 길게 눌러 다시 시도하세요.")
-            showState(AppState.IDLE)
-        }
-    }
-
-    // ==================== 센서 리스너 ====================
-
-    /**
-     * 흔들기 리스너 — PR-UX1 에서 등록 보류 (실수 트리거 위험).
-     * 코드는 보존 — 향후 NAVIGATING 중 음성 명령 트리거로 재도입 가능성.
-     */
-    @Suppress("unused")
-    private val shakeListener = object : SensorEventListener {
-        override fun onSensorChanged(event: SensorEvent?) {
-            // intentionally unused — see onResume (registration disabled)
-        }
-
-        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-    }
-
-    /** 가속도계 + 자력계 → 방위각 (저역 통과 필터). 신호등 시계방향 조준 안내용 — NavigationManager 로 전달. */
-    private val orientationListener = object : SensorEventListener {
-        override fun onSensorChanged(event: SensorEvent?) {
-            event ?: return
-            when (event.sensor.type) {
-                Sensor.TYPE_ACCELEROMETER -> {
-                    event.values.copyInto(accelValues, 0, 0, 3)
-                    hasAccel = true
-                }
-
-                Sensor.TYPE_MAGNETIC_FIELD -> {
-                    event.values.copyInto(magValues, 0, 0, 3)
-                    hasMag = true
-                }
-            }
-            if (hasAccel && hasMag) {
-                val r = FloatArray(9)
-                if (SensorManager.getRotationMatrix(r, null, accelValues, magValues)) {
-                    val orient = FloatArray(3)
-                    SensorManager.getOrientation(r, orient)
-                    var az = Math.toDegrees(orient[0].toDouble()).toFloat()
-                    if (az < 0) az += 360f
-                    val delta = ((az - currentAzimuth + 540f) % 360f) - 180f
-                    currentAzimuth = (currentAzimuth + 0.15f * delta + 360f) % 360f
-                    // 방위각은 이제 CSV 진단 로깅(latestCompassHeading)에만 쓴다.
-                    // (신호등 시계방향 조준·보행 쏠림 보정·나침반 UI 는 2026-07 폐기.)
-                    if (::navigationManager.isInitialized) {
-                        navigationManager.updateCompassHeading(currentAzimuth)
-                    }
-                }
-
-            }
-        }
-
-        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
-    }
-
-    // ==================== Activity 라이프사이클 ====================
+    private val CAMERA_PERMISSION_CODE = 2001
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // 매니저 초기화
-        tts = TextToSpeech(this, this)
-        locationTracker = LocationTracker(this)
-        val headingLogger = AndroidHeadingLogger(
-            getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)!!
-        )
-
-        navigationManager = NavigationManager(
-                tMapApiClient = TMapApiClient(BuildConfig.TMAP_APP_KEY),
-                headingLogger = headingLogger,
-            )
-
-        observeGuidance()
-
-
-
-        // View 참조
-        rootLayout = findViewById(R.id.rootLayout)
         cameraPreviewContainer = findViewById(R.id.cameraPreviewContainer)
-        beforeContainer = findViewById(R.id.beforeContainer)
-        tvBeforeHint = findViewById(R.id.tvBeforeHint)
-        resultsContainer = findViewById(R.id.resultsContainer)
-        arrivedContainer = findViewById(R.id.arrivedContainer)
-        tvArrivedName = findViewById(R.id.tvArrivedName)
-        compassContainer = findViewById(R.id.compassContainer)
-        tvCompassGuidance = findViewById(R.id.tvCompassGuidance)
-        tvCompassSubInfo = findViewById(R.id.tvCompassSubInfo)
-        debugContainer = findViewById(R.id.debugContainer)
-        tvDebugStatus = findViewById(R.id.tvDebugStatus)
-        tvDebugGuidance = findViewById(R.id.tvDebugGuidance)
-        tvDebugAiResult = findViewById(R.id.tvDebugAiResult)
-        boothOverlayContainer = findViewById(R.id.boothOverlayContainer)
-        boothColorView = findViewById(R.id.boothColorView)
-        boothStatusText = findViewById(R.id.boothStatusText)
-        findViewById<android.widget.Button>(R.id.btnBoothDemo).setOnClickListener { enterBoothMode() }
-        findViewById<android.widget.Button>(R.id.btnBoothExit).setOnClickListener { exitBoothMode() }
-        btnSignalCheck = findViewById(R.id.btnSignalCheck)
-        btnSignalCheckStop = findViewById(R.id.btnSignalCheckStop)
-        btnSignalCheck.setOnClickListener { startSignalCheck() }
-        btnSignalCheckStop.setOnClickListener { stopSignalCheck() }
+        overlayColorView = findViewById(R.id.overlayColorView)
+        overlayStatusText = findViewById(R.id.overlayStatusText)
 
-        // DEBUG 빌드만 디버그 박스 표시 + 시각 힌트 텍스트 표시.
-        // DEMO_MODE=true 이면 디버그 박스는 숨기고 (시연 영상용) 시각 힌트는 유지한다.
-        if (BuildConfig.DEBUG) {
-            debugContainer.visibility = if (DEMO_MODE) View.GONE else View.VISIBLE
-            tvBeforeHint.visibility = View.VISIBLE
-            tvBeforeHint.text = "화면을 2초간 길게 눌러주세요"
-        }
-
-        // 센서 / 진동 / 효과음
-        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        magnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+        tts = TextToSpeech(this, this)
 
         vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val vm = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
-            vm.defaultVibrator
+            (getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
         } else {
             @Suppress("DEPRECATION")
             getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         }
-
-        try {
-            toneGenerator = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)
-        } catch (_: Exception) {
-        }
-
-        // 권한 + GPS + UI 초기화
-        requestLocationPermission()
-        checkAndEnableGPS()
-        setupTouchArea()
-        //observeGuidance()
-        showState(AppState.IDLE)
-    }
-
-    /**
-     * 부스/행사 데모 진입 (화면 '부스 데모 시작' 버튼). GPS·네비 없이 카메라+AI 만 켠다.
-     * 신호 판정·발화·진동은 평소 파이프라인(SignalDecisionEngine) 그대로,
-     * 화면엔 전체화면 색 + 큰 글씨를 얹는다. 인터뷰/부스 데모 전용(상용 아님).
-     */
-    private fun enterBoothMode() {
-        boothModeActive = true
-        startSpeechLog()   // 부스 데모도 발화 집계 대상
-        signalDecisionEngine.reset()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        beforeContainer.visibility = View.GONE
-        compassContainer.visibility = View.GONE
-        resultsContainer.visibility = View.GONE
-        arrivedContainer.visibility = View.GONE
-        cameraPreviewContainer.visibility = View.VISIBLE
-        boothOverlayContainer?.visibility = View.VISIBLE
-        setBoothIdleVisual()
-        rootLayout.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-        if (ActivityCompat.checkSelfPermission(
-                this, Manifest.permission.CAMERA
-            ) == PackageManager.PERMISSION_GRANTED
-        ) {
+        setIdleVisual()
+
+        if (hasCameraPermission()) {
             startCamera()
-        }
-        speakTTS("데모 모드입니다. 신호등을 비춰 주세요.")
-    }
-
-    /** 부스 데모 종료 ('데모 종료' 버튼) → 평소 대기 화면으로. */
-    private fun exitBoothMode() {
-        writeSpeechSummary()   // 데모 구간의 발화 집계를 즉시 파일에 남긴다
-        boothModeActive = false
-        stopCamera()
-        signalDecisionEngine.reset()
-        boothOverlayContainer?.visibility = View.GONE
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        showState(AppState.IDLE)
-        speakTTS("데모를 종료했습니다.")
-    }
-
-    /** 부스 화면: 신호 없음 상태 (투명 + 안내 문구). */
-    private fun setBoothIdleVisual() {
-        boothColorView?.setBackgroundColor(0x00000000)
-        boothStatusText?.text = "신호등을 비춰 주세요"
-    }
-
-    /** 부스 화면 갱신 — 엔진 결정에 따라 전체화면 색 + 큰 글씨. */
-    private fun updateBoothVisual(decision: SignalDecision) {
-        if (!boothModeActive) return
-        val RED = 0x66D50000.toInt()
-        val GREEN = 0x6600C853.toInt()
-        when (decision) {
-            is SignalDecision.Announce -> when (decision.transition) {
-                SignalTransition.RED_TO_GREEN -> { boothColorView?.setBackgroundColor(GREEN); boothStatusText?.text = "초록불 · WALK\n건너세요" }
-                SignalTransition.STATIC_GREEN -> { boothColorView?.setBackgroundColor(GREEN); boothStatusText?.text = "초록불 · WAIT\n다음 신호 대기" }
-                else -> { boothColorView?.setBackgroundColor(RED); boothStatusText?.text = "빨간불 · STOP\n정지" }
-            }
-            is SignalDecision.Repeat ->
-                if (decision.color == 0) { boothColorView?.setBackgroundColor(RED); boothStatusText?.text = "빨간불 · STOP\n정지" }
-                else { boothColorView?.setBackgroundColor(GREEN); boothStatusText?.text = "초록불 · WALK" }
-            is SignalDecision.Flicker -> { boothColorView?.setBackgroundColor(RED); boothStatusText?.text = "신호 깜빡임 · WAIT" }
-            is SignalDecision.Silent -> { /* 확신 부족/안정성 대기 등 — 현재 화면 유지 */ }
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        checkAndEnableGPS()
-        // 흔들기 리스너 등록 보류 (PR-UX1: 흔들기 폐기)
-        // 향후 NAVIGATING 중 음성 명령 트리거로 재도입 시 해제 — 그땐 NAVIGATING 상태에서만 등록.
-        // accelerometer?.let {
-        //     sensorManager.registerListener(shakeListener, it, SensorManager.SENSOR_DELAY_UI)
-        // }
-
-        // 방위각 (신호등 시계방향 조준) — 항상 등록
-        accelerometer?.let {
-            sensorManager.registerListener(orientationListener, it, SensorManager.SENSOR_DELAY_UI)
-        }
-        magnetometer?.let {
-            sensorManager.registerListener(orientationListener, it, SensorManager.SENSOR_DELAY_UI)
-        }
-    }
-
-    override fun onPause() {
-        super.onPause()
-        sensorManager.unregisterListener(orientationListener)
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        trackingJob?.cancel()
-        autoRepeatJob?.cancel()
-        beaconJob?.cancel()
-        directionalBeaconJob?.cancel()
-        longPressJob?.cancel()
-        arrivedReturnJob?.cancel()
-        stopCamera()
-        trafficLightDetector?.close()
-        trafficLightDetector = null
-        analysisExecutor?.shutdown()
-        analysisExecutor = null
-        tts.shutdown()
-        toneGenerator?.release()
-        releaseStereoTrack()
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        // walk_log 가 NAVIGATING 중에 열려있는 상태에서 OS 가 Activity 를 강제 종료할 수 있음.
-        // 그 경우에도 SUMMARY 블록이 walk_log 끝에 들어가도록 닫는다.
-        // navLogFile=null 이면 closeNavLog 가 no-op 이라 안전.
-        closeNavLog()
-    }
-
-    // ==================== 상태 전환 ====================
-
-    /**
-     * 화면 컨테이너 visibility 토글 + 디버그 정보 갱신 + 부수 효과 처리.
-     * 모든 상태 전환은 이 함수를 거쳐야 함 — 화면/내부 상태 동기화 보장.
-     */
-    private fun showState(state: AppState) {
-        val previous = appState
-        appState = state
-        Log.d("SafeWalkNav", "AppState: $previous -> $state")
-
-        // 컨테이너 visibility (FrameLayout 위에 쌓인 5개 컨테이너 중 하나만 보이게)
-        when (state) {
-            AppState.IDLE, AppState.LISTENING, AppState.SEARCHING -> {
-                beforeContainer.visibility = View.VISIBLE
-                resultsContainer.visibility = View.GONE
-                arrivedContainer.visibility = View.GONE
-                cameraPreviewContainer.visibility = View.GONE
-                compassContainer.visibility = View.GONE
-            }
-
-            AppState.RESULTS -> {
-                beforeContainer.visibility = View.GONE
-                resultsContainer.visibility = View.VISIBLE
-                arrivedContainer.visibility = View.GONE
-                cameraPreviewContainer.visibility = View.GONE
-                compassContainer.visibility = View.GONE
-            }
-
-            AppState.NAVIGATING -> {
-                // NAVIGATING 진입 시 '신호등 확인' 전체화면 버튼을 바로 노출.
-                beforeContainer.visibility = View.GONE
-                resultsContainer.visibility = View.GONE
-                arrivedContainer.visibility = View.GONE
-                applyNavigatingMode()
-            }
-
-            AppState.ARRIVED -> {
-                beforeContainer.visibility = View.GONE
-                resultsContainer.visibility = View.GONE
-                arrivedContainer.visibility = View.VISIBLE
-                cameraPreviewContainer.visibility = View.GONE
-                compassContainer.visibility = View.GONE
-            }
-        }
-
-        // IDLE 진입 시 검색 결과 컨테이너 정리 (이전 버튼들 제거)
-        if (state == AppState.IDLE) {
-            resultsContainer.removeAllViews()
-        }
-
-        // 카메라 lifecycle — 카메라는 사용자가 '신호등 확인' 버튼을 눌러야(startSignalCheck) 켜진다.
-        // NAVIGATING 이탈 시 확인 모드/카메라가 켜져 있으면 정리.
-        if (previous == AppState.NAVIGATING && state != AppState.NAVIGATING) {
-            signalCheckActive = false
-            if (::btnSignalCheck.isInitialized) btnSignalCheck.visibility = View.GONE
-            if (::btnSignalCheckStop.isInitialized) btnSignalCheckStop.visibility = View.GONE
-            stopCamera()
-        }
-
-        // TalkBack accessibility — root 의 announce 대상 여부 토글.
-        //   IDLE/LISTENING: root 가 announce 대상 (사용자가 long press 가능 영역).
-        //   RESULTS/NAVIGATING/ARRIVED: root 를 accessibility tree 에서 제외.
-        //     자식 컨테이너 (버튼들 / 카메라 / 도착 화면) 가 자체 contentDescription 가지므로
-        //     root 까지 announce 되면 화면 변화 마다 "화면을 2초간 길게 눌러..." 가 반복 발화됨.
-        when (state) {
-            AppState.IDLE, AppState.LISTENING -> {
-                rootLayout.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
-                rootLayout.contentDescription = "화면을 2초간 길게 눌러 음성으로 목적지를 입력하세요"
-            }
-
-            else -> {
-                rootLayout.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                rootLayout.contentDescription = null
-            }
-        }
-
-        updateDebugInfo()
-    }
-
-    /**
-     * NAVIGATING 상태의 화면을 토글한다.
-     *
-     * - 신호등 확인 중(signalCheckActive) → 카메라 화면.
-     * - 그 외(안내 중) → '신호등 확인' 전체화면 버튼을 항상 노출.
-     *
-     * 버튼을 zone 에 묶지 않는 이유: GPS/경로 waypoint 로 판정하는 crosswalk zone 이
-     * 부정확하거나 실패하면 사용자가 신호를 확인할 방법이 아예 사라진다. 안내 중엔 항상
-     * 버튼을 띄워 사용자가 횡단보도 앞에서 언제든 직접 켤 수 있게 한다.
-     */
-    private fun applyNavigatingMode() {
-        if (appState != AppState.NAVIGATING) return
-        if (signalCheckActive) {
-            compassContainer.visibility = View.GONE
-            btnSignalCheck.visibility = View.GONE
-            cameraPreviewContainer.visibility = View.VISIBLE
         } else {
-            cameraPreviewContainer.visibility = View.GONE
-            compassContainer.visibility = View.GONE
-            btnSignalCheck.visibility = View.VISIBLE
-            stopCamera()
-        }
-    }
-
-    /**
-     * 사용자가 '신호등 확인' 버튼을 눌렀을 때 — 카메라+신호 인식 시작.
-     * 예전 zone 자동 활성화를 대체한다. 사용자가 연석에서 멈춰 직접 켜므로,
-     * 횡단보도 한참 전부터 카메라를 흔들 일이 없다.
-     */
-    private fun startSignalCheck() {
-        if (signalCheckActive) return
-        signalCheckActive = true
-        signalDecisionEngine.reset()
-        resetTrafficLightNoDetectionEscalation()
-        noDetectionSpeechHoldUntil =
-            System.currentTimeMillis() + NO_DET_SPEECH_HOLD_AFTER_CAMERA_ENTRY_MS
-        btnSignalCheck.visibility = View.GONE
-        compassContainer.visibility = View.GONE
-        cameraPreviewContainer.visibility = View.VISIBLE
-        btnSignalCheckStop.visibility = View.VISIBLE
-        if (ActivityCompat.checkSelfPermission(
-                this, Manifest.permission.CAMERA
-            ) == PackageManager.PERMISSION_GRANTED
-        ) {
-            startCamera()
-        }
-        appendNavLog("SignalCheck START (수동 버튼)")
-        speakTTS("신호등을 확인합니다. 휴대폰을 세로로 들어 주세요.")
-    }
-
-    /** 신호등 확인 종료 — '확인 종료' 버튼 또는 횡단보도 통과 시. */
-    private fun stopSignalCheck(announce: Boolean = true) {
-        if (!signalCheckActive) return
-        signalCheckActive = false
-        stopCamera()
-        signalDecisionEngine.reset()
-        btnSignalCheckStop.visibility = View.GONE
-        cameraPreviewContainer.visibility = View.GONE
-        appendNavLog("SignalCheck STOP")
-        // 확인 종료 → 다시 '신호등 확인' 버튼 화면으로.
-        applyNavigatingMode()
-        if (announce) speakTTS("신호등 확인을 종료했습니다.")
-    }
-
-    private fun updateDebugInfo() {
-        if (!BuildConfig.DEBUG) return
-        if (!::tvDebugStatus.isInitialized) return
-        val talkback = if (isTalkBackEnabled()) "ON" else "OFF"
-        val gps = if (gpsReady) "OK" else "?"
-        val last = lastSearchKeyword.ifEmpty { "-" }
-        val ai = if (signalCheckActive || boothModeActive) "ON" else "OFF"
-        tvDebugStatus.text = "STATE=${appState.name} | GPS=$gps | AI=$ai | TalkBack=$talkback | last=$last"
-    }
-
-    private fun updateAiDebugResult(message: String) {
-        if (!BuildConfig.DEBUG) return
-        if (!::tvDebugAiResult.isInitialized) return
-        tvDebugAiResult.text = summarizeAiDebug(message)
-        updateCompactDebugGuidance()
-    }
-
-    private fun summarizeAiDebug(message: String): String {
-        val action = Regex("action=([A-Z_]+)").find(message)?.groupValues?.getOrNull(1)
-        val label = Regex("label=([^\\s|]+)").find(message)?.groupValues?.getOrNull(1)
-        val confPct = Regex("conf=(\\d+)%").find(message)?.groupValues?.getOrNull(1)
-        val peakPct = Regex("peak=([0-9.]+)").find(message)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toFloatOrNull()
-            ?.let { (it * 100).toInt().toString() }
-        val color = when {
-            label?.contains("red", ignoreCase = true) == true -> "RED"
-            label?.contains("green", ignoreCase = true) == true -> "GREEN"
-            else -> null
-        }
-        val aiLine = when {
-            message.contains("AI OFF") -> "AI=OFF"
-            color != null -> "AI=$color ${(confPct ?: peakPct ?: "").let { if (it.isEmpty()) "" else "$it%" }}".trim()
-            message.contains("AI ON") -> "AI=ON"
-            else -> "AI=OFF"
-        }
-        return if (action != null && action != "CHECKING") {
-            "$aiLine\naction=$action"
-        } else {
-            aiLine
-        }
-    }
-
-    private fun updateCompactDebugGuidance() {
-        if (!BuildConfig.DEBUG) return
-        if (!::tvDebugGuidance.isInitialized) return
-
-        val debug = navigationManager.debugMessage.value
-        val crosswalkDist = Regex("crosswalkDist=(-?\\d+)m").find(debug)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.takeUnless { it == "-1" }
-        val state = Regex("crosswalkState=([^\\n|]+)").find(debug)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() && it != "NONE" }
-        val aiLines = if (::tvDebugAiResult.isInitialized) {
-            tvDebugAiResult.text.toString().lines().filter { it.isNotBlank() }
-        } else {
-            emptyList()
-        }
-
-        val lines = mutableListOf<String>()
-        lines.add("횡단보도=$inCrosswalkZone")
-        lines.add("crosswalkDist=${crosswalkDist?.let { "${it}m" } ?: "-"}")
-        if (state != null) lines.add("crosswalkState=$state")
-        if (aiLines.isNotEmpty()) {
-            lines.addAll(aiLines)
-        } else {
-            lines.add("AI=${if (signalCheckActive || boothModeActive) "ON" else "OFF"}")
-        }
-        tvDebugGuidance.text = lines.joinToString("\n")
-    }
-
-    private fun isTalkBackEnabled(): Boolean {
-        return try {
-            val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
-            am.isEnabled && am.isTouchExplorationEnabled
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    // ==================== 사용자 인터랙션 (long press) ====================
-
-    /**
-     * 화면 전체 long press 2초 → STT 트리거.
-     *
-     * 주의: TalkBack ON 환경에서는 단일 탭이 accessibility focus 로 가로채져서 onTouch 가
-     * 우리 앱에 도달하지 않을 수 있음. TalkBack 사용자는 화면 전체에 부여된
-     * contentDescription 을 듣고 더블탭-홀드로 long press 발화시켜야 함.
-     * 1차 구현: setOnTouchListener (TalkBack OFF 시 가장 단순).
-     * TalkBack 실측 후 호환성 보강 필요하면 setOnLongClickListener 도 병행 등록.
-     */
-    @SuppressLint("ClickableViewAccessibility")
-    private fun setupTouchArea() {
-        rootLayout.setOnTouchListener { _, event ->
-            // long press 활성 상태:
-            //   IDLE / LISTENING → STT 시작
-            //   NAVIGATING → 안내 종료 (사용자 요구: "한 번 더 길게 누르면 종료")
-            // 비활성 상태:
-            //   RESULTS → 각 버튼이 자체 탭/더블탭 받음
-            //   ARRIVED → 3초 후 자동 IDLE 복귀 중
-            //   SEARCHING → API 호출 진행 중
-            if (appState == AppState.RESULTS ||
-                appState == AppState.ARRIVED ||
-                appState == AppState.SEARCHING
-            ) {
-                return@setOnTouchListener false
-            }
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    longPressJob?.cancel()
-                    longPressJob = lifecycleScope.launch {
-                        delay(LONG_PRESS_MS)
-                        vibrateMedium()
-                        onLongPressTriggered()
-                    }
-                    true
-                }
-
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    longPressJob?.cancel()
-                    longPressJob = null
-                    true
-                }
-
-                else -> false
-            }
-        }
-    }
-
-    /** 2초 long press 트리거 — 현재 상태에 따라 다른 동작. */
-    private fun onLongPressTriggered() {
-        when (appState) {
-            AppState.NAVIGATING -> {
-                // 이동 중 안내 종료 — 카메라 화면에서 화면 길게 눌러서 빠져나옴
-                stopNavigationFull()
-            }
-
-            AppState.IDLE, AppState.LISTENING -> {
-                startSTT()
-            }
-
-            else -> { /* RESULTS/ARRIVED/SEARCHING 은 setupTouchArea 에서 이미 차단 */
-            }
-        }
-    }
-
-    private fun startSTT() {
-        if (!ttsReady) return
-        tts.stop()
-        showState(AppState.LISTENING)
-
-        val prompt = when (appState) {
-            AppState.NAVIGATING -> "명령을 말씀하세요"
-            else -> "목적지를 말씀하세요"
-        }
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            ActivityCompat.requestPermissions(
+                this, arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_CODE
             )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
-            putExtra(RecognizerIntent.EXTRA_PROMPT, prompt)
-        }
-        try {
-            sttLauncher.launch(intent)
-        } catch (_: Exception) {
-            Toast.makeText(this, "음성 인식을 사용할 수 없습니다", Toast.LENGTH_SHORT).show()
-            showState(AppState.IDLE)
         }
     }
 
-    private fun handleVoiceInput(text: String) {
-        Log.d("SafeWalkNav", "Voice: '$text' (state: $appState)")
+    private fun hasCameraPermission() =
+        ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
 
-        // NAVIGATING 중이면 음성 명령 처리. (현재는 long press 기반이라 NAVIGATING 진입 안 됨,
-        // 향후 NAVIGATING 음성 명령 활성화 시 사용 — 흔들기 또는 별도 트리거.)
-        if (appState == AppState.NAVIGATING) {
-            handleNavigationCommand(text)
-            return
-        }
-
-        // 그 외엔 검색 키워드로 처리
-        sttFailureCount = 0   // 입력 성공 시 재시도 카운터 리셋
-        if (text.contains("도움") || text.contains("사용법")) {
-            speakAndListenIdle("화면을 2초간 길게 눌러 목적지를 말씀하시면, 검색 결과 중에서 선택할 수 있습니다.")
-            return
-        }
-        lastSearchKeyword = text
-        performSearch(text)
-    }
-
-    /** STT 결과는 성공이지만 빈 문자열 — 음성은 들렸으나 인식 실패 */
-    private fun onSTTNoMatch() {
-        sttFailureCount++
-        if (sttFailureCount >= STT_FAILURE_LIMIT) {
-            sttFailureCount = 0
-            speakTTS("음성 인식에 실패했습니다. 화면을 길게 눌러 다시 시도하세요.")
-            showState(AppState.IDLE)
-        } else {
-            // 자동 재시도 (3회 미만)
-            speakAndListenIdle("다시 말씀해주세요.")
-        }
-    }
-
-    private fun handleNavigationCommand(text: String) {
-        when {
-            text.contains("종료") || text.contains("그만") || text.contains("멈춰") -> {
-                stopNavigationFull()
-            }
-
-            text.contains("어디") || text.contains("현재") || text.contains("위치") ||
-                    text.contains("다시") || text.contains("반복") -> {
-                val msg = navigationManager.guidanceMessage.value
-                if (msg.isNotEmpty()) speakTTS(msg)
-            }
-
-            text.contains("빠르게") || text.contains("빨리") -> {
-                ttsSpeed = (ttsSpeed + 0.25f).coerceAtMost(2.0f)
-                tts.setSpeechRate(ttsSpeed)
-                speakTTS("음성 속도를 높였습니다.")
-            }
-
-            text.contains("느리게") || text.contains("천천히") -> {
-                ttsSpeed = (ttsSpeed - 0.25f).coerceAtLeast(0.5f)
-                tts.setSpeechRate(ttsSpeed)
-                speakTTS("음성 속도를 낮췄습니다.")
-            }
-
-            text.contains("크게") || text.contains("볼륨 올려") -> {
-                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                am.adjustStreamVolume(
-                    AudioManager.STREAM_MUSIC,
-                    AudioManager.ADJUST_RAISE,
-                    AudioManager.FLAG_SHOW_UI
-                )
-                speakTTS("소리를 키웠습니다.")
-            }
-
-            text.contains("작게") || text.contains("볼륨 내려") -> {
-                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                am.adjustStreamVolume(
-                    AudioManager.STREAM_MUSIC,
-                    AudioManager.ADJUST_LOWER,
-                    AudioManager.FLAG_SHOW_UI
-                )
-                speakTTS("소리를 줄였습니다.")
-            }
-
-            text.contains("도움") || text.contains("도움말") -> {
-                speakTTS("종료, 현재위치, 반복, 빠르게, 느리게, 크게, 작게를 사용할 수 있습니다.")
-            }
-
-            else -> {
-                speakTTS("다시 말씀해주세요.")
-            }
-        }
-    }
-
-    // ==================== 검색 ====================
-
-    private fun performSearch(keyword: String) {
-        showState(AppState.SEARCHING)
-        speakTTS("검색 중입니다.")
-
-        lifecycleScope.launch {
-            val currentLocation = locationTracker.getCurrentLocation()
-            val results = navigationManager.searchDestination(
-                keyword = keyword,
-                currentLat = currentLocation?.latitude,
-                currentLon = currentLocation?.longitude,
-            )
-
-            if (results.isEmpty()) {
-                handleEmptyResults(keyword)
-                return@launch
-            }
-
-            // 거리 계산 (현재 위치 있을 때만)
-            val distances: List<Int>? = currentLocation?.let { loc ->
-                results.map { poi ->
-                    LocationTracker.distanceBetween(
-                        loc.latitude, loc.longitude, poi.lat, poi.lon
-                    ).toInt()
-                }
-            }
-
-            // 1개여도 풀스크린 버튼 (사용자 합의안: 일관성)
-            showResultsScreen(results, distances)
-        }
-    }
-
-    /**
-     * 결과 0건 — 자동 STT 재시도 (3회 누적 시 IDLE 로 복귀).
-     */
-    private fun handleEmptyResults(keyword: String) {
-        sttFailureCount++
-        playToneError()
-        if (sttFailureCount >= STT_FAILURE_LIMIT) {
-            sttFailureCount = 0
-            val msg = "주변 1킬로미터 이내에 $keyword 검색 결과가 없습니다. 화면을 길게 눌러 다시 시도하세요."
-            speakTTS(msg)
-            showState(AppState.IDLE)
-        } else {
-            val msg = navigationManager.lastError
-                ?: "주변 1킬로미터 이내에 $keyword 검색 결과가 없습니다"
-            speakAndListenIdle("$msg. 다른 목적지를 말씀해주세요.")
-        }
-    }
-
-    /**
-     * 검색 결과 풀스크린 — resultsContainer 에 1~5개 버튼 동적 추가.
-     *
-     * TalkBack 인터랙션:
-     *   - 단일 탭 (TalkBack ON) = 버튼 contentDescription 읽기
-     *   - 더블탭 (TalkBack ON) = 선택
-     *   - TalkBack OFF 시 단일 탭으로도 선택 가능 (시연/시각자용)
-     *
-     * 음성 안내: "검색 결과 N개입니다. 위에서부터 하나씩 읽어보세요."
-     * → 사용자가 각 버튼 탭하면 TalkBack 이 가게명 + 거리 + 주소 읽음.
-     */
-    private fun showResultsScreen(results: List<POIResult>, distances: List<Int>?) {
-        showState(AppState.RESULTS)
-        resultsContainer.removeAllViews()
-
-        // TalkBack 분기 전략:
-        //   ON  — 우리 TTS 안 발화. 첫 버튼 contentDescription 에 "검색 결과 N개 중 1번째" 인트로 박아서
-        //         TalkBack 이 첫 focus 잡을 때 한 번에 발화. 우리 TTS 와 시간 겹침 0.
-        //   OFF — 우리 TTS 가 흐름 안내. 각 버튼은 단순 contentDescription.
-        val talkbackOn = isTalkBackEnabled()
-
-        results.forEachIndexed { i, poi ->
-            val distText = distances?.get(i)?.let { formatDistance(it) } ?: ""
-            val button = Button(this).apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    0,
-                    1f   // weight=1 균등 분배
-                ).apply {
-                    setMargins(8, 8, 8, 8)
-                }
-                text = if (distText.isNotEmpty()) "${poi.name}\n$distText" else poi.name
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
-                gravity = Gravity.CENTER
-                setTextColor(0xFF000000.toInt())
-                setBackgroundColor(0xFFFFD700.toInt())   // 노랑
-                isAllCaps = false
-
-                // TalkBack 이 읽을 풍부한 설명
-                // 첫 버튼 (i==0) + TalkBack ON 시 검색 결과 전체 안내를 인트로로 포함
-                val intro = when {
-                    talkbackOn && i == 0 -> "검색 결과 ${results.size}개 중 ${i + 1}번째, "
-                    talkbackOn -> "${i + 1}번째, "
-                    else -> ""
-                }
-                val parts = mutableListOf("$intro${poi.name}")
-                if (distText.isNotEmpty()) parts.add("거리 $distText")
-                if (poi.address.isNotEmpty()) parts.add(poi.address)
-                contentDescription = parts.joinToString(", ")
-
-                setOnClickListener {
-                    vibrateShort()
-                    selectDestination(poi)
-                }
-            }
-            resultsContainer.addView(button)
-        }
-
-        // TalkBack OFF 시에만 우리 TTS 발화. ON 일 땐 첫 버튼 focus 때 자동 announce.
-        if (!talkbackOn) {
-            val msg = if (results.size == 1) {
-                "검색 결과 1개입니다. 화면 가운데를 눌러 선택하세요."
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == CAMERA_PERMISSION_CODE) {
+            if (hasCameraPermission()) {
+                startCamera()
             } else {
-                "검색 결과 ${results.size}개입니다. 위에서부터 하나씩 읽어보세요."
-            }
-            speakTTS(msg)
-        }
-    }
-
-    private fun selectDestination(selected: POIResult) {
-        lifecycleScope.launch {
-            speakTTS("${selected.name}으로 경로를 탐색합니다.")
-
-            val currentLocation = locationTracker.getCurrentLocation()
-            if (currentLocation == null) {
-                playToneError()
-                speakAndListenIdle("위치를 확인할 수 없습니다. GPS 확인 후 다시 시도하세요.")
-                return@launch
-            }
-
-            val success = navigationManager.startNavigation(
-                startLat = currentLocation.latitude,
-                startLon = currentLocation.longitude,
-                endLat = selected.lat,
-                endLon = selected.lon,
-                endName = selected.name,
-                frontLat = selected.frontLat,
-                frontLon = selected.frontLon,
-                // MainActivity 가 요약을 직접 말하므로 NavigationManager 의 자동 요약 TTS 중복은 차단.
-                suppressInitialSummary = true,
-            )
-
-            if (success) {
-                showState(AppState.NAVIGATING)
-                playToneSuccess()
-                window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-                // 파일 로깅 시작 + 경로 정보 dump
-                startNavLog()
-                startSpeechLog()
-                val route = navigationManager.currentRoute
-                if (route != null) {
-                    val crosswalks = route.waypoints.count {
-                        it.pointType == "CROSSWALK" || it.turnType in 211..217
-                    }
-                    appendNavLog("경로 로드: ${route.waypoints.size}개 waypoint (CROSSWALK ${crosswalks}개, 총 ${route.totalDistance}m)")
-                    route.waypoints.forEachIndexed { i, wp ->
-                        val mark = if (wp.pointType == "CROSSWALK" || wp.turnType in 211..217) "🚦" else "  "
-                        appendNavLog("$mark [$i] type=${wp.pointType} turn=${wp.turnType} road=${wp.roadType} dist=${wp.distance} desc=${wp.description.take(80)}")
-                    }
-                    // Firebase Analytics — 외출 시작 이벤트
-                    firebaseAnalytics.logEvent("navigation_start") {
-                        param("destination_name", selected.name)
-                        param("total_distance_m", route.totalDistance.toLong())
-                        param("waypoint_count", route.waypoints.size.toLong())
-                        param("crosswalk_count", crosswalks.toLong())
-                    }
-                }
-
-                val summary = navigationManager.buildInitialSummary().ifEmpty { getRouteSummary() }
-                // 출발 전 방향 정렬(온보딩) 제거 — 경로 요약만 말하고 곧바로 보행 안내를 시작한다.
-                appendNavLog("경로 요약 발화 → 보행 안내 시작")
-                if (summary.isNotEmpty()) speakTTS(summary)
-                startLocationTracking()
-                startAutoRepeat()
-            } else {
-                playToneError()
-                speakAndListenIdle("경로를 찾을 수 없습니다. 다른 목적지를 말씀해주세요.")
+                overlayStatusText.text = "카메라 권한이 필요합니다"
+                if (ttsReady) speakTts("카메라 권한이 필요합니다. 설정에서 허용해 주세요.")
             }
         }
     }
 
-    /** 거리를 읽기 좋게 포맷 (1200m → "1.2킬로", 300m → "300미터") */
-    private fun formatDistance(meters: Int): String {
-        return if (meters >= 1000) {
-            "${"%.1f".format(meters / 1000.0)}킬로"
-        } else {
-            "${meters}미터"
-        }
-    }
+    // ==================== 카메라 ====================
 
-    /** 경로 요약 ("총 800미터, 약 10분, 횡단보도 2개") */
-    private fun getRouteSummary(): String {
-        val route = navigationManager.currentRoute ?: return ""
-        val totalMin = route.totalTime / 60
-        val crosswalks = route.waypoints.count { it.pointType == "CROSSWALK" }
-        val turns = route.waypoints.count { it.pointType == "TURN" }
-
-        val parts = mutableListOf(formatDistance(route.totalDistance), "약 ${totalMin}분")
-        if (crosswalks > 0) parts.add("횡단보도 ${crosswalks}개")
-        if (turns > 0) parts.add("회전 ${turns}회")
-
-        return parts.joinToString(", ")
-    }
-
-    // ==================== 도착 / 종료 ====================
-
-    /**
-     * NAVIGATING 종료 — ARRIVED 상태로 전환 후 3초 뒤 자동으로 IDLE 로.
-     */
-    private fun finishNavigation(arrivedName: String) {
-        appendNavLog("finishNavigation: 도착 — $arrivedName")
-        // Firebase Analytics — 도착 이벤트 (closeNavLog 전에 호출, 그래야 metric 카운터가 살아있음)
-        val durationSec = if (metricStartMs > 0) (System.currentTimeMillis() - metricStartMs) / 1000 else 0L
-        val totalMlAnnounces = metricMlRedCount + metricMlGreenStaticCount +
-                metricMlTransitionCount + metricMlGreenToRedCount
-        firebaseAnalytics.logEvent("navigation_arrival") {
-            param("destination_name", arrivedName)
-            param("duration_sec", durationSec)
-            param("distance_m", metricDistanceM.toLong())
-            param("curve_count", metricCurveCount.toLong())
-            param("crosswalk_announce_count", metricCrosswalkAnnounceCount.toLong())
-            param("reroute_count", metricRerouteCount.toLong())
-            param("zone_enter_count", metricZoneEnterCount.toLong())
-            param("ml_announce_total", totalMlAnnounces.toLong())
-            param("flicker_count", metricFlickerCount.toLong())
-        }
-        closeNavLog()
-        trackingJob?.cancel()
-        stopAutoRepeat()
-        stopBeacon()
-        navigationManager.stopNavigation()
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        tvArrivedName.text = "${arrivedName}에 도착했습니다"
-        showState(AppState.ARRIVED)
-
-        // 3초 후 자동으로 IDLE — 사용자가 화면 안 봐도 다음 검색 흐름 시작 가능
-        arrivedReturnJob?.cancel()
-        arrivedReturnJob = lifecycleScope.launch {
-            delay(ARRIVED_RETURN_MS)
-            stopDirectionalBeacon()  // 방향비콘도 종료
-            speakTTS("다음 목적지를 검색하시려면 화면을 길게 눌러주세요.")
-            showState(AppState.IDLE)
-        }
-    }
-
-    /** 음성 명령 "종료" 또는 사용자가 도중 중단 — ARRIVED 화면 거치지 않고 곧장 IDLE. */
-    private fun stopNavigationFull() {
-        appendNavLog("stopNavigationFull (사용자 중단 또는 음성 명령)")
-        closeNavLog()
-        trackingJob?.cancel()
-        stopAutoRepeat()
-        stopBeacon()
-        stopDirectionalBeacon()
-        arrivedReturnJob?.cancel()
-        // navigationManager.stopNavigation() 가 자체적으로 "안내를 종료합니다" 를
-        // guidanceMessage 에 emit 함 → observeGuidance 가 그걸 받아 TTS 재생.
-        // 우리가 여기서 또 speakTTS 호출하면 중복 발화 → 호출 안 함.
-        navigationManager.stopNavigation()
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        showState(AppState.IDLE)
-    }
-
-    // ==================== GPS 위치 추적 ====================
-
-    private fun startLocationTracking() {
-        trackingJob?.cancel()
-        trackingJob = lifecycleScope.launch {
-            locationTracker.getLocationUpdates(500L).collectLatest { location ->
-                // 극단적 오염(터널 출구 GPS 점프 등)만 사전 차단 — 세밀한 gating은 KalmanHeading에 위임
-                if (location.hasAccuracy() && location.accuracy > 50f) {
-                    return@collectLatest
-                }
-
-                // 자력계 없는 기기 fallback: GPS bearing(이동 중일 때만 신뢰 가능) → azimuth
-                if (!magnetometerAvailable && location.hasBearing() && location.hasSpeed() && location.speed > 0.5f) {
-                    val gpsBearing = location.bearing
-                    val delta = ((gpsBearing - currentAzimuth + 540f) % 360f) - 180f
-                    currentAzimuth = (currentAzimuth + 0.3f * delta + 360f) % 360f
-                    // 자력계 없는 디바이스에서 GPS bearing 으로 azimuth 추정 후 전달(CSV 진단용).
-                    // magnetometerAvailable=true 면 orientationListener 가 매 tick 별도 호출 → 중복 없음.
-                    if (::navigationManager.isInitialized) {
-                        navigationManager.updateCompassHeading(currentAzimuth)
-                    }
-                }
-
-                navigationManager.updateLocation(location.toGpsLocation())
-
-                // 정량 지표 — 매 GPS tick 마다 거리 누적 + 속도 평균 샘플 추가.
-                if (metricHasLastGps) {
-                    val seg = LocationTracker.distanceBetween(
-                        metricLastLat, metricLastLon, location.latitude, location.longitude
-                    )
-                    // 30m 넘는 점프는 GPS jitter 로 보고 제외 (실제 보행 속도 한계 vs 2초 tick).
-                    if (seg < 30f) metricDistanceM += seg.toDouble()
-                }
-                metricLastLat = location.latitude
-                metricLastLon = location.longitude
-                metricHasLastGps = true
-                if (location.hasSpeed()) {
-                    metricSpeedSum += location.speed
-                    metricSpeedSamples++
-                }
-
-                // 디버그 박스 갱신 (DEBUG 빌드만) + 파일 로그 (전체 빌드)
-                val dist = LocationTracker.distanceBetween(
-                    location.latitude, location.longitude,
-                    navigationManager.destinationLat, navigationManager.destinationLon
-                )
-                val accuracyText =
-                    if (location.hasAccuracy()) "±${location.accuracy.toInt()}m" else ""
-                val speedText =
-                    if (location.hasSpeed()) "${"%.1f".format(location.speed)}m/s" else "?m/s"
-
-                // 횡단보도 zone 디버깅 — 매 GPS tick 마다 파일 로그.
-                // 외출 후 walk_logs/*.log 파일을 받아서 분석할 수 있도록 모든 핵심 필드 dump.
-                // 형식: GPS_TICK | gps좌표 | acc | spd | dest거리 | <debugMessage 전체 (zone/idx/wp/turnType/desc/nearestXW)>
-                val debugSnapshot = navigationManager.debugMessage.value.replace("\n", " | ")
-                appendNavLog(
-                    "GPS_TICK lat=${"%.5f".format(location.latitude)} lon=${"%.5f".format(location.longitude)} " +
-                            "$accuracyText spd=$speedText dest=${dist.toInt()}m | $debugSnapshot"
-                )
-
-
-                if (BuildConfig.DEBUG) {
-                    updateCompactDebugGuidance()
-                }
-            }
-        }
-    }
-
-    // ==================== 안내 자동 반복 ====================
-
-    private fun startAutoRepeat() {
-        autoRepeatJob?.cancel()
-        autoRepeatJob = lifecycleScope.launch {
-            while (true) {
-                delay(45_000)
-                if (!navigationManager.isNavigating.value) break
-                val msg = navigationManager.guidanceMessage.value
-                if (msg.isNotEmpty()) speakTTS(msg)
-            }
-        }
-    }
-
-    private fun stopAutoRepeat() {
-        autoRepeatJob?.cancel()
-        autoRepeatJob = null
-    }
-
-    // ==================== 거리 비콘 ====================
-
-    /**
-     * 거리 기반 비프음 시작
-     * >10m: 3초 간격, 5~10m: 1.5초, 3~5m: 0.8초, <3m: 0.4초
-     */
-    private fun startBeacon() {
-        beaconJob?.cancel()
-        beaconJob = lifecycleScope.launch {
-            while (true) {
-                val dist = navigationManager.distanceToDestination.value
-
-                if (dist > 15f) {
-                    delay(1000)
-                    continue
-                }
-
-                val interval = when {
-                    dist <= 3f -> 700L
-                    dist <= 5f -> 1100L
-                    dist <= 10f -> 1800L
-                    else -> 3000L
-                }
-
-                if (ttsSpeaking) {
-                    delay(interval)
-                    continue
-                }
-
-                try {
-                    val tone = if (dist <= 5f)
-                        ToneGenerator.TONE_PROP_BEEP2
-                    else
-                        ToneGenerator.TONE_PROP_BEEP
-                    toneGenerator?.startTone(tone, 80)
-                } catch (_: Exception) {
-                }
-
-                // 진동은 5m 이내에서만, 강도도 낮춘다 (매 비프 진동이 과했음).
-                if (dist <= 5f) {
-                    val intensity = if (dist <= 3f) 180 else 120
-                    vibrator.vibrate(VibrationEffect.createOneShot(50, intensity))
-                }
-
-                delay(interval)
-            }
-        }
-    }
-
-    private fun stopBeacon() {
-        beaconJob?.cancel()
-        beaconJob = null
-    }
-
-    // ==================== 방향성 비콘 (NEAR 이후 입구 찾기) ====================
-
-    private fun startDirectionalBeacon() {
-        directionalBeaconJob?.cancel()
-        directionalBeaconJob = lifecycleScope.launch {
-            while (true) {
-                val loc = locationTracker.getCurrentLocation()
-                if (loc == null) {
-                    delay(500)
-                    continue
-                }
-
-                val targetLat = navigationManager.destinationFrontLat
-                    ?: navigationManager.destinationLat
-                val targetLon = navigationManager.destinationFrontLon
-                    ?: navigationManager.destinationLon
-
-                if (targetLat == 0.0 && targetLon == 0.0) {
-                    delay(500)
-                    continue
-                }
-
-                val target = Location("t").apply {
-                    latitude = targetLat
-                    longitude = targetLon
-                }
-                val bearing = loc.bearingTo(target)
-                var angleDiff = bearing - currentAzimuth
-                while (angleDiff > 180f) angleDiff -= 360f
-                while (angleDiff < -180f) angleDiff += 360f
-
-                if (ttsSpeaking) {
-                    delay(400)
-                    continue
-                }
-
-                val (leftVol, rightVol, highPitch) = computeStereoPan(angleDiff)
-                playStereoBeep(leftVol, rightVol, highPitch)
-
-                if (abs(angleDiff) > 135f) {
-                    val now = System.currentTimeMillis()
-                    if (now - lastBehindAnnounceTime > 6000L) {
-                        lastBehindAnnounceTime = now
-                        runOnUiThread { speakTTS("목적지는 뒤쪽입니다. 몸을 돌려주세요.") }
-                    }
-                }
-
-                val interval = when {
-                    abs(angleDiff) < 15f -> 600L
-                    abs(angleDiff) < 45f -> 800L
-                    else -> 1000L
-                }
-                delay(interval)
-            }
-        }
-    }
-
-    private fun stopDirectionalBeacon() {
-        directionalBeaconJob?.cancel()
-        directionalBeaconJob = null
-    }
-
-    private fun computeStereoPan(angleDiff: Float): Triple<Float, Float, Boolean> {
-        val clamped = angleDiff.coerceIn(-90f, 90f)
-        val pan = clamped / 90f
-        val angle = ((pan + 1f) / 2f) * (PI.toFloat() / 2f)
-        val left = cos(angle)
-        val right = sin(angle)
-        val facing = abs(angleDiff) < 15f
-        val scale = if (abs(angleDiff) > 90f) 0.3f else 1f
-        return Triple(left * scale, right * scale, facing)
-    }
-
-    private fun playStereoBeep(leftVol: Float, rightVol: Float, highPitch: Boolean) {
-        try {
-            val freq = if (highPitch) 1320.0 else 880.0
-            val amp = (Short.MAX_VALUE * 0.6).toInt()
-            val attack = 200
-            val release = 500
-            for (i in 0 until stereoNumSamples) {
-                val env = when {
-                    i < attack -> i / attack.toFloat()
-                    stereoNumSamples - i < release -> (stereoNumSamples - i) / release.toFloat()
-                    else -> 1f
-                }
-                val s = (amp * env * sin(2 * PI * freq * i / stereoSampleRate)).toInt()
-                stereoBuffer[i * 2] = (s * leftVol).toInt().coerceIn(-32768, 32767).toShort()
-                stereoBuffer[i * 2 + 1] = (s * rightVol).toInt().coerceIn(-32768, 32767).toShort()
-            }
-
-            val track = stereoTrack ?: AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setSampleRate(stereoSampleRate)
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-                        .build()
-                )
-                .setBufferSizeInBytes(stereoBuffer.size * 2)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-                .also { stereoTrack = it }
-
-            try {
-                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) track.pause()
-                track.flush()
-            } catch (_: Exception) {
-            }
-            track.write(stereoBuffer, 0, stereoBuffer.size)
-            track.play()
-        } catch (_: Exception) {
-        }
-    }
-
-    private fun releaseStereoTrack() {
-        try {
-            stereoTrack?.stop()
-        } catch (_: Exception) {
-        }
-        try {
-            stereoTrack?.release()
-        } catch (_: Exception) {
-        }
-        stereoTrack = null
-    }
-
-    // ==================== Guidance Observer ====================
-
-    private fun observeGuidance() {
-        lifecycleScope.launch {
-            navigationManager.guidanceMessage.collectLatest { message ->
-                if (message.isNotEmpty()) {
-                    speakTTS(message)
-                    Log.d("SafeWalkNav", "Guidance: $message")
-                    appendNavLog("Guidance: $message")
-
-                    // 정량 지표 — guidanceMessage 패턴으로 안내 종류 카운트.
-                    when {
-                        message.contains("휘어집니다") || message.contains("꺾습니다") -> metricCurveCount++
-                        message.contains("횡단보도가 있습니다") ||
-                                message.contains("휴대폰을 세로로") -> metricCrosswalkAnnounceCount++
-                        message.contains("재탐색") ||
-                                message.contains("다시 탐색") -> metricRerouteCount++
-                    }
-
-                    // 나침반 화면의 메인 텍스트도 같이 갱신 — 사용자가 시각으로도 확인 가능.
-                    if (::tvCompassGuidance.isInitialized) {
-                        tvCompassGuidance.text = message
-                    }
-
-                    if (BuildConfig.DEBUG) {
-                        updateCompactDebugGuidance()
-                    }
-
-                    if (message.contains("이탈")) {
-                        vibrateWarning()
-                        playToneWarning()
-                    }
-                    // 횡단보도/계단 진동·톤은 navEvents 핸들러 한 곳에서만 낸다 (이중 발동 제거)
-                }
-            }
-        }
-
-        // 횡단보도 zone 상태 추적 — TMap waypoint 의 pointType=CROSSWALK + GPS 위치 기반.
-        // NavigationManager 가 매 GPS update 마다 갱신. ML 안내 게이팅에 사용.
-        lifecycleScope.launch {
-            navigationManager.navEvents.collectLatest { event ->
-                val message = event.message
-                if (message.isEmpty()) return@collectLatest
-
-                val now = System.currentTimeMillis()
-                val isSignalDirection = message.contains("신호등") && message.contains("방향")
-                val isSignalPresenceOnly = message == "신호등이 있습니다."
-                val isCrosswalkEvent = message.contains("횡단보도")
-
-                if (isSignalPresenceOnly) {
-                    appendNavLog("NavEvent suppressed: signal presence only")
-                    return@collectLatest
-                }
-
-                if (now < crosswalkEntrySpeechHoldUntil && (isCrosswalkEvent || message.contains("신호등"))) {
-                    if (isSignalDirection) {
-                        val delayMs = crosswalkEntrySpeechHoldUntil - now
-                        deferredSignalDirectionJob?.cancel()
-                        deferredSignalDirectionJob = lifecycleScope.launch {
-                            delay(delayMs)
-                            speakTTS(message)
-                            appendNavLog("NavEvent deferred after posture: $message")
-                            if (::tvCompassGuidance.isInitialized) {
-                                tvCompassGuidance.text = message
-                            }
-                            if (BuildConfig.DEBUG) updateCompactDebugGuidance()
-                        }
-                    } else {
-                        appendNavLog("NavEvent suppressed during posture guidance: $message")
-                    }
-                    return@collectLatest
-                }
-
-                speakLogged(
-                    message,
-                    interrupt = event.interrupt,
-                    utteranceId = message.hashCode().toString(),
-                    source = "내비이벤트",
-                )
-                Log.d("SafeWalkNav", "NavEvent: $message")
-                appendNavLog("NavEvent: $message")
-
-                if (::tvCompassGuidance.isInitialized) {
-                    tvCompassGuidance.text = message
-                }
-                if (BuildConfig.DEBUG) {
-                    updateCompactDebugGuidance()
-                }
-                if (message.contains("신호등") || message.contains("횡단보도")) {
-                    vibrateMedium()
-                    playToneAlert()
-                }
-            }
-        }
-
-        lifecycleScope.launch {
-            navigationManager.isInCrosswalkZone.collectLatest { inZone ->
-                val wasIn = inCrosswalkZone
-                inCrosswalkZone = inZone
-                if (inZone && !wasIn) {
-                    // 진입 시점 — 신호등 안전 state machine 리셋해서 깨끗한 상태로 시작.
-                    // (안정성 streak, 마지막 confirmed 색, heartbeat, flicker 락아웃 전부 엔진이 초기화)
-                    signalDecisionEngine.reset()
-                    resetTrafficLightNoDetectionEscalation()
-                    noDetectionSpeechHoldUntil =
-                        System.currentTimeMillis() + NO_DET_SPEECH_HOLD_AFTER_CAMERA_ENTRY_MS
-                    crosswalkEntrySpeechHoldUntil =
-                        System.currentTimeMillis() + CROSSWALK_ENTRY_SPEECH_HOLD_MS
-                    metricZoneEnterCount++   // 정량 지표 — zone 진입 카운트
-                    Log.d("SafeWalkNav", "Crosswalk zone ENTER | TrafficLight AI waits for signal<=10m")
-                    appendNavLog("Crosswalk zone ENTER | TrafficLight AI waits for signal<=10m")
-                    updateAiDebugResult("AI ON | waiting frame")
-                    // Firebase Analytics — 횡단보도 zone 진입 이벤트
-                    firebaseAnalytics.logEvent("crosswalk_zone_enter") {
-                        param("session_start_ms", metricStartMs)
-                        param("zone_enter_count_in_session", metricZoneEnterCount.toLong())
-                    }
-                    // 접근 안내 발화 — 화면엔 이미 '신호등 확인' 버튼이 떠 있다.
-                    if (appState == AppState.NAVIGATING) {
-                        speakTTS("횡단보도가 가까워졌습니다. 신호등을 확인하려면 화면의 신호등 확인 버튼을 두 번 누르세요.")
-                        applyNavigatingMode()
-                    }
-                } else if (!inZone && wasIn) {
-                    Log.d("SafeWalkNav", "Crosswalk zone EXIT | TrafficLight AI=OFF")
-                    appendNavLog("Crosswalk zone EXIT | TrafficLight AI=OFF")
-                    updateAiDebugResult("AI OFF")
-                    deferredSignalDirectionJob?.cancel()
-                    deferredSignalDirectionJob = null
-                    crosswalkEntrySpeechHoldUntil = 0L
-                    // 통과 안내 — 확인 중이었으면 종료하고 버튼 화면으로 복귀.
-                    if (appState == AppState.NAVIGATING) {
-                        if (signalCheckActive) stopSignalCheck(announce = false)
-                        speakTTS("횡단보도를 지나갔습니다. 휴대폰을 평평하게 들고 계속 진행하세요.")
-                        applyNavigatingMode()
-                    }
-                }
-                updateDebugInfo()
-                updateCompactDebugGuidance()
-            }
-        }
-
-        // 목적지까지 남은 거리 — 나침반 화면 하단 보조 정보로 표시.
-        lifecycleScope.launch {
-            navigationManager.distanceToDestination.collectLatest { dist ->
-                if (!::tvCompassSubInfo.isInitialized) return@collectLatest
-                tvCompassSubInfo.text = if (dist == Float.MAX_VALUE) ""
-                else "목적지까지 ${dist.toInt()}m"
-            }
-        }
-
-        // NavigationManager 의 debugMessage 도 파일에 기록 (sparse 하게 — 매 GPS update 마다라 양 많을 수 있음)
-        lifecycleScope.launch {
-            navigationManager.debugMessage.collectLatest { msg ->
-                if (msg.isNotEmpty()) {
-                    appendNavLog("DBG: ${msg.replace("\n", " | ")}")
-                }
-            }
-        }
-
-        // DEBUG 빌드: NavigationManager.debugMessage 를 화면 하단에 실시간 표시.
-        // 외출 중 횡단보도 zone 판정 디버깅 용도 — `횡단보도=`, `wp=`, `roadType=`, `idx=` 값 추적.
-        if (BuildConfig.DEBUG) {
-            lifecycleScope.launch {
-                navigationManager.debugMessage.collectLatest { msg ->
-                    if (msg.isNotEmpty()) {
-                        updateCompactDebugGuidance()
-                    }
-                }
-            }
-        }
-
-        lifecycleScope.launch {
-            navigationManager.arrivalState.collectLatest { state ->
-                when (state) {
-                    ArrivalState.FAR -> {
-                        stopDirectionalBeacon()
-                    }
-
-                    ArrivalState.APPROACHING -> {
-                        vibrateMedium()
-                        startBeacon()
-                    }
-
-                    ArrivalState.NEAR -> {
-                        vibrateMedium()
-                        stopBeacon()
-                        startDirectionalBeacon()
-                    }
-
-                    ArrivalState.ARRIVED -> {
-                        stopBeacon()
-                        vibrateArrival()
-                        playToneSuccess()
-                        // 방향비콘은 계속 유지 — 입구 찾는 동안. finishNavigation 의 3초 후 종료.
-                        if (directionalBeaconJob == null) {
-                            startDirectionalBeacon()
-                        }
-                        // ARRIVED 화면 + 3초 후 자동 IDLE 복귀
-                        val name = navigationManager.destinationName.ifEmpty { "목적지" }
-                        finishNavigation(name)
-                    }
-                }
-            }
-        }
-        //신호등 디버그 화면 표시
-        lifecycleScope.launch {
-            navigationManager.debugMessage.collectLatest { message ->
-                if (BuildConfig.DEBUG && message.isNotEmpty()) {
-                    updateCompactDebugGuidance()
-                }
-            }
-        }
-    }
-
-    // ==================== 카메라 ON/OFF ====================
-
-    /**
-     * 후방 카메라 PreviewView 를 cameraPreviewContainer 에 attach + bindToLifecycle.
-     * 권한 없으면 silent skip — NAVIGATING 자체는 음성/진동/비콘으로 정상 동작.
-     */
     private fun startCamera() {
-        if (cameraProvider != null) {
-            return
-        }   // 이미 작동 중
-
-        if (ActivityCompat.checkSelfPermission(
-                this, Manifest.permission.CAMERA
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            Log.w("SafeWalkNav", "Camera permission denied — skip preview")
-            return
-        }
+        if (cameraProvider != null) return   // 이미 작동 중
+        if (!hasCameraPermission()) return
 
         val pv = PreviewView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
@@ -2035,30 +140,26 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 FrameLayout.LayoutParams.MATCH_PARENT
             )
             scaleType = PreviewView.ScaleType.FILL_CENTER
-            // PreviewView 자체엔 contentDescription 안 부여 (시각장애인은 카메라 영상 안 봄)
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
         cameraPreviewContainer.removeAllViews()
         cameraPreviewContainer.addView(pv)
 
-        // 검출기/executor 초기화 (재사용)
         if (trafficLightDetector == null) {
             try {
-                trafficLightDetector = TrafficLightDetector(this).apply {
-                    // 실측 중 TTS 판정은 운영 임계값(0.5)을 사용한다.
-                    // diagnosticMode=true 는 0.3 후보까지 TTS state machine 에 들어와 오발화 위험이 크다.
-                    diagnosticMode = false
-                }
-                Log.d("SafeWalkNav", "TrafficLightDetector loaded (diagnosticMode=false)")
-                appendNavLog("TrafficLightDetector loaded (diagnosticMode=false)")
+                trafficLightDetector = TrafficLightDetector(this).apply { diagnosticMode = false }
+                Log.d(TAG, "TrafficLightDetector loaded")
             } catch (e: Exception) {
-                Log.e("SafeWalkNav", "Failed to load TrafficLightDetector", e)
-                appendNavLog("Failed to load TrafficLightDetector: ${e.message}")
+                Log.e(TAG, "Failed to load TrafficLightDetector", e)
+                overlayStatusText.text = "모델 로드 실패"
             }
         }
-        if (analysisExecutor == null) {
-            analysisExecutor = Executors.newSingleThreadExecutor()
-        }
+        if (analysisExecutor == null) analysisExecutor = Executors.newSingleThreadExecutor()
+
+        // 신호 판정 상태 초기화 + 겨눌 시간(3초)은 미탐지 안내 억제.
+        signalDecisionEngine.reset()
+        resetNoDetection()
+        detectStartHoldUntil = System.currentTimeMillis() + DETECT_START_HOLD_MS
 
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
@@ -2069,9 +170,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(pv.surfaceProvider)
                 }
-
-                // ImageAnalysis use case — 검출기 로드 됐을 때만 추가
                 val useCases = mutableListOf<androidx.camera.core.UseCase>(preview)
+
                 val detector = trafficLightDetector
                 val executor = analysisExecutor
                 if (detector != null && executor != null) {
@@ -2080,321 +180,24 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         .build()
                     analysis.setAnalyzer(
                         executor,
-                        TrafficLightAnalyzer(
-                            detector = detector,
-                            // 사용자가 '신호등 확인'을 켰을 때만 ML 추론. 테스트/부스 모드는 예외.
-                            isActive = {
-                                signalCheckActive || boothModeActive || TEST_MODE_FORCE_ML_ON
-                            },
-                        ) { detections ->
+                        TrafficLightAnalyzer(detector = detector, isActive = { true }) { detections ->
                             runOnUiThread { onTrafficLightDetected(detections) }
                         }
                     )
                     useCases += analysis
-                    Log.d("SafeWalkNav", "ImageAnalysis bound — TrafficLight detection ON")
                 }
 
                 provider.unbindAll()
                 camera = provider.bindToLifecycle(
-                    this,
-                    CameraSelector.DEFAULT_BACK_CAMERA,
-                    *useCases.toTypedArray()
+                    this, CameraSelector.DEFAULT_BACK_CAMERA, *useCases.toTypedArray()
                 )
-                Log.d("SafeWalkNav", "Camera bound (use cases: ${useCases.size})")
+                Log.d(TAG, "Camera bound (use cases: ${useCases.size})")
             } catch (e: Exception) {
-                Log.e("SafeWalkNav", "Camera bind failed", e)
+                Log.e(TAG, "Camera bind failed", e)
                 cameraProvider = null
                 camera = null
             }
         }, ContextCompat.getMainExecutor(this))
-    }
-
-    /**
-     * 신호등 검출 결과 처리 (PR-SAFETY 2026-05-29 — state machine 기반).
-     *
-     * 단계:
-     *   (1) detections.isEmpty / zone gate
-     *   (2) 6% bbox 필터 → validated
-     *   (3) Detection 타임아웃 체크 → state reset 여부
-     *   (4) 안정성 필터: 3 frame 연속 같은 색이어야 confirm
-     *   (5) confirmed 색 처리:
-     *       · 이전 confirmed 와 같음 → HEARTBEAT_INTERVAL_MS 마다 같은 색상 TTS 반복
-     *       · 다름 → 색 변경 또는 첫 confirm → TTS 발화
-     *           - 빨강: "빨간불입니다. 정지하세요."
-     *           - 초록 (이전이 빨강): "방금 초록불로 바뀌었습니다. 안전을 확인하고 건너세요." ← 유일 "건너세요"
-     *           - 초록 (그 외): "초록불입니다. 일단 멈춰서 다음 신호를 기다리세요."
-     *
-     * 진단: 매 inference 의 단계별 통과 / 차단 사유를 walk_*.log 에 기록.
-     *   TL_DIAG zone=… raw=N aboveTh=K peakConf=X.XX (R=Y G=Z) th=… inferMs=…
-     *   TL_DIAG  └─ <REASON> …
-     *     where REASON ∈ {ALL_TOO_SMALL, STATE_RESET, STABILITY_PENDING, SAME_COLOR_QUIET,
-     *                     HEARTBEAT, ANNOUNCED_RED, ANNOUNCED_STATIC_GREEN,
-     *                     ANNOUNCED_TRANSITION_R_TO_G, ANNOUNCED_TRANSITION_G_TO_R}
-     */
-    private fun onTrafficLightDetected(detections: List<TrafficLightDetection>) {
-        val stats = trafficLightDetector?.lastStats
-
-        // ──── 진단 통계 헤더 (zone 진입 후 매 inference 기록) ────
-        // zone=false 일 땐 spam 방지 위해 기록 안 함. zone=true 인데 detections=0 면 모델이 신호등을
-        // 못 보고 있다는 강력한 신호.
-        val statsLine = if (stats != null) {
-            "TL_DIAG zone=$inCrosswalkZone check=$signalCheckActive " +
-                    "raw=${detections.size} " +
-                    "aboveTh=${stats.rawCandidatesAboveThreshold} " +
-                    "peakConf=${"%.2f".format(stats.peakConfidence)} " +
-                    "(R=${"%.2f".format(stats.peakConfRed)} G=${"%.2f".format(stats.peakConfGreen)}) " +
-                    "th=${"%.2f".format(stats.confidenceThresholdUsed)}${if (stats.diagnosticMode) "[DIAG]" else ""} " +
-                    "inferMs=${stats.inferenceMs}"
-        } else {
-            "TL_DIAG zone=$inCrosswalkZone check=$signalCheckActive raw=${detections.size} stats=null"
-        }
-        val trafficLightAiActive = signalCheckActive || boothModeActive
-        val aiResultLine = if (stats != null) {
-            "AI ${if (trafficLightAiActive) "ON" else "OFF"} | raw=${detections.size} " +
-                    "above=${stats.rawCandidatesAboveThreshold} " +
-                    "peak=${"%.2f".format(stats.peakConfidence)} " +
-                    "R=${"%.2f".format(stats.peakConfRed)} " +
-                    "G=${"%.2f".format(stats.peakConfGreen)} " +
-                    "th=${"%.2f".format(stats.confidenceThresholdUsed)} " +
-                    "ms=${stats.inferenceMs}"
-        } else {
-            "AI ${if (trafficLightAiActive) "ON" else "OFF"} | raw=${detections.size} stats=null"
-        }
-        updateAiDebugResult("$aiResultLine | action=CHECKING")
-
-        // zone 안에서만 파일 로깅 — 평소 보행 중엔 spam 방지.
-        // 테스트 모드면 zone 무관하게 로깅 (인식 정확도 검증을 위해 모든 추론 라인 필요).
-        if (trafficLightAiActive || TEST_MODE_FORCE_ML_ON) {
-            appendNavLog(statsLine)
-        }
-        // 임시 진단(logcat) — 데모 세션은 파일 로그를 안 만들어 TL_DIAG 가 안 보이므로
-        // AI 활성 상태에서는 무조건 logcat 에도 찍는다. 검증 끝나면 이 줄 삭제.
-        if (BuildConfig.DEBUG && (trafficLightAiActive || TEST_MODE_FORCE_ML_ON)) {
-            Log.d("TL_DIAG", statsLine)
-        }
-
-        // ──── 안내 흐름 (기존 로직, 단 reason 명시) ────
-
-        if (detections.isEmpty()) {
-            if (boothModeActive) setBoothIdleVisual()
-            // 모델이 신호등을 못 봄 (또는 threshold 미달).
-            // iOS TrafficLightDetector 와 동일하게 AI 활성 상태에서는 단계형 카메라 조작 안내를 낸다.
-            if (stats != null && stats.peakConfidence >= NO_DET_SUPPRESS_PEAK_CONFIDENCE) {
-                resetTrafficLightNoDetectionEscalation()
-                appendNavLog(
-                    "TL_DIAG  └─ WEAK_CANDIDATE_SUPPRESS_NO_DET peak=${"%.2f".format(stats.peakConfidence)} " +
-                            "(R=${"%.2f".format(stats.peakConfRed)} G=${"%.2f".format(stats.peakConfGreen)})"
-                )
-                if (BuildConfig.DEBUG) {
-                    updateCompactDebugGuidance()
-                    updateAiDebugResult("$aiResultLine | action=WEAK_CANDIDATE")
-                }
-                return
-            }
-            handleTrafficLightNoDetection(
-                aiResultLine = aiResultLine,
-                reason = "NO_DET",
-                allowSpeech = trafficLightAiActive || TEST_MODE_FORCE_ML_ON,
-            )
-            if (BuildConfig.DEBUG) {
-                updateCompactDebugGuidance()
-                updateAiDebugResult("$aiResultLine | action=NO_DET")
-            }
-            return
-        }
-
-        // 0차 필터: 횡단보도 zone 진입했을 때만 안내.
-        // NavigationManager.isInCrosswalkZone (TMap waypoint pointType=CROSSWALK + GPS 위치 판정) 기반.
-        // ML 추론은 백그라운드에서 계속 돌지만 zone 밖에선 결과 무시.
-        // 단 TEST_MODE_FORCE_ML_ON=true 면 zone 무관하게 TTS 발화 + 디바운스/박스필터 진행 (인식 정확도 테스트용).
-        if (!trafficLightAiActive && !TEST_MODE_FORCE_ML_ON) return
-
-        // ──── 안내 결정 — 공유 엔진(SignalDecisionEngine)에 위임 ────
-        // 신뢰도 비대칭·크기 하한·안정성·점멸·색 확정 로직은 shared 모듈에 있다.
-        // 여기서는 카메라 검출을 엔진 입력으로 바꾸고, 결정을 부수효과(TTS·진동·Firebase·로그)로 옮긴다.
-        val rawSignals = detections.map {
-            RawSignalDetection(it.classId, it.confidence, it.bbox.width, it.bbox.height)
-        }
-        val decision = signalDecisionEngine.decide(rawSignals, System.currentTimeMillis())
-        if (boothModeActive) updateBoothVisual(decision)
-
-        // 로그·Firebase 표기용 대표 검출 (판정은 엔진이 이미 끝냄 — 표시 전용)
-        val nearest = detections.maxByOrNull { it.confidence }
-        val nearestLabel = nearest?.label ?: "-"
-        val nearestConfStr = nearest?.let { "${(it.confidence * 100).toInt()}%" } ?: "-"
-        val nearestBoxStr = nearest?.let {
-            "${(it.bbox.width * 100).toInt()}x${(it.bbox.height * 100).toInt()}%"
-        } ?: "-"
-
-        when (decision) {
-            is SignalDecision.Silent -> {
-                resetTrafficLightNoDetectionEscalation()
-                val tag = when (decision.reason) {
-                    SilentReason.NO_DETECTION -> "NO_DET_CANDIDATE"
-                    SilentReason.ALL_TOO_SMALL -> "ALL_TOO_SMALL"
-                    SilentReason.ALL_LOW_CONFIDENCE -> "ALL_LOW_CONF"
-                    SilentReason.STABILITY_PENDING ->
-                        "STABILITY_PENDING streak=${decision.streak}/${decision.requiredFrames}"
-                    SilentReason.FLICKER_LOCKOUT -> "FLICKER_LOCKOUT"
-                    SilentReason.SAME_COLOR_QUIET -> "SAME_COLOR_QUIET"
-                }
-                appendNavLog("TL_DIAG  └─ $tag nearest=$nearestLabel $nearestConfStr box=$nearestBoxStr")
-                if (BuildConfig.DEBUG) {
-                    updateCompactDebugGuidance()
-                    updateAiDebugResult(
-                        "$aiResultLine | action=${decision.reason} label=$nearestLabel " +
-                                "conf=$nearestConfStr box=$nearestBoxStr"
-                    )
-                }
-            }
-
-            is SignalDecision.Repeat -> {
-                resetTrafficLightNoDetectionEscalation()
-                // 반복 안내는 다른 발화를 끊지 않는다 (interrupt=false). 빨간불이라도 큐에 얹기만.
-                speakTrafficLightTTS(repeatTrafficLightMessage(decision.color), interrupt = false)
-                appendNavLog("TL_DIAG  └─ REPEAT_TTS color=${classLabel(decision.color)}")
-                if (BuildConfig.DEBUG) {
-                    updateAiDebugResult("$aiResultLine | action=REPEAT_TTS label=${classLabel(decision.color)}")
-                }
-            }
-
-            is SignalDecision.Flicker -> {
-                resetTrafficLightNoDetectionEscalation()
-                speakTrafficLightTTS("신호가 깜빡입니다. 멈춰서 다음 신호를 기다리세요.", interrupt = true)
-                vibrateWarning()
-                metricFlickerCount++
-                firebaseAnalytics.logEvent("flicker_detected") {
-                    param("gap_ms", decision.gapMs)
-                    param("prev_color", classLabel(decision.previousColor))
-                    param("new_color", classLabel(decision.newColor))
-                }
-                appendNavLog(
-                    "TL_DIAG  └─ FLICKER_DETECTED prev=${classLabel(decision.previousColor)} " +
-                            "new=${classLabel(decision.newColor)} gap=${decision.gapMs}ms"
-                )
-                if (BuildConfig.DEBUG) {
-                    updateCompactDebugGuidance()
-                    updateAiDebugResult("$aiResultLine | action=FLICKER gap=${decision.gapMs}ms")
-                }
-            }
-
-            is SignalDecision.Announce -> {
-                resetTrafficLightNoDetectionEscalation()
-                val message: String
-                val action: String
-                when (decision.transition) {
-                    SignalTransition.RED_NEW -> {
-                        message = "빨간불입니다. 정지하세요."
-                        action = "ANNOUNCED_RED"
-                        metricMlRedCount++
-                    }
-                    SignalTransition.GREEN_TO_RED -> {
-                        message = "빨간불입니다. 정지하세요."
-                        action = "ANNOUNCED_TRANSITION_G_TO_R"
-                        metricMlGreenToRedCount++
-                    }
-                    SignalTransition.RED_TO_GREEN -> {
-                        message = "방금 초록불로 바뀌었습니다. 안전을 확인하고 건너세요."
-                        action = "ANNOUNCED_TRANSITION_R_TO_G"
-                        metricMlTransitionCount++
-                    }
-                    SignalTransition.STATIC_GREEN -> {
-                        message = "초록불입니다. 일단 멈춰서 다음 신호를 기다리세요."
-                        action = "ANNOUNCED_STATIC_GREEN"
-                        metricMlGreenStaticCount++
-                    }
-                }
-                speakTrafficLightTTS(message, interrupt = decision.interrupt)
-                if (decision.vibrate) vibrateShort()
-                firebaseAnalytics.logEvent("traffic_light_announced") {
-                    param("color", classLabel(decision.color))
-                    param("transition_type", action)
-                    param("confidence_pct", (decision.confidence * 100).toLong())
-                }
-                Log.d("SafeWalkNav", "TL: $action — $message (conf=${decision.confidence})")
-                appendNavLog(
-                    "TL_DIAG  └─ $action color=${classLabel(decision.color)} " +
-                            "conf=${"%.2f".format(decision.confidence)}"
-                )
-                if (BuildConfig.DEBUG) {
-                    updateCompactDebugGuidance()
-                    updateAiDebugResult(
-                        "$aiResultLine | action=$action label=${classLabel(decision.color)} " +
-                                "conf=${(decision.confidence * 100).toInt()}%"
-                    )
-                }
-            }
-        }
-    }
-
-    private fun resetTrafficLightNoDetectionEscalation() {
-        noDetectionStartedAt = 0L
-        noDetectionLastSpeechAt = 0L
-        noDetectionSafetyFallbackDone = false
-    }
-
-    private fun handleTrafficLightNoDetection(
-        aiResultLine: String,
-        reason: String,
-        allowSpeech: Boolean,
-    ) {
-        if (!allowSpeech) {
-            resetTrafficLightNoDetectionEscalation()
-            return
-        }
-
-        val now = System.currentTimeMillis()
-        if (now < noDetectionSpeechHoldUntil) {
-            resetTrafficLightNoDetectionEscalation()
-            appendNavLog(
-                "TL_DIAG  └─ NO_DET_HOLD_AFTER_CAMERA_ENTRY remaining=${(noDetectionSpeechHoldUntil - now) / 1000}s reason=$reason"
-            )
-            if (BuildConfig.DEBUG) {
-                updateAiDebugResult("$aiResultLine | action=NO_DET_HOLD reason=$reason")
-            }
-            return
-        }
-
-        if (noDetectionStartedAt == 0L) {
-            noDetectionStartedAt = now
-        }
-        val elapsed = now - noDetectionStartedAt
-
-        // 아직 첫 안내 시점(6초) 이전이면 조용히 대기 — 겨눌 시간을 준다.
-        if (elapsed < NO_DET_FIRST_MS) return
-
-        // 20초 넘게 계속 못 잡으면 '소리 주의' 폴백을 딱 한 번.
-        if (elapsed >= NO_DET_SAFETY_MS && !noDetectionSafetyFallbackDone) {
-            noDetectionSafetyFallbackDone = true
-            noDetectionLastSpeechAt = now
-            speakTrafficLightTTS("신호등이 잘 잡히지 않습니다. 주변 소리에 주의하세요.", interrupt = false)
-            appendNavLog("TL_DIAG  └─ NO_DET_SAFETY reason=$reason elapsed=${elapsed / 1000}s")
-            return
-        }
-
-        // 그 외에는 같은 문장을 12초 간격으로만 반복 (연타 금지).
-        if (noDetectionLastSpeechAt == 0L || now - noDetectionLastSpeechAt >= NO_DET_REPEAT_MS) {
-            noDetectionLastSpeechAt = now
-            speakTrafficLightTTS("신호등을 찾고 있습니다. 카메라를 천천히 좌우로 움직여 주세요.", interrupt = false)
-            appendNavLog("TL_DIAG  └─ NO_DET_REPEAT reason=$reason elapsed=${elapsed / 1000}s")
-            if (BuildConfig.DEBUG) {
-                updateAiDebugResult("$aiResultLine | action=NO_DET_REPEAT reason=$reason")
-            }
-        }
-    }
-
-    /** classId → 사람이 읽기 쉬운 라벨 (로그용). */
-    private fun classLabel(classId: Int): String = when (classId) {
-        0 -> "RED"
-        1 -> "GREEN"
-        -1 -> "NONE"
-        else -> "?($classId)"
-    }
-
-    private fun repeatTrafficLightMessage(classId: Int): String = when (classId) {
-        0 -> "빨간불입니다. 정지하세요."
-        1 -> "초록불입니다."
-        else -> "신호를 확인하세요."
     }
 
     private fun stopCamera() {
@@ -2405,230 +208,217 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         cameraProvider = null
         camera = null
         cameraPreviewContainer.removeAllViews()
-
-        // 신호등 안전 state machine 리셋 — 다음 NAVIGATING 진입 시 깨끗한 상태로 시작
         signalDecisionEngine.reset()
-        noDetectionSpeechHoldUntil = 0L
-
-        // 횡단보도 zone 은 NavigationManager.isInCrosswalkZone state flow 가 자동 관리 —
-        // 여기서 명시적 reset 불필요. NAVIGATING 종료 시 navigationManager.stopNavigation() 호출되며
-        // route 가 cleared → state flow 도 자연스럽게 false 로 emit.
-
-        Log.d("SafeWalkNav", "Camera unbound")
+        resetNoDetection()
     }
 
-    // ==================== 진동 패턴 ====================
+    // ==================== 신호 검출 처리 ====================
+
+    private fun onTrafficLightDetected(detections: List<TrafficLightDetection>) {
+        val stats = trafficLightDetector?.lastStats
+
+        // 필드 디버깅용 — 매 추론의 peak 신뢰도(R/G)를 logcat 에 남긴다.
+        if (BuildConfig.DEBUG && stats != null) {
+            Log.d(
+                "TL_DIAG",
+                "raw=${detections.size} above=${stats.rawCandidatesAboveThreshold} " +
+                    "peak=${"%.2f".format(stats.peakConfidence)} " +
+                    "(R=${"%.2f".format(stats.peakConfRed)} G=${"%.2f".format(stats.peakConfGreen)}) " +
+                    "th=${"%.2f".format(stats.confidenceThresholdUsed)} ms=${stats.inferenceMs}"
+            )
+        }
+
+        if (detections.isEmpty()) {
+            setIdleVisual()
+            // 약한 후보(임계 근처)가 보이면 미탐지 안내를 억제 — 곧 잡힐 수 있음.
+            if (stats != null && stats.peakConfidence >= NO_DET_SUPPRESS_PEAK_CONFIDENCE) {
+                resetNoDetection()
+                return
+            }
+            handleNoDetection()
+            return
+        }
+
+        val rawSignals = detections.map {
+            RawSignalDetection(it.classId, it.confidence, it.bbox.width, it.bbox.height)
+        }
+        val decision = signalDecisionEngine.decide(rawSignals, System.currentTimeMillis())
+        updateOverlay(decision)
+
+        when (decision) {
+            is SignalDecision.Silent -> {
+                resetNoDetection()
+            }
+
+            is SignalDecision.Repeat -> {
+                resetNoDetection()
+                speakTrafficLight(repeatMessage(decision.color), interrupt = false)
+            }
+
+            is SignalDecision.Flicker -> {
+                resetNoDetection()
+                speakTrafficLight("신호가 깜빡입니다. 멈춰서 다음 신호를 기다리세요.", interrupt = true)
+                vibrateWarning()
+            }
+
+            is SignalDecision.Announce -> {
+                resetNoDetection()
+                val message = when (decision.transition) {
+                    SignalTransition.RED_NEW -> "빨간불입니다. 정지하세요."
+                    SignalTransition.GREEN_TO_RED -> "빨간불입니다. 정지하세요."
+                    SignalTransition.RED_TO_GREEN -> "방금 초록불로 바뀌었습니다. 안전을 확인하고 건너세요."
+                    SignalTransition.STATIC_GREEN -> "초록불입니다. 일단 멈춰서 다음 신호를 기다리세요."
+                }
+                speakTrafficLight(message, interrupt = decision.interrupt)
+                if (decision.vibrate) vibrateShort()
+                Log.d(TAG, "TL announce: $message (conf=${decision.confidence})")
+            }
+        }
+    }
+
+    private fun resetNoDetection() {
+        noDetStartedAt = 0L
+        noDetLastSpeechAt = 0L
+        noDetSafetyDone = false
+    }
+
+    /** 신호등을 못 잡을 때 — 조용히 대기했다가 같은 문장을 간격 두고 반복. */
+    private fun handleNoDetection() {
+        val now = System.currentTimeMillis()
+        if (now < detectStartHoldUntil) {
+            resetNoDetection()
+            return
+        }
+        if (noDetStartedAt == 0L) noDetStartedAt = now
+        val elapsed = now - noDetStartedAt
+        if (elapsed < NO_DET_FIRST_MS) return
+
+        if (elapsed >= NO_DET_SAFETY_MS && !noDetSafetyDone) {
+            noDetSafetyDone = true
+            noDetLastSpeechAt = now
+            speakTrafficLight("신호등이 잘 잡히지 않습니다. 주변 소리에 주의하세요.", interrupt = false)
+            return
+        }
+        if (noDetLastSpeechAt == 0L || now - noDetLastSpeechAt >= NO_DET_REPEAT_MS) {
+            noDetLastSpeechAt = now
+            speakTrafficLight(crosswalkGuidanceMessage(), interrupt = false)
+        }
+    }
+
+    /**
+     * 신호등이 안 잡힐 때의 방향 안내.
+     * 모델이 횡단보도(Zebra_Cross)를 검출했으면 그 화면상 위치로 "어느 쪽으로 돌릴지" 짚어주고,
+     * 아무것도 없으면 막연한 좌우 스윕 안내로 폴백한다. (kairess 모델의 횡단보도 클래스 활용)
+     */
+    private fun crosswalkGuidanceMessage(): String {
+        val cx = trafficLightDetector?.lastCrosswalkCenterX ?: -1f
+        return when {
+            cx < 0f -> "신호등을 찾고 있습니다. 카메라를 천천히 좌우로 움직여 주세요."
+            cx < 0.40f -> "횡단보도가 왼쪽에 보입니다. 카메라를 왼쪽으로 조금 돌려 주세요."
+            cx > 0.60f -> "횡단보도가 오른쪽에 보입니다. 카메라를 오른쪽으로 조금 돌려 주세요."
+            else -> "횡단보도가 정면에 있습니다. 카메라를 조금 위로 올려 신호등을 비춰 주세요."
+        }
+    }
+
+    private fun repeatMessage(classId: Int): String = when (classId) {
+        0 -> "빨간불입니다. 정지하세요."
+        1 -> "초록불입니다."
+        else -> "신호를 확인하세요."
+    }
+
+    // ==================== 화면 오버레이 ====================
+
+    private fun setIdleVisual() {
+        overlayColorView.setBackgroundColor(0x00000000)
+        overlayStatusText.text = "신호등을\n비춰주세요"
+    }
+
+    private fun updateOverlay(decision: SignalDecision) {
+        val red = 0x66D50000.toInt()
+        val green = 0x6600C853.toInt()
+        // 화면 글씨는 "초록불"/"빨간불" 두 단어만. 나머지 안내(건너세요 등)는 음성이 담당.
+        when (decision) {
+            is SignalDecision.Announce -> when (decision.transition) {
+                SignalTransition.RED_TO_GREEN -> { overlayColorView.setBackgroundColor(green); overlayStatusText.text = "초록불" }
+                SignalTransition.STATIC_GREEN -> { overlayColorView.setBackgroundColor(green); overlayStatusText.text = "초록불" }
+                else -> { overlayColorView.setBackgroundColor(red); overlayStatusText.text = "빨간불" }
+            }
+            is SignalDecision.Repeat ->
+                if (decision.color == 0) { overlayColorView.setBackgroundColor(red); overlayStatusText.text = "빨간불" }
+                else { overlayColorView.setBackgroundColor(green); overlayStatusText.text = "초록불" }
+            is SignalDecision.Flicker -> { overlayColorView.setBackgroundColor(red); overlayStatusText.text = "빨간불" }
+            is SignalDecision.Silent -> { /* 확신 부족/안정성 대기 — 현재 화면 유지 */ }
+        }
+    }
+
+    // ==================== TTS / 진동 ====================
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            tts.language = Locale.KOREAN
+            ttsReady = true
+            tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) { ttsSpeaking = true }
+                override fun onDone(utteranceId: String?) { ttsSpeaking = false }
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) { ttsSpeaking = false }
+            })
+            if (!introSpoken) {
+                introSpoken = true
+                speakTts("SafeWalk입니다. 신호등을 카메라에 비춰 주세요.")
+            }
+        }
+    }
+
+    private fun speakTts(message: String) {
+        if (!ttsReady) return
+        tts.speak(message, TextToSpeech.QUEUE_ADD, null, message.hashCode().toString())
+    }
+
+    private fun speakTrafficLight(message: String, interrupt: Boolean) {
+        if (!ttsReady) return
+        tts.speak(
+            message,
+            if (interrupt) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
+            null,
+            if (interrupt) "tl_urgent" else "tl",
+        )
+    }
 
     private fun vibrateShort() {
         vibrator.vibrate(VibrationEffect.createOneShot(50, VibrationEffect.DEFAULT_AMPLITUDE))
     }
 
-    private fun vibrateMedium() {
-        vibrator.vibrate(VibrationEffect.createOneShot(200, VibrationEffect.DEFAULT_AMPLITUDE))
-    }
-
     private fun vibrateWarning() {
-        vibrator.vibrate(
-            VibrationEffect.createWaveform(longArrayOf(0, 150, 100, 150, 100, 150), -1)
-        )
+        vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 150, 100, 150, 100, 150), -1))
     }
 
-    private fun vibrateArrival() {
-        vibrator.vibrate(
-            VibrationEffect.createWaveform(longArrayOf(0, 300, 200, 300, 200, 500), -1)
-        )
+    // ==================== 라이프사이클 ====================
+
+    override fun onResume() {
+        super.onResume()
+        if (cameraProvider == null && hasCameraPermission()) startCamera()
     }
 
-    // ==================== 효과음 ====================
+    override fun onPause() {
+        super.onPause()
+        stopCamera()
+    }
 
-    private fun playToneSuccess() {
-        try {
-            toneGenerator?.startTone(ToneGenerator.TONE_PROP_ACK, 200)
-        } catch (_: Exception) {
+    override fun onDestroy() {
+        super.onDestroy()
+        stopCamera()
+        analysisExecutor?.shutdown()
+        analysisExecutor = null
+        trafficLightDetector?.close()
+        trafficLightDetector = null
+        if (::tts.isInitialized) {
+            tts.stop()
+            tts.shutdown()
         }
     }
 
-    private fun playToneWarning() {
-        try {
-            toneGenerator?.startTone(ToneGenerator.TONE_PROP_NACK, 300)
-        } catch (_: Exception) {
-        }
-    }
-
-    private fun playToneAlert() {
-        try {
-            toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
-        } catch (_: Exception) {
-        }
-    }
-
-    private fun playToneError() {
-        try {
-            toneGenerator?.startTone(ToneGenerator.TONE_CDMA_ABBR_ALERT, 300)
-        } catch (_: Exception) {
-        }
-    }
-
-    // ==================== TTS ====================
-
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            tts.language = Locale.KOREAN
-            tts.setSpeechRate(ttsSpeed)
-            ttsReady = true
-
-            tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {
-                    ttsSpeaking = true
-                }
-
-                override fun onDone(utteranceId: String?) {
-                    ttsSpeaking = false
-                    if (utteranceId == "auto_listen") {
-                        runOnUiThread { startSTT() }
-                    }
-                }
-
-                @Deprecated("Deprecated in Java")
-                override fun onError(utteranceId: String?) {
-                    ttsSpeaking = false
-                }
-            })
-
-            tryPlayWelcome()
-        }
-    }
-
-    private fun onGPSEnabled() {
-        gpsReady = true
-        updateDebugInfo()
-        tryPlayWelcome()
-    }
-
-    private fun tryPlayWelcome() {
-        if (ttsReady && gpsReady && !welcomePlayed) {
-            welcomePlayed = true
-            // TalkBack ON 일 땐 우리 TTS 발화 안 함 — TalkBack 이 자동으로 root layout 의
-            // contentDescription ("화면을 2초간 길게 눌러 음성으로 목적지를 입력하세요") 을
-            // 화면 진입 시 읽어주고, 그 끝에 "두 번 탭하여 활성화" hint 가 자동 추가됨.
-            // 우리 TTS 가 동시에 나오면 두 음성이 겹쳐서 혼란.
-            if (!isTalkBackEnabled()) {
-                speakTTS("SafeWalk입니다. 내비게이션을 실행하시려면 화면을 2초간 길게 눌러주세요.")
-            }
-        }
-    }
-
-    private fun speakTTS(message: String) {
-        speakLogged(message, interrupt = false, utteranceId = message.hashCode().toString(), source = "일반")
-    }
-
-    private fun speakTrafficLightTTS(message: String, interrupt: Boolean = true) {
-        speakLogged(
-            message,
-            interrupt = interrupt,
-            utteranceId = if (interrupt) "traffic_light_urgent" else "traffic_light",
-            source = "신호등",
-        )
-    }
-
-    /**
-     * 안내 TTS 끝나면 자동으로 STT 시작 (IDLE 상태로 전환).
-     * 0건/실패 후 자동 재시도 흐름에 사용.
-     */
-    private fun speakAndListenIdle(message: String) {
-        showState(AppState.IDLE)
-        speakLogged(message, interrupt = false, utteranceId = "auto_listen", source = "재청취유도")
-    }
-
-    // ==================== GPS ====================
-
-    private fun checkAndEnableGPS() {
-        if (gpsReady) return
-        if (gpsCheckInProgress) return
-        if (System.currentTimeMillis() - gpsDialogDeniedTime < 30000L) return
-
-        gpsCheckInProgress = true
-
-        val locationRequest = LocationRequest.Builder(
-            Priority.PRIORITY_HIGH_ACCURACY, 2000L
-        ).build()
-
-        val settingsRequest = LocationSettingsRequest.Builder()
-            .addLocationRequest(locationRequest)
-            .setAlwaysShow(true)
-            .build()
-
-        LocationServices.getSettingsClient(this)
-            .checkLocationSettings(settingsRequest)
-            .addOnSuccessListener {
-                gpsCheckInProgress = false
-                onGPSEnabled()
-            }
-            .addOnFailureListener { exception ->
-                if (exception is ResolvableApiException) {
-                    val request = IntentSenderRequest.Builder(exception.resolution).build()
-                    gpsEnableLauncher.launch(request)
-                } else {
-                    gpsCheckInProgress = false
-                }
-            }
-    }
-
-    // ==================== 권한 ====================
-
-    private fun requestLocationPermission() {
-        val perms = mutableListOf<String>()
-        if (ActivityCompat.checkSelfPermission(
-                this, Manifest.permission.ACCESS_FINE_LOCATION
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            perms.add(Manifest.permission.ACCESS_FINE_LOCATION)
-            perms.add(Manifest.permission.ACCESS_COARSE_LOCATION)
-        }
-        if (ActivityCompat.checkSelfPermission(
-                this, Manifest.permission.RECORD_AUDIO
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            perms.add(Manifest.permission.RECORD_AUDIO)
-        }
-        if (ActivityCompat.checkSelfPermission(
-                this, Manifest.permission.CAMERA
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            perms.add(Manifest.permission.CAMERA)
-        }
-        if (perms.isNotEmpty()) {
-            ActivityCompat.requestPermissions(this, perms.toTypedArray(), LOCATION_PERMISSION_CODE)
-        }
-    }
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == LOCATION_PERMISSION_CODE) {
-            // 이번 요청 batch 가 아니라 "현재 권한 상태"로 판단.
-            // 이전 실행에서 위치는 이미 허용됐고 이번엔 카메라/마이크만 새로 요청한 케이스
-            // → permissions 배열에 위치가 없어 zip.any 로 체크 시 항상 false 가 되는 버그 회피.
-            val locationGranted = ActivityCompat.checkSelfPermission(
-                this, Manifest.permission.ACCESS_FINE_LOCATION
-            ) == PackageManager.PERMISSION_GRANTED ||
-                    ActivityCompat.checkSelfPermission(
-                        this, Manifest.permission.ACCESS_COARSE_LOCATION
-                    ) == PackageManager.PERMISSION_GRANTED
-
-            if (locationGranted) {
-                checkAndEnableGPS()
-            } else {
-                speakTTS("위치 권한이 필요합니다. 설정에서 허용해주세요.")
-            }
-            // 부스 모드 / 신호등 확인 모드: 카메라 권한이 이번에 허용됐으면 즉시 카메라 시작
-            if ((boothModeActive || signalCheckActive) && ActivityCompat.checkSelfPermission(
-                    this, Manifest.permission.CAMERA
-                ) == PackageManager.PERMISSION_GRANTED
-            ) {
-                startCamera()
-            }
-        }
+    companion object {
+        private const val TAG = "SafeWalkNav"
     }
 }

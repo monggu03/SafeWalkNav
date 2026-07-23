@@ -39,6 +39,11 @@ class TrafficLightDetector(context: Context) {
     var lastCrosswalkVisible: Boolean = false
         private set
 
+    /** 최근 프레임에서 검출된 횡단보도의 화면 가로 중심(0~1). 안 보이면 -1. 정렬 안내용. */
+    @Volatile
+    var lastCrosswalkCenterX: Float = -1f
+        private set
+
     init {
         val options = Interpreter.Options().apply {
             setNumThreads(4)
@@ -118,6 +123,8 @@ class TrafficLightDetector(context: Context) {
         var peakAll = 0f; var peakRed = 0f; var peakGreen = 0f
         var rawAboveThreshold = 0
         var crosswalkSeen = false
+        var bestCrosswalkConf = 0f
+        var bestCrosswalkCx = -1f
 
         for (i in 0 until spec.numAnchors) {
             val row = rows[i]
@@ -129,7 +136,14 @@ class TrafficLightDetector(context: Context) {
             // peak 는 threshold 무관하게 전 anchor 집계 — "임계 아래라도 보고는 있는가" 진단용.
             if (confRed > peakRed) peakRed = confRed
             if (confGreen > peakGreen) peakGreen = confGreen
-            if (confCrosswalk >= threshold) crosswalkSeen = true
+            if (confCrosswalk >= threshold) {
+                crosswalkSeen = true
+                // 가장 확신 높은 횡단보도 anchor 의 가로 중심을 정렬 안내용으로 기록.
+                if (confCrosswalk > bestCrosswalkConf) {
+                    bestCrosswalkConf = confCrosswalk
+                    bestCrosswalkCx = decodeBbox(row[0], row[1], row[2], row[3]).xCenter
+                }
+            }
 
             val appClassId: Int
             val score: Float
@@ -150,6 +164,7 @@ class TrafficLightDetector(context: Context) {
         }
 
         lastCrosswalkVisible = crosswalkSeen
+        lastCrosswalkCenterX = if (crosswalkSeen) bestCrosswalkCx else -1f
         return PostprocessResult(nonMaxSuppression(candidates), rawAboveThreshold, peakAll, peakRed, peakGreen)
     }
 
@@ -187,6 +202,7 @@ class TrafficLightDetector(context: Context) {
         }
 
         lastCrosswalkVisible = false
+        lastCrosswalkCenterX = -1f
         return PostprocessResult(nonMaxSuppression(candidates), rawAboveThreshold, peakAll, peakRed, peakGreen)
     }
 
