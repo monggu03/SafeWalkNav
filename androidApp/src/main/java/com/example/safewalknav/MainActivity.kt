@@ -177,6 +177,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 if (detector != null && executor != null) {
                     val analysis = ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        // 원거리 신호를 위해 분석 프레임 해상도를 높인다(기본 저해상도면 640 리사이즈에서 뭉갬).
+                        .setTargetResolution(android.util.Size(1280, 720))
                         .build()
                     analysis.setAnalyzer(
                         executor,

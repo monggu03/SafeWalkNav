@@ -3,69 +3,26 @@
 //  iosApp
 //
 //  앱 전역 의존성 컨테이너 (DI Container)
-//  - KMM 객체들의 생명주기를 단 하나로 보장
 //  - SwiftUI에 environment object로 주입
+//
+//  2026-07 — 도보 내비게이션(TMap 경로·GPS·나침반·목적지 음성입력)을 전면 제거하고
+//            "열면 바로 신호 인식" 카메라 단일 기능으로 축소. 이제 TTS 와 신호등 검출기만 둔다.
 //
 
 import Foundation
-import shared
 import Combine
 
 /// 앱 전역에서 공유되는 매니저들의 컨테이너
 @MainActor
 final class AppDependencies: ObservableObject {
 
-    // MARK: - Native Swift Managers
     let tts: TtsManager
-    let locationTracker: LocationTracker
-    let headingProvider: HeadingProvider
-    let stt: SttManager
     let trafficLightDetector: TrafficLightDetector
 
-    // MARK: - KMM Managers
-    let navigationManager: NavigationManager
-
-    // MARK: - ViewModel
-    let navigationViewModel: NavigationViewModel
-
-    // MARK: - Init
     init() {
-        // 1. Swift native 매니저들
         let tts = TtsManager()
-        let locationTracker = LocationTracker()
-        let headingProvider = HeadingProvider()
-        let stt = SttManager(tts: tts)
-
-        // 2. KMM 매니저 — TMap 경로/검색 (Secrets.tMapAppKey)
-        //    신호 공공데이터(T-Data 잔여시간·서울 신호등 위치) API 는 폐기 — 신호 인식은
-        //    사용자가 횡단보도에서 카메라로 직접 확인한다.
-        let tMapAppKey = Secrets.tMapAppKey
-        #if DEBUG
-        print("[AppDependencies] TMap 키: \(tMapAppKey.isEmpty ? "없음" : "설정됨")")
-        #endif
-
-        let tMapClient = TMapApiClient(appKey: tMapAppKey)
-        let navigationManager = NavigationManager(
-            tMapApiClient: tMapClient,
-            headingLogger: NoopHeadingLogger.shared
-        )
-
-        // 3. 통합 ViewModel — STT까지 주입해서 음성 목적지 입력 지원
-        let navigationViewModel = NavigationViewModel(
-            tts: tts,
-            locationTracker: locationTracker,
-            headingProvider: headingProvider,
-            stt: stt,
-            navigationManager: navigationManager
-        )
-
-        // 4. 저장
         self.tts = tts
-        self.locationTracker = locationTracker
-        self.headingProvider = headingProvider
-        self.navigationManager = navigationManager
-        self.stt = stt
-        self.navigationViewModel = navigationViewModel
+        // 신호 판정은 detector 안의 shared SignalDecisionEngine 이 담당 (Android 와 동일 로직).
         self.trafficLightDetector = TrafficLightDetector(tts: tts)
     }
 }

@@ -20,7 +20,6 @@ struct iosAppApp: App {
         WindowGroup {
             AppRootView()
                 .environmentObject(deps)
-                .environmentObject(deps.navigationViewModel)
         }
     }
 }

@@ -2,64 +2,64 @@
 //  ContentView.swift
 //  iosApp
 //
-//  2026-06-15 — 기존 UI 전면 폐기 (서울임팩트 단계 UI 재설계).
+//  카메라 단일 기능 메인 화면 (OKO 식).
+//  앱 진입(안전 고지 통과) 즉시 후방 카메라 + 신호등 인식이 켜지고,
+//  신호 색을 전체화면 색 오버레이 + 큰 글씨 + 음성/햅틱으로 알린다.
 //
-//  이 파일은 앱이 빌드되도록 남겨둔 **빈 껍데기**입니다.
-//  로직(카메라·ML·네비게이션·음성·센서)은 전부 살아 있으며,
-//  아래 주입된 의존성으로 새 UI를 쌓아 올리면 됩니다.
+//  판정·발화·햅틱은 TrafficLightDetector 안의 shared SignalDecisionEngine 이 담당한다
+//  (Android 와 동일 로직). 이 화면은 detector 가 publish 하는 값을 관찰해 얹기만 한다.
 //
-//  살아있는 로직 진입점:
-//    - deps.navigationViewModel : 안내 상태·경로·이벤트 (폴링 200ms)
-//    - deps.trafficLightDetector: CoreML 신호등 인식 (detections / signalColor / statusText)
-//    - deps.locationTracker     : GPS
-//    - deps.headingProvider     : 나침반 (신호등 조준용)
-//    - deps.tts / deps.stt      : 음성 출력 / 음성 인식
-//    - CameraPreview(session:)  : 카메라 프리뷰 뷰 (재사용 가능, 보존됨)
+//  ⚠️ Swift 빌드는 Mac 에서 검증할 것.
 //
 
 import SwiftUI
 
 struct ContentView: View {
-
     @EnvironmentObject var deps: AppDependencies
-    @EnvironmentObject var viewModel: NavigationViewModel
-
-    /// 부스/행사 데모 화면 표시 여부 (인터뷰·데모 전용).
-    @State private var showBooth = false
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text("SafeWalk")
-                .font(.largeTitle)
-                .bold()
+        SignalScreen(detector: deps.trafficLightDetector)
+    }
+}
 
-            Text("UI 재설계 중")
-                .font(.headline)
-                .foregroundStyle(.secondary)
+/// 카메라 프리뷰 + 신호 색 오버레이 + 큰 상태 글씨. detector 의 @Published 변화를 관찰한다.
+private struct SignalScreen: View {
+    @ObservedObject var detector: TrafficLightDetector
 
-            Text("로직은 모두 살아 있습니다.\n이 화면부터 새 UI를 구성하세요.")
-                .font(.footnote)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
+    var body: some View {
+        ZStack {
+            // 1) 후방 카메라 프리뷰
+            CameraPreview(session: detector.captureSession)
+                .ignoresSafeArea()
 
-            // 부스/행사 데모 시작 버튼 (안드로이드 부스 모드와 동형).
-            Button(action: { showBooth = true }) {
-                Text("부스 데모 시작")
-                    .font(.title2)
-                    .bold()
-                    .foregroundColor(.black)
-                    .padding(.horizontal, 32)
-                    .padding(.vertical, 16)
-                    .background(Color(red: 1.0, green: 0.84, blue: 0.0))
-                    .cornerRadius(12)
+            // 2) 신호 색 전체화면 오버레이 (반투명 — 카메라가 비쳐 보임)
+            overlayColor
+                .opacity(overlayColor == .clear ? 0.0 : 0.4)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
+            // 3) 큰 상태 글씨 (초록불/빨간불/안내). 시각장애인은 음성으로 듣고,
+            //    저시력자/보호자는 색·글씨로 확인.
+            VStack {
+                Spacer()
+                Text(detector.statusText)
+                    .font(.system(size: 46, weight: .bold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .shadow(color: .black, radius: 12)
+                    .padding(24)
+                Spacer()
             }
-            .padding(.top, 32)
-            .accessibilityLabel("부스 데모 모드 시작. 신호등 인식을 바로 시작합니다.")
         }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .fullScreenCover(isPresented: $showBooth) {
-            BoothView(detector: deps.trafficLightDetector, onExit: { showBooth = false })
-        }
+        .onAppear { detector.startDetection() }
+        .onDisappear { detector.stopDetection() }
+    }
+
+    /// signalColor 가 초록/빨강이면 그 색으로 화면을 물들이고, 그 외(회색=신호 없음)면 투명.
+    /// SwiftUI Color 는 enum 이 아니므로 switch 가 아니라 == 로 비교한다.
+    private var overlayColor: Color {
+        if detector.signalColor == .green { return .green }
+        if detector.signalColor == .red { return .red }
+        return .clear
     }
 }
