@@ -13,6 +13,7 @@ import SwiftUI
 
 // MARK: - 앱 진입 게이트 (화면 상태기계 라우팅)
 struct AppRootView: View {
+    @EnvironmentObject var deps: AppDependencies
     @EnvironmentObject var coordinator: NavigationCoordinator
     /// 동의 1회 통과 여부 (영구 저장). 앱 삭제 전까지 유지 → 재실행 시 고지 생략.
     @AppStorage("hasAgreedToSafetyNotice") private var hasAgreed = false
@@ -31,8 +32,8 @@ struct AppRootView: View {
                 )
             }
         case .destinationInput:
-            // 6단계에서 DestinationInputView 로 교체.
-            PhasePlaceholderView(title: "목적지 입력(준비중)")
+            // §4-1 목적지 음성 입력.
+            DestinationInputScreen(deps: deps, coordinator: coordinator)
         case .guiding:
             // 6단계에서 FollowingController 연동 안내 화면으로 교체.
             PhasePlaceholderView(title: "안내중(준비중)")
