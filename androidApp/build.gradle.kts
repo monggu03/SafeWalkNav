@@ -5,15 +5,6 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val tmapAppKey: String = run {
-    val props = Properties()
-    val localFile = rootProject.file("local.properties")
-    if (localFile.exists()) {
-        localFile.inputStream().use { props.load(it) }
-    }
-    props.getProperty("TMAP_APP_KEY", "")
-}
-
 // Release APK 서명 설정 — keystore.properties (gitignored) 에서 로드.
 // 파일 없으면 release 빌드 시 서명 생략 (unsigned APK 산출).
 // keystore.properties 양식:
@@ -39,9 +30,6 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "1.0"
-
-        // TMap API Key - local.properties에서 로드
-        buildConfigField("String", "TMAP_APP_KEY", "\"$tmapAppKey\"")
     }
 
     signingConfigs {
@@ -92,23 +80,13 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
 
-    // Google Play Services Location (GPS)
-    implementation("com.google.android.gms:play-services-location:21.1.0")
-
-    // OkHttp / Gson 의존성은 KMM 마이그레이션으로 제거됨.
-    // TMap REST API 호출은 shared 모듈의 Ktor 기반 TMapApiClient 가 담당.
-    // Ktor Android engine 이 내부적으로 OkHttp 를 사용하므로 결과적으로 같은 transport.
+    // 네트워크(TMap REST/공공데이터)·GPS(play-services-location) 의존성은
+    // 2026-07 "신호등 집중" 전환으로 전면 제거됨. 현재 앱은 온디바이스 카메라/ML 만 사용.
 
     // Kotlin Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0")
-
-    // TMap SDK (지도 widget) — PR-UI(시각장애인 풀스크린) 마이그레이션으로 완전 제거됨.
-    // 시각장애인 사용자 시점에서 지도 화면이 필요 없으므로 SDK aar 의존 + libs/*.aar 파일 모두 삭제.
-    // 길찾기/POI 검색에 쓰는 TMap REST API 는 shared 모듈의 Ktor 기반 TMapApiClient 가 담당 (HTTP appKey 만으로 충분).
-    // 향후 디버그용 지도 시각화가 필요하면 SKT 개발자 포털에서 aar 재다운로드 후 다시 등록.
 
     // ===== ML / 카메라 / 영상 처리 (PR-1: 인프라 셋업) =====
 
