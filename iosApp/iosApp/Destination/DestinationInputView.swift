@@ -96,6 +96,15 @@ final class DestinationViewModel: ObservableObject {
             state = .error
             tts.speak("음성 인식 권한이 필요합니다. 설정에서 허용한 뒤 화면을 두 번 눌러 다시 시도해 주세요.", display: true)
         }
+
+        #if DEBUG
+        // STT 우회 자동 검증 경로 — 마이크 발화 없이 launch-arg 로 검색을 태운다.
+        // 예: -debugDestKeyword 스타벅스 -debugAutoConfirm YES
+        if let kw = UserDefaults.standard.string(forKey: "debugDestKeyword"), !kw.isEmpty {
+            print("🧪 [DEBUG] auto debugSearch(keyword: \(kw))")
+            debugSearch(keyword: kw)
+        }
+        #endif
     }
 
     // MARK: 탭 처리
@@ -149,6 +158,15 @@ final class DestinationViewModel: ObservableObject {
                 candidate = poi
                 state = .confirming
                 tts.speak("\(poi.name), \(poi.address). 여기로 안내할까요? 두 번 누르면 시작합니다.", display: true)
+
+                #if DEBUG
+                if UserDefaults.standard.bool(forKey: "debugAutoConfirm") {
+                    // 확인 TTS 가 나가도록 잠깐 뒤 자동 확정.
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    print("🧪 [DEBUG] auto confirm → \(poi.name)")
+                    confirm()
+                }
+                #endif
             }
         } catch {
             tts.speak("검색 중 오류가 발생했습니다. 다시 말씀해 주세요.", display: true)
@@ -168,6 +186,21 @@ final class DestinationViewModel: ObservableObject {
         candidate = nil
         state = .idle
     }
+
+    #if DEBUG
+    /// STT 우회 — 마이크 없이 검색 경로를 직접 태운다.
+    /// 4-2/4-3 개발 내내 "말 안 하고 테스트"용으로 유지.
+    func debugSearch(keyword: String) {
+        partial = keyword
+        state = .searching
+        Task { await search(keyword) }
+    }
+
+    /// confirming 상태에서 확정을 직접 호출(디버그 버튼용).
+    func debugConfirm() {
+        confirm()
+    }
+    #endif
 }
 
 // MARK: - View
@@ -233,6 +266,9 @@ struct DestinationInputView: View {
                 }
             }
         }
+        #if DEBUG
+        .overlay(alignment: .top) { debugBar }
+        #endif
         // 전체화면 큰 탭 영역 — 사이티드 더블탭 + VoiceOver 활성화 모두 지원.
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { viewModel.handleTap() }
@@ -243,6 +279,25 @@ struct DestinationInputView: View {
         .accessibilityAction { viewModel.handleTap() }
         .onAppear { viewModel.onAppear() }
     }
+
+    #if DEBUG
+    /// STT 우회 디버그 바 — 마이크 없이 검색/확정을 태운다. 릴리스 제외.
+    private var debugBar: some View {
+        HStack(spacing: 8) {
+            Button("DBG 검색") { viewModel.debugSearch(keyword: "스타벅스") }
+            if viewModel.state == .confirming {
+                Button("DBG 확정") { viewModel.debugConfirm() }
+            }
+        }
+        .font(.system(size: 14, weight: .bold))
+        .foregroundColor(.black)
+        .padding(6)
+        .background(Color.yellow.opacity(0.85))
+        .cornerRadius(6)
+        .padding(.top, 8)
+        .accessibilityHidden(true)
+    }
+    #endif
 
     // MARK: 상태별 문구
 
