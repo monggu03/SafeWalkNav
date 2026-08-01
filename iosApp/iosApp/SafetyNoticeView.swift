@@ -35,8 +35,8 @@ struct AppRootView: View {
             // §4-1 목적지 음성 입력.
             DestinationInputScreen(deps: deps, coordinator: coordinator)
         case .guiding:
-            // 6단계에서 FollowingController 연동 안내 화면으로 교체.
-            PhasePlaceholderView(title: "안내중(준비중)")
+            // §4-2 경로 안내 화면(§4-3에서 남은거리 갱신).
+            GuidingView()
         case .crossing:
             // 횡단보도 접근 시에만 카메라 신호 인식 (기존 화면 재사용).
             ContentView()
