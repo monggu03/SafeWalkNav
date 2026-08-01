@@ -1,10 +1,15 @@
 plugins {
     kotlin("multiplatform")
     id("com.android.library")
+    kotlin("plugin.serialization") version "1.9.22"
 }
 
-// 2026-07: 내비게이션(TMap API·직렬화·비동기) 전면 제거로 Ktor/serialization/coroutines 불필요.
-// shared 모듈은 이제 순수 로직(SignalDecisionEngine)만 담아 외부 의존성이 없다.
+// 2026-08: iOS MVP용 TMap 보행자 경로 복원 → Ktor/serialization/coroutines 재도입.
+// commonMain(Ktor core+json) / androidMain(okhttp) / iosMain(darwin) 엔진 분리.
+
+val ktorVersion = "2.3.7"
+val kotlinxSerializationVersion = "1.6.2"
+val coroutinesVersion = "1.7.3"
 
 val isRunningOnMac = System.getProperty("os.name").orEmpty().startsWith("Mac")
 
@@ -33,10 +38,22 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies {
-            // 외부 의존성 없음 — SignalDecisionEngine 은 순수 Kotlin stdlib 만 사용.
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion")
+            implementation("io.ktor:ktor-client-core:$ktorVersion")
+            implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:$kotlinxSerializationVersion")
+            implementation("io.ktor:ktor-client-content-negotiation:$ktorVersion")
+            implementation("io.ktor:ktor-serialization-kotlinx-json:$ktorVersion")
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
+        }
+        androidMain.dependencies {
+            implementation("io.ktor:ktor-client-okhttp:$ktorVersion")
+        }
+        if (isRunningOnMac) {
+            iosMain.dependencies {
+                implementation("io.ktor:ktor-client-darwin:$ktorVersion")
+            }
         }
     }
 }
