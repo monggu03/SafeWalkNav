@@ -192,7 +192,9 @@ final class DestinationViewModel: ObservableObject {
                 candidate = nil
                 candidates = cands
                 state = .selecting
-                tts.speak("\(cands.count)개의 장소를 찾았습니다. 원하는 곳을 선택하세요.", display: true)
+                // 화면 표시 개수(최대 3)와 안내 개수를 일치시킨다.
+                let shown = min(cands.count, 3)
+                tts.speak("\(shown)개의 장소를 찾았습니다. 원하는 곳을 선택하세요.", display: true)
 
                 #if DEBUG
                 if UserDefaults.standard.bool(forKey: "debugAutoConfirm") {
@@ -342,69 +344,47 @@ struct DestinationInputView: View {
         .accessibilityAction { viewModel.handleTap() }
     }
 
-    // MARK: - 후보 선택 화면(.selecting) — 각 행이 접근성 버튼
+    // MARK: - 후보 선택 화면(.selecting) — fit-우선(공간 우선), 스크롤 없음
 
+    /// 헤더 + 후보 최대 3개(남은 높이 균등 분할) + '다시 말하기' 를 한 화면에.
+    /// 글씨는 각 영역 안에서 minimumScaleFactor 로 자동 축소되어 넘치지 않는다.
     private var selectionView: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            VStack(spacing: 16) {
+            VStack(spacing: 8) {
+                // 헤더 — 고정, 필요시 축소.
                 Text("장소를 선택하세요")
-                    .accessibleText(.action)
+                    .font(.system(size: 34, weight: .bold))
                     .foregroundColor(.white)
-                    .padding(.top, 24)
-                    .accessibilityHidden(true)   // 목록 진입 안내는 이미 TTS 로 1회
+                    .minimumScaleFactor(0.6)
+                    .lineLimit(1)
+                    .accessibilityHidden(true)   // 진입 안내는 이미 TTS 로 1회
 
-                ScrollView {
-                    VStack(spacing: 12) {
-                        ForEach(viewModel.candidates) { cand in
-                            candidateRow(cand)
-                        }
-                    }
-                    .padding(.horizontal, 20)
+                // 후보 최대 3개 — 남은 세로 공간을 균등 분할(스크롤 없음).
+                ForEach(Array(viewModel.candidates.prefix(3))) { cand in
+                    CandidateCard(candidate: cand) { viewModel.select(cand.poi) }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
+                // 푸터 — 고정 높이.
                 Button(action: { viewModel.cancel() }) {
                     Text("다시 말하기")
-                        .accessibleText(.secondary)
+                        .font(.system(size: 30, weight: .bold))
                         .foregroundColor(.white)
-                        .frame(maxWidth: .infinity, minHeight: 88)
-                        .background(Color.white.opacity(0.15))
+                        .frame(maxWidth: .infinity)
+                        .minimumScaleFactor(0.6)
+                        .lineLimit(1)
                 }
+                .frame(height: 72)
+                .background(Color.white.opacity(0.15))
+                .cornerRadius(12)
                 .accessibilityLabel("다시 말하기")
                 .accessibilityHint("두 번 탭하면 목적지를 다시 말합니다.")
-                .padding(.horizontal, 20)
-                .padding(.bottom, 16)
             }
+            .padding(16)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-    }
-
-    private func candidateRow(_ cand: DestinationViewModel.Candidate) -> some View {
-        Button(action: { viewModel.select(cand.poi) }) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(cand.poi.name)
-                    .accessibleText(.secondary)
-                    .foregroundColor(.white)
-                if let d = cand.distanceM {
-                    Text("\(d)미터")
-                        .accessibleText(.secondary)
-                        .foregroundColor(.yellow)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(20)
-            .background(Color.white.opacity(0.12))
-            .cornerRadius(12)
-        }
-        // 행 전체를 하나의 접근성 버튼으로. 개별 자식 읽기 무시 → 라벨로 통합 발화.
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(rowLabel(cand))
-        .accessibilityAddTraits(.isButton)
-    }
-
-    private func rowLabel(_ cand: DestinationViewModel.Candidate) -> String {
-        if let d = cand.distanceM { return "\(cand.poi.name), \(d)미터" }
-        return cand.poi.name
     }
 
     #if DEBUG
@@ -465,5 +445,45 @@ struct DestinationInputView: View {
         case .confirming:    return "화면을 두 번 누르면 안내를 시작합니다."
         case .listening, .searching, .selecting: return ""
         }
+    }
+}
+
+// MARK: - 후보 카드 (fit-우선: 부모가 준 균등 높이 안에서 글씨 자동 축소)
+
+private struct CandidateCard: View {
+    let candidate: DestinationViewModel.Candidate
+    let onTap: () -> Void
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text(candidate.poi.name)
+                .font(.system(size: 38, weight: .bold))   // 시작은 크게
+                .foregroundColor(.white)
+                .minimumScaleFactor(0.4)                   // 길면 40%까지 자동 축소
+                .lineLimit(3)
+                .multilineTextAlignment(.center)
+            if let d = candidate.distanceM {
+                Text("\(d)미터")
+                    .font(.system(size: 32, weight: .heavy))
+                    .foregroundColor(.yellow)
+                    .minimumScaleFactor(0.5)
+                    .lineLimit(1)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)   // 부모가 준 균등 높이를 꽉 채움
+        .padding(12)
+        .background(Color(white: 0.12))
+        .cornerRadius(16)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onTap)
+        // 접근성 — 축소돼도 VoiceOver 는 전체 라벨을 읽는다.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityAddTraits(.isButton)
+    }
+
+    private var accessibilityLabel: String {
+        if let d = candidate.distanceM { return "\(candidate.poi.name), \(d)미터" }
+        return candidate.poi.name
     }
 }
