@@ -40,6 +40,8 @@ final class NavigationCoordinator: ObservableObject {
     @Published private(set) var destinationName: String?
     /// 목적지까지 남은 거리 문구(§4-3에서 갱신). nil 이면 "안내 중" 표시.
     @Published private(set) var remainingText: String?
+    /// 다음 횡단보도까지 거리 문구(§4-3에서 갱신). 남은 횡단보도 없으면 nil.
+    @Published private(set) var nextCrosswalkText: String?
 
     /// 목적지 좌표(§4-3 도착 판정용).
     private(set) var destinationCoord: CLLocationCoordinate2D?
@@ -74,10 +76,11 @@ final class NavigationCoordinator: ObservableObject {
         self.following = FollowingController(
             locationTracker: locationTracker,
             callbacks: .init(
-                enterCrossing:   { [weak self] in self?.enterCrossing() },
-                exitCrossing:    { [weak self] in self?.exitCrossing() },
-                arrive:          { [weak self] in self?.arrive() },
-                updateRemaining: { [weak self] m in self?.updateRemaining(m) }
+                enterCrossing:      { [weak self] in self?.enterCrossing() },
+                exitCrossing:       { [weak self] in self?.exitCrossing() },
+                arrive:             { [weak self] in self?.arrive() },
+                updateRemaining:    { [weak self] m in self?.updateRemaining(m) },
+                updateNextCrosswalk:{ [weak self] m in self?.updateNextCrosswalk(m) }
             )
         )
     }
@@ -154,6 +157,7 @@ final class NavigationCoordinator: ObservableObject {
         self.destinationName = poi.name
         self.destinationCoord = destCoord
         self.remainingText = nil
+        self.nextCrosswalkText = nil
         self.lastSpokenRemaining = nil
         phase = .guiding
         following.start(route: route, destination: destCoord)
@@ -195,6 +199,12 @@ final class NavigationCoordinator: ObservableObject {
         }
     }
 
+    /// 다음 횡단보도까지 남은거리 갱신(화면 표시 전용, 음성 없음).
+    private func updateNextCrosswalk(_ meters: Int?) {
+        guard let meters else { nextCrosswalkText = nil; return }
+        nextCrosswalkText = "다음 횡단보도까지 약 \((meters / 10) * 10)미터"
+    }
+
     /// 처음(목적지 입력)으로 복귀.
     func reset() {
         following.stop()
@@ -202,6 +212,7 @@ final class NavigationCoordinator: ObservableObject {
         currentRoute = nil
         destinationName = nil
         remainingText = nil
+        nextCrosswalkText = nil
         destinationCoord = nil
         lastSpokenRemaining = nil
         phase = .destinationInput

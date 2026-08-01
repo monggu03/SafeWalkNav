@@ -23,7 +23,8 @@ final class FollowingController {
         let enterCrossing: () -> Void          // 다음 횡단보도 반경 진입
         let exitCrossing: () -> Void           // 횡단보도 반경 이탈(히스테리시스)
         let arrive: () -> Void                 // 목적지 도착
-        let updateRemaining: (_ meters: Int) -> Void   // 목적지까지 남은 직선거리
+        let updateRemaining: (_ meters: Int) -> Void        // 목적지까지 남은 직선거리
+        let updateNextCrosswalk: (_ meters: Int?) -> Void   // 다음 횡단보도까지(없으면 nil)
     }
 
     // MARK: 파라미터
@@ -90,10 +91,14 @@ final class FollowingController {
         }
 
         // 2) 남은 횡단보도 없으면 도착까지 직행.
-        guard nextIdx < crosswalks.count else { return }
+        guard nextIdx < crosswalks.count else {
+            callbacks.updateNextCrosswalk(nil)
+            return
+        }
 
         // 3) 다음 횡단보도 진입/이탈.
         let dCross = haversine(cur, crosswalks[nextIdx])
+        callbacks.updateNextCrosswalk(Int(dCross.rounded()))
         if !crossingActive && dCross <= rEnter {
             crossingActive = true
             print("🚦 [Following] 횡단보도[\(nextIdx)] 진입 (\(Int(dCross))m)")
