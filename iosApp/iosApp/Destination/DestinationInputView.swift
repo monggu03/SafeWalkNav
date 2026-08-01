@@ -24,13 +24,22 @@ final class DestinationViewModel: ObservableObject {
         case idle        // 대기 — 더블탭하면 듣기 시작
         case listening   // STT 수신 중
         case searching   // POI 검색 중
-        case confirming  // 후보 확인 대기 — 더블탭하면 확정
+        case confirming  // 후보 1개 확인 대기 — 더블탭하면 확정
+        case selecting   // 후보 여러 개 — 목록에서 선택
         case error       // 실패(직후 idle 로 복귀)
+    }
+
+    /// 후보 1건(표시용 거리 포함). 거리순 정렬·목록 표시에 사용.
+    struct Candidate: Identifiable {
+        let id = UUID()
+        let poi: POIResult
+        let distanceM: Int?   // 현재 위치 없으면 nil
     }
 
     @Published private(set) var state: InputState = .idle
     @Published private(set) var partial: String = ""      // 부분 인식 텍스트(저시력자 표시용)
-    @Published private(set) var candidate: POIResult?
+    @Published private(set) var candidate: POIResult?     // .confirming(단일) 용
+    @Published private(set) var candidates: [Candidate] = []  // .selecting(복수) 용
 
     private let stt: SttManager
     private let tts: TtsManager
@@ -116,14 +125,15 @@ final class DestinationViewModel: ObservableObject {
             beginListening()
         case .confirming:
             confirm()
-        case .listening, .searching:
-            break   // 처리 중 — 무시
+        case .listening, .searching, .selecting:
+            break   // 처리 중 / 목록은 개별 행 버튼으로 — 전체화면 탭 무시
         }
     }
 
     private func beginListening() {
         partial = ""
         candidate = nil
+        candidates = []
         state = .listening
         stt.startListening()   // 권한 미허용이면 내부에서 재요청
     }
@@ -150,21 +160,45 @@ final class DestinationViewModel: ObservableObject {
                 radiusKm: 1.0,
                 maxResults: 5
             )
-            if pois.isEmpty {
+            guard !pois.isEmpty else {
                 tts.speak("결과를 찾지 못했습니다. 다시 말씀해 주세요.", display: true)
                 state = .idle
-            } else {
-                let poi = pois[0]
+                return
+            }
+
+            // 거리 계산(현재 위치 있을 때) 후 거리순 정렬.
+            let cands: [Candidate] = pois.map { poi in
+                let d = coord.map { Int(haversine($0, poi).rounded()) }
+                return Candidate(poi: poi, distanceM: d)
+            }.sorted { ($0.distanceM ?? .max) < ($1.distanceM ?? .max) }
+
+            if cands.count == 1 {
+                // 단일 후보 → 기존 확인 흐름(읽어주고 더블탭 확정).
+                let poi = cands[0].poi
                 candidate = poi
+                candidates = []
                 state = .confirming
                 tts.speak("\(poi.name), \(poi.address). 여기로 안내할까요? 두 번 누르면 시작합니다.", display: true)
 
                 #if DEBUG
                 if UserDefaults.standard.bool(forKey: "debugAutoConfirm") {
-                    // 확인 TTS 가 나가도록 잠깐 뒤 자동 확정.
                     try? await Task.sleep(nanoseconds: 1_500_000_000)
-                    print("🧪 [DEBUG] auto confirm → \(poi.name)")
+                    print("🧪 [DEBUG] auto confirm(단일) → \(poi.name)")
                     confirm()
+                }
+                #endif
+            } else {
+                // 복수 후보 → 목록 선택. 개별 항목 읽기는 VoiceOver 에 위임(이중 발화 방지).
+                candidate = nil
+                candidates = cands
+                state = .selecting
+                tts.speak("\(cands.count)개의 장소를 찾았습니다. 원하는 곳을 선택하세요.", display: true)
+
+                #if DEBUG
+                if UserDefaults.standard.bool(forKey: "debugAutoConfirm") {
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    print("🧪 [DEBUG] auto select(첫 후보) → \(cands[0].poi.name)")
+                    select(cands[0].poi)
                 }
                 #endif
             }
@@ -179,12 +213,29 @@ final class DestinationViewModel: ObservableObject {
         onConfirm(poi)
     }
 
-    /// 확인 취소 → 대기로 복귀.
+    /// 목록에서 후보 하나를 선택 → 확정.
+    func select(_ poi: POIResult) {
+        onConfirm(poi)
+    }
+
+    /// 확인/선택 취소 → 대기로 복귀(다시 말하기).
     func cancel() {
         stt.stopListening()
         partial = ""
         candidate = nil
+        candidates = []
         state = .idle
+    }
+
+    /// 두 좌표 사이 직선거리(m). 후보 거리 표시·정렬용.
+    private func haversine(_ a: CLLocationCoordinate2D, _ poi: POIResult) -> Double {
+        let R = 6_371_000.0
+        let p1 = a.latitude * .pi / 180
+        let p2 = poi.lat * .pi / 180
+        let dp = (poi.lat - a.latitude) * .pi / 180
+        let dl = (poi.lon - a.longitude) * .pi / 180
+        let h = sin(dp / 2) * sin(dp / 2) + cos(p1) * cos(p2) * sin(dl / 2) * sin(dl / 2)
+        return 2 * R * atan2(sqrt(h), sqrt(1 - h))
     }
 
     #if DEBUG
@@ -230,6 +281,20 @@ struct DestinationInputView: View {
     @ObservedObject var viewModel: DestinationViewModel
 
     var body: some View {
+        Group {
+            if viewModel.state == .selecting {
+                selectionView          // 복수 후보 — 개별 버튼(전체화면 탭 없음)
+            } else {
+                tapDrivenView          // 그 외 — 전체화면 더블탭/VoiceOver 활성화
+            }
+        }
+        .onAppear { viewModel.onAppear() }
+        .accessibleFloor()
+    }
+
+    // MARK: - 탭 구동 화면(.idle/.listening/.searching/.confirming/.error)
+
+    private var tapDrivenView: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
@@ -275,8 +340,71 @@ struct DestinationInputView: View {
         .accessibilityLabel(accessibilityLabel)
         .accessibilityHint(accessibilityHint)
         .accessibilityAction { viewModel.handleTap() }
-        .onAppear { viewModel.onAppear() }
-        .accessibleFloor()
+    }
+
+    // MARK: - 후보 선택 화면(.selecting) — 각 행이 접근성 버튼
+
+    private var selectionView: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                Text("장소를 선택하세요")
+                    .accessibleText(.action)
+                    .foregroundColor(.white)
+                    .padding(.top, 24)
+                    .accessibilityHidden(true)   // 목록 진입 안내는 이미 TTS 로 1회
+
+                ScrollView {
+                    VStack(spacing: 12) {
+                        ForEach(viewModel.candidates) { cand in
+                            candidateRow(cand)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                }
+
+                Button(action: { viewModel.cancel() }) {
+                    Text("다시 말하기")
+                        .accessibleText(.secondary)
+                        .foregroundColor(.white)
+                        .frame(maxWidth: .infinity, minHeight: 88)
+                        .background(Color.white.opacity(0.15))
+                }
+                .accessibilityLabel("다시 말하기")
+                .accessibilityHint("두 번 탭하면 목적지를 다시 말합니다.")
+                .padding(.horizontal, 20)
+                .padding(.bottom, 16)
+            }
+        }
+    }
+
+    private func candidateRow(_ cand: DestinationViewModel.Candidate) -> some View {
+        Button(action: { viewModel.select(cand.poi) }) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(cand.poi.name)
+                    .accessibleText(.secondary)
+                    .foregroundColor(.white)
+                if let d = cand.distanceM {
+                    Text("\(d)미터")
+                        .accessibleText(.secondary)
+                        .foregroundColor(.yellow)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20)
+            .background(Color.white.opacity(0.12))
+            .cornerRadius(12)
+        }
+        // 행 전체를 하나의 접근성 버튼으로. 개별 자식 읽기 무시 → 라벨로 통합 발화.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(rowLabel(cand))
+        .accessibilityAddTraits(.isButton)
+    }
+
+    private func rowLabel(_ cand: DestinationViewModel.Candidate) -> String {
+        if let d = cand.distanceM { return "\(cand.poi.name), \(d)미터" }
+        return cand.poi.name
     }
 
     #if DEBUG
@@ -306,6 +434,7 @@ struct DestinationInputView: View {
         case .listening:  return "듣고 있어요…"
         case .searching:  return "검색 중…"
         case .confirming: return confirmHeadline
+        case .selecting:  return ""   // selectionView 가 별도 렌더 — 미사용
         case .error:      return "다시 시도해 주세요"
         }
     }
@@ -325,6 +454,7 @@ struct DestinationInputView: View {
                 return "\(poi.name), \(poi.address). 여기로 안내할까요?"
             }
             return "목적지 확인"
+        case .selecting:  return ""   // selectionView 가 별도 렌더 — 미사용
         case .error:      return "오류"
         }
     }
@@ -333,7 +463,7 @@ struct DestinationInputView: View {
         switch viewModel.state {
         case .idle, .error:  return "화면을 두 번 누르면 목적지를 말합니다."
         case .confirming:    return "화면을 두 번 누르면 안내를 시작합니다."
-        case .listening, .searching: return ""
+        case .listening, .searching, .selecting: return ""
         }
     }
 }
