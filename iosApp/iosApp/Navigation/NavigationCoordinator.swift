@@ -51,6 +51,11 @@ final class NavigationCoordinator: ObservableObject {
     private let tMapClient: TMapApiClient
     private let trafficLightDetector: TrafficLightDetector
 
+    // MARK: - §4-3 추종
+    private var following: FollowingController!
+    /// 마지막으로 음성 안내한 남은거리(m) — "약 N미터" 스팸 방지.
+    private var lastSpokenRemaining: Int?
+
     init(
         tts: TtsManager,
         locationTracker: LocationTracker,
@@ -65,6 +70,16 @@ final class NavigationCoordinator: ObservableObject {
         self.tMapClient = tMapClient
         self.trafficLightDetector = trafficLightDetector
         self.phase = initialPhase
+
+        self.following = FollowingController(
+            locationTracker: locationTracker,
+            callbacks: .init(
+                enterCrossing:   { [weak self] in self?.enterCrossing() },
+                exitCrossing:    { [weak self] in self?.exitCrossing() },
+                arrive:          { [weak self] in self?.arrive() },
+                updateRemaining: { [weak self] m in self?.updateRemaining(m) }
+            )
+        )
     }
 
     // MARK: - 전이 (5단계 stub — phase 전환만)
@@ -133,41 +148,62 @@ final class NavigationCoordinator: ObservableObject {
         }
         tts.speak("도착지까지 \(distanceText), 횡단보도는 \(count)개입니다. 경로 안내를 시작하겠습니다.", display: true)
 
-        // 6) 상태 저장 후 안내 화면으로.
+        // 6) 상태 저장 후 안내 화면으로 + 추종 시작(§4-3).
+        let destCoord = CLLocationCoordinate2D(latitude: destLat, longitude: destLon)
         self.currentRoute = route
         self.destinationName = poi.name
-        self.destinationCoord = CLLocationCoordinate2D(latitude: destLat, longitude: destLon)
+        self.destinationCoord = destCoord
         self.remainingText = nil
+        self.lastSpokenRemaining = nil
         phase = .guiding
-        // §4-3: 여기서 FollowingController.start(route:) 를 호출한다.
+        following.start(route: route, destination: destCoord)
     }
 
-    /// 경로상 횡단보도 진입 → 신호 인식 화면.
+    /// 경로상 횡단보도 진입(FollowingController 콜백) → 신호 인식 화면.
     func enterCrossing() {
-        // TODO(6단계): FollowingController 가 반경 진입 감지 시 호출.
+        guard phase == .guiding else { return }
+        tts.speak("횡단보도입니다. 신호를 확인하세요.", display: true)
         trafficLightDetector.startDetection()
         phase = .crossing
     }
 
-    /// 횡단보도 이탈 → 안내 화면 복귀.
+    /// 횡단보도 이탈(FollowingController 콜백) → 안내 화면 복귀.
     func exitCrossing() {
+        guard phase == .crossing else { return }
         trafficLightDetector.stopDetection()
         phase = .guiding
     }
 
-    /// 목적지 도착.
+    /// 목적지 도착(FollowingController 콜백).
     func arrive() {
-        // TODO(6단계): "목적지에 도착했습니다." 발화 + 추종 종료.
+        following.stop()
+        trafficLightDetector.stopDetection()
+        tts.speakImmediately("목적지에 도착했습니다.", display: true)
         phase = .arrived
+    }
+
+    /// 목적지까지 남은 직선거리 갱신(FollowingController 콜백).
+    /// 화면 문구는 매번 갱신, 음성은 ~50m 단위로만.
+    private func updateRemaining(_ meters: Int) {
+        let rounded = (meters / 10) * 10
+        remainingText = "목적지까지 약 \(rounded)미터"
+        if let last = lastSpokenRemaining, last - meters < 50 { return }
+        lastSpokenRemaining = meters
+        // 크로싱 중엔 신호 안내가 우선 — 남은거리 음성은 생략.
+        if phase == .guiding {
+            tts.speak("목적지까지 약 \(rounded)미터", display: false)
+        }
     }
 
     /// 처음(목적지 입력)으로 복귀.
     func reset() {
+        following.stop()
         trafficLightDetector.stopDetection()
         currentRoute = nil
         destinationName = nil
         remainingText = nil
         destinationCoord = nil
+        lastSpokenRemaining = nil
         phase = .destinationInput
     }
 }
