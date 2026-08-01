@@ -62,6 +62,12 @@ final class FollowingController {
             .sink { [weak self] cur in self?.onLocation(cur) }
 
         print("🚶 [Following] start — 횡단보도 \(crosswalks.count)개, 도착반경 \(Int(arrivalR))m")
+        #if DEBUG
+        for (i, c) in crosswalks.enumerated() {
+            print("🚦 [Following] CW[\(i)] = \(c.latitude),\(c.longitude)")
+        }
+        print("🏁 [Following] DEST = \(destination.latitude),\(destination.longitude)")
+        #endif
     }
 
     func stop() {
