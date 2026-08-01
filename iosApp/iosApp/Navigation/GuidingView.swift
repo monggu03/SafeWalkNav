@@ -16,6 +16,7 @@ import shared   // TMapRoute
 
 struct GuidingView: View {
     @EnvironmentObject var coordinator: NavigationCoordinator
+    @EnvironmentObject var deps: AppDependencies
 
     var body: some View {
         VStack(spacing: 0) {
@@ -71,7 +72,7 @@ struct GuidingView: View {
     @ViewBuilder
     private var mapSection: some View {
         if let route = coordinator.currentRoute, let dest = coordinator.destinationCoord {
-            RouteMapView(route: route, destCoordinate: dest)
+            RouteMapView(route: route, destCoordinate: dest, locationTracker: deps.locationTracker)
         } else {
             // 경로가 아직 없으면(이론상 도달 안 함) 지도 자리는 검정.
             Color.black
@@ -91,9 +92,15 @@ struct RouteMapView: View {
     private let crosswalks: [CrosswalkPin]
     private let destCoordinate: CLLocationCoordinate2D
 
-    @State private var cameraPosition: MapCameraPosition
+    /// 현재 위치 관찰 — 첫 유효 픽스에 자동 추종으로 전환하기 위함.
+    @ObservedObject private var locationTracker: LocationTracker
 
-    init(route: TMapRoute, destCoordinate: CLLocationCoordinate2D) {
+    @State private var cameraPosition: MapCameraPosition
+    /// 자동 추종으로 이미 전환했는지(첫 전환 1회, 이후 사용자 조작 존중).
+    @State private var didFollow = false
+
+    init(route: TMapRoute, destCoordinate: CLLocationCoordinate2D, locationTracker: LocationTracker) {
+        self.locationTracker = locationTracker
         // 경로선: routePoints 우선, 비어있으면 waypoints 좌표로 폴백.
         let coords: [CLLocationCoordinate2D]
         if !route.routePoints.isEmpty {
@@ -135,6 +142,25 @@ struct RouteMapView: View {
             MapCompass()
         }
         .ignoresSafeArea(edges: .bottom)
+        // 첫 유효 위치 픽스 → 자동 추종으로 전환(북쪽 고정).
+        .onChange(of: locationTracker.currentLocation?.latitude) { _, newLat in
+            guard !didFollow, newLat != nil else { return }
+            startFollowing()
+        }
+        // 폴백: 위치가 안 와도 안내 시작 ~2초 후 추종 모드로.
+        .task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if !didFollow { startFollowing() }
+        }
+    }
+
+    /// 현재 위치 중심 자동 추종(회전 없음). 1회만 강제 전환하고
+    /// 이후 사용자가 손으로 밀면 그 조작을 존중(MapUserLocationButton 으로 복귀).
+    private func startFollowing() {
+        didFollow = true
+        withAnimation {
+            cameraPosition = .userLocation(followsHeading: false, fallback: .automatic)
+        }
     }
 
     /// 좌표들을 모두 담는 영역(약간 여유 padding). 좌표가 없으면 서울 기본.
