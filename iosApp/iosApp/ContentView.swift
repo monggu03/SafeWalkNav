@@ -43,9 +43,8 @@ private struct SignalScreen: View {
             VStack {
                 Spacer()
                 Text(detector.statusText)
-                    .font(.system(size: 46, weight: .bold))
+                    .accessibleText(.signal)
                     .foregroundColor(.white)
-                    .multilineTextAlignment(.center)
                     .shadow(color: .black, radius: 12)
                     .padding(24)
                 Spacer()
@@ -54,6 +53,7 @@ private struct SignalScreen: View {
         // start/stop 은 NavigationCoordinator 가 제어(.crossing 진입/이탈).
         // 화면이 사라지면 안전하게 정지만 보장한다.
         .onDisappear { detector.stopDetection() }
+        .accessibleFloor()
     }
 
     /// signalColor 가 초록/빨강이면 그 색으로 화면을 물들이고, 그 외(회색=신호 없음)면 투명.

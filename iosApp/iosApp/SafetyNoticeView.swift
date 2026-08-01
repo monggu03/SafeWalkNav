@@ -55,16 +55,16 @@ struct PhasePlaceholderView: View {
         VStack(spacing: 24) {
             Spacer()
             Text(title)
-                .font(.system(size: 34, weight: .bold))
+                .accessibleText(.primary)
                 .foregroundColor(.white)
-                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
                 .accessibilityLabel(title)
             if let onReset {
                 Button(action: onReset) {
                     Text("처음으로")
-                        .font(.system(size: 24, weight: .bold))
+                        .accessibleText(.action)
                         .foregroundColor(.black)
-                        .frame(maxWidth: .infinity, minHeight: 72)
+                        .frame(maxWidth: .infinity, minHeight: 88)
                         .background(Color(hex: 0xFFD700))
                 }
                 .accessibilityLabel("처음으로")
@@ -76,6 +76,7 @@ struct PhasePlaceholderView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
         .ignoresSafeArea()
+        .accessibleFloor()
     }
 }
 

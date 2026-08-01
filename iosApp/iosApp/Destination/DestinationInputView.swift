@@ -236,16 +236,14 @@ struct DestinationInputView: View {
             VStack(spacing: 20) {
                 Spacer()
                 Text(headline)
-                    .font(.system(size: 32, weight: .bold))
+                    .accessibleText(.action)
                     .foregroundColor(.white)
-                    .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
 
                 if !viewModel.partial.isEmpty {
                     Text("“\(viewModel.partial)”")
-                        .font(.system(size: 22, weight: .medium))
+                        .accessibleText(.secondary)
                         .foregroundColor(.yellow)
-                        .multilineTextAlignment(.center)
                         .padding(.horizontal, 24)
                         .accessibilityHidden(true)   // 음성은 TTS 가 주 채널
                 }
@@ -255,9 +253,9 @@ struct DestinationInputView: View {
                 if viewModel.state == .confirming {
                     Button(action: { viewModel.cancel() }) {
                         Text("다시 말하기")
-                            .font(.system(size: 22, weight: .semibold))
+                            .accessibleText(.secondary)
                             .foregroundColor(.white)
-                            .frame(maxWidth: .infinity, minHeight: 72)
+                            .frame(maxWidth: .infinity, minHeight: 88)
                             .background(Color.white.opacity(0.15))
                     }
                     .accessibilityLabel("다시 말하기")
@@ -278,6 +276,7 @@ struct DestinationInputView: View {
         .accessibilityHint(accessibilityHint)
         .accessibilityAction { viewModel.handleTap() }
         .onAppear { viewModel.onAppear() }
+        .accessibleFloor()
     }
 
     #if DEBUG

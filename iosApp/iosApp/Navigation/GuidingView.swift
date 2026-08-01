@@ -27,6 +27,7 @@ struct GuidingView: View {
         }
         .background(Color.black)
         .ignoresSafeArea(edges: .bottom)
+        .accessibleFloor()
     }
 
     // MARK: - 상단 상태 패널
@@ -34,22 +35,23 @@ struct GuidingView: View {
     private var statusPanel: some View {
         VStack(spacing: 16) {
             Spacer()
+            // 목적지명(보조) — 긴 이름은 minimumScaleFactor 로 화면 안에 수렴.
             Text(coordinator.destinationName ?? "목적지")
-                .font(.system(size: 30, weight: .bold))
+                .accessibleText(.secondary)
                 .foregroundColor(.white)
-                .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
 
+            // 남은 거리(주) — 가장 크게.
             Text(coordinator.remainingText ?? "안내 중")
-                .font(.system(size: 26, weight: .semibold))
+                .accessibleText(.primary)
                 .foregroundColor(.yellow)
-                .multilineTextAlignment(.center)
+                .padding(.horizontal, 16)
 
             if let crosswalk = coordinator.nextCrosswalkText {
                 Text(crosswalk)
-                    .font(.system(size: 22, weight: .medium))
+                    .accessibleText(.secondary)
                     .foregroundColor(.yellow.opacity(0.85))
-                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
             }
             Spacer()
         }
