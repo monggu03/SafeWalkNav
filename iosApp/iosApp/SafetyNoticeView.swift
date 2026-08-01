@@ -11,24 +11,70 @@
 
 import SwiftUI
 
-// MARK: - 앱 진입 게이트
+// MARK: - 앱 진입 게이트 (화면 상태기계 라우팅)
 struct AppRootView: View {
-    /// 동의 1회 통과 여부 (영구 저장). 앱 삭제 전까지 유지.
+    @EnvironmentObject var coordinator: NavigationCoordinator
+    /// 동의 1회 통과 여부 (영구 저장). 앱 삭제 전까지 유지 → 재실행 시 고지 생략.
     @AppStorage("hasAgreedToSafetyNotice") private var hasAgreed = false
     /// 비동의 상태 (이번 실행 한정, 저장 안 함). 재실행하면 고지가 다시 뜬다.
     @State private var declined = false
 
     var body: some View {
-        if hasAgreed {
-            ContentView()                       // 기존 음성인식 네비게이션 (변경 없음)
-        } else if declined {
-            ConsentBlockedView(onReconsider: { declined = false })
-        } else {
-            SafetyNoticeView(
-                onAgree:   { hasAgreed = true },
-                onDecline: { declined = true }
-            )
+        switch coordinator.phase {
+        case .safetyNotice:
+            if declined {
+                ConsentBlockedView(onReconsider: { declined = false })
+            } else {
+                SafetyNoticeView(
+                    onAgree:   { hasAgreed = true; coordinator.acknowledgeSafety() },
+                    onDecline: { declined = true }
+                )
+            }
+        case .destinationInput:
+            // 6단계에서 DestinationInputView 로 교체.
+            PhasePlaceholderView(title: "목적지 입력(준비중)")
+        case .guiding:
+            // 6단계에서 FollowingController 연동 안내 화면으로 교체.
+            PhasePlaceholderView(title: "안내중(준비중)")
+        case .crossing:
+            // 횡단보도 접근 시에만 카메라 신호 인식 (기존 화면 재사용).
+            ContentView()
+        case .arrived:
+            PhasePlaceholderView(title: "도착", onReset: { coordinator.reset() })
         }
+    }
+}
+
+// MARK: - 단계 임시 화면 (6단계에서 교체)
+struct PhasePlaceholderView: View {
+    let title: String
+    var onReset: (() -> Void)? = nil
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Spacer()
+            Text(title)
+                .font(.system(size: 34, weight: .bold))
+                .foregroundColor(.white)
+                .multilineTextAlignment(.center)
+                .accessibilityLabel(title)
+            if let onReset {
+                Button(action: onReset) {
+                    Text("처음으로")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(.black)
+                        .frame(maxWidth: .infinity, minHeight: 72)
+                        .background(Color(hex: 0xFFD700))
+                }
+                .accessibilityLabel("처음으로")
+                .accessibilityHint("두 번 탭하면 목적지 입력으로 돌아갑니다.")
+                .padding(.horizontal, 24)
+            }
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
+        .ignoresSafeArea()
     }
 }
 

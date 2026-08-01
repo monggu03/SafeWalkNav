@@ -51,7 +51,8 @@ private struct SignalScreen: View {
                 Spacer()
             }
         }
-        .onAppear { detector.startDetection() }
+        // start/stop 은 NavigationCoordinator 가 제어(.crossing 진입/이탈).
+        // 화면이 사라지면 안전하게 정지만 보장한다.
         .onDisappear { detector.stopDetection() }
     }
 
