@@ -20,33 +20,16 @@
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSExceptionDomains</key>
-		<dict>
-			<key>seoul.go.kr</key>
-			<dict>
-				<key>NSIncludesSubdomains</key>
-				<true/>
-				<key>NSExceptionAllowsInsecureHTTPLoads</key>
-				<true/>
-			</dict>
-		</dict>
-	</dict>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>NSCameraUsageDescription</key>
-	<string>보행자 신호등 감지를 위해 카메라가 필요합니다</string>
+	<string>횡단보도 앞에서 보행자 신호등의 색을 인식해 음성으로 알려주기 위해 카메라를 사용합니다. 촬영된 영상은 기기 안에서만 처리되며 외부로 전송되지 않습니다.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>길안내를 위해 위치 정보가 필요합니다</string>
+	<string>보행 경로를 안내하고 횡단보도 접근을 감지하기 위해 현재 위치를 사용합니다. 화면이 꺼진 상태에서도 안내가 이어지도록 백그라운드에서도 위치를 확인합니다.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>음성 명령 입력을 위해 마이크 사용이 필요합니다.</string>
-	<key>NSMotionUsageDescription</key>
-	<string>보행 중 기기 자세를 측정하기 위해 모션 센서를 사용합니다.</string>
+	<string>목적지를 말로 입력하고 음성 명령으로 길 안내를 조작할 수 있도록, 사용자가 말할 때 마이크로 음성을 입력받습니다. 입력된 음성은 기기에서 명령을 인식하는 데에만 사용됩니다.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>음성 명령으로 길 안내를 제어하기 위해 음성 인식이 필요합니다.</string>
-	<key>UIFileSharingEnabled</key>
-	<true/>
-	<key>LSSupportsOpeningDocumentsInPlace</key>
-	<true/>
+	<string>말로 입력한 목적지와 음성 명령을 글자로 변환해 길 안내를 제어하기 위해 음성 인식을 사용합니다.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -54,6 +37,10 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIStatusBarStyle</key>
@@ -61,15 +48,6 @@
 	<key>UISupportedInterfaceOrientations~iphone</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
-	</array>
-	<key>UISupportedInterfaceOrientations~ipad</key>
-	<array>
-		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationPortraitUpsideDown</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 </dict>
 </plist>
