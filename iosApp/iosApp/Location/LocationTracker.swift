@@ -42,6 +42,12 @@ final class LocationTracker: NSObject, ObservableObject {
         manager.desiredAccuracy = kCLLocationAccuracyBest         // 최고 정확도
         manager.distanceFilter = 1.0                              // 1m마다 업데이트
         manager.activityType = .fitness                           // 도보 활동에 최적화
+        // 화면이 꺼진 상태에서도 안내가 이어지도록 백그라운드 위치 갱신 허용.
+        // (Info.plist 의 UIBackgroundModes=location 이 있어야 크래시하지 않음)
+        manager.allowsBackgroundLocationUpdates = true
+        // iOS 가 "정지 상태"로 판단해 위치 갱신을 임의로 멈추는 것을 방지.
+        // 신호 대기 중 멈춰 서 있어도 추적이 끊기면 안 된다.
+        manager.pausesLocationUpdatesAutomatically = false
         authorizationStatus = manager.authorizationStatus
     }
 

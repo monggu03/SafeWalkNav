@@ -96,6 +96,13 @@ final class NavigationCoordinator: ObservableObject {
     /// 목적지 선택됨 → 경로 탐색 후 안내 시작(§4-2).
     /// tMapClient.searchPedestrianRoute 는 suspend → async 로 호출.
     func onDestinationChosen(_ poi: POIResult) async {
+        // 0) 앱 설정(API 키) 무결성 확인 — 키가 없으면 경로 탐색이 불가능하므로
+        //    크래시 대신 음성으로 안내하고 중단한다(§4-1).
+        guard Secrets.isConfigured else {
+            tts.speak("앱 설정에 문제가 있어 길 안내를 시작할 수 없습니다. 앱을 다시 설치해 주세요.", display: true)
+            return
+        }
+
         // 1) 출발 좌표 — 첫 GPS 픽스가 없으면 최대 ~5초 폴링.
         locationTracker.start()
         var start = locationTracker.currentLocation

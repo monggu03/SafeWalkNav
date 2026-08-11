@@ -35,7 +35,9 @@ final class AppDependencies: ObservableObject {
         self.locationTracker = locationTracker
         let stt = SttManager(tts: tts)
         self.stt = stt
-        let tMapClient = TMapApiClient(appKey: Secrets.tMapAppKey)
+        // 키가 없으면 빈 문자열로 생성만 하고, 실제 경로 탐색은
+        // NavigationCoordinator 에서 Secrets.isConfigured 로 차단 후 음성 안내한다.
+        let tMapClient = TMapApiClient(appKey: Secrets.tMapAppKey ?? "")
         self.tMapClient = tMapClient
 
         // 안전 고지 1회 동의 여부 → 초기 phase. 동의 이력 있으면 목적지 입력부터 시작.
