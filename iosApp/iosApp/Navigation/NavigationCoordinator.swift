@@ -3,7 +3,9 @@
 //  iosApp
 //
 //  앱 전체 화면 흐름을 관장하는 상태기계.
-//  .safetyNotice → .destinationInput → .guiding ⇄ .crossing → .arrived → (.destinationInput)
+//  .safetyNotice → .destinationInput → .guiding → .arrived → (.destinationInput)
+//  신호등 화면은 더 이상 phase(.crossing)가 아니라 하단 2탭(selectedTab)으로 분기한다.
+//  횡단 중에도 phase 는 .guiding 을 유지하고, 탭만 자동/수동으로 전환한다(§3·§4).
 //
 //  ⚠️ 5단계(골격): 전이 메서드는 phase 만 바꾸고 실제 로직(경로탐색·추종·횡단보도 감지)은
 //  6단계에서 채운다. 여기서는 상태 라우팅과 detector start/stop 제어만 담당.
@@ -22,7 +24,6 @@ enum NavPhase {
     case safetyNotice
     case destinationInput
     case guiding
-    case crossing
     case arrived
 }
 
@@ -32,6 +33,16 @@ final class NavigationCoordinator: ObservableObject {
     /// 현재 화면 단계. AppRootView 가 이 값으로 라우팅한다.
     /// 초기값은 안전 고지 1회 동의 여부에 따라 결정(init 에서 주입).
     @Published var phase: NavPhase
+
+    // MARK: - 탭 상태 (§3·§4) — 카메라 화면 표시 여부를 selectedTab 하나로 일원화
+    /// 현재 선택된 탭 (0 = 내비게이션, 1 = 신호등). MainTabView 가 관찰한다.
+    /// 자동 전환은 이 값을 직접 대입하고, 사용자 조작은 selectTabByUser(_:) 로 들어온다.
+    @Published private(set) var selectedTab: Int = 0
+    /// 사용자가 직접 탭을 조작했는가 — 자동 전환보다 우선한다(§4 규칙 2·3).
+    /// View 에서 읽을 필요가 없으므로 @Published 로 노출하지 않는다.
+    private var userOverride: Bool = false
+    /// 탭 1 진입이 자동(횡단보도 zone)이었는지 — 자동 복귀 판정용(§4 규칙 5·6).
+    private var enteredSignalTabAutomatically: Bool = false
 
     // MARK: - 안내 상태 (GuidingView 표시용)
     /// 탐색된 경로. §4-3 FollowingController 가 소비.
@@ -51,7 +62,8 @@ final class NavigationCoordinator: ObservableObject {
     private let locationTracker: LocationTracker
     private let stt: SttManager
     private let tMapClient: TMapApiClient
-    private let trafficLightDetector: TrafficLightDetector
+    // NOTE(§5): TrafficLightDetector lifecycle 은 이제 탭 1(SignalScreen)의 onAppear/onDisappear
+    //           단일 지점이 소유한다. 코디네이터는 detector 를 더 이상 직접 제어하지 않는다.
 
     // MARK: - §4-3 추종
     private var following: FollowingController!
@@ -63,14 +75,12 @@ final class NavigationCoordinator: ObservableObject {
         locationTracker: LocationTracker,
         stt: SttManager,
         tMapClient: TMapApiClient,
-        trafficLightDetector: TrafficLightDetector,
         initialPhase: NavPhase = .safetyNotice
     ) {
         self.tts = tts
         self.locationTracker = locationTracker
         self.stt = stt
         self.tMapClient = tMapClient
-        self.trafficLightDetector = trafficLightDetector
         self.phase = initialPhase
 
         self.following = FollowingController(
@@ -170,25 +180,60 @@ final class NavigationCoordinator: ObservableObject {
         following.start(route: route, destination: destCoord)
     }
 
-    /// 경로상 횡단보도 진입(FollowingController 콜백) → 신호 인식 화면.
+    /// 경로상 횡단보도 진입(FollowingController 콜백) → 신호등 탭으로 자동 전환.
+    /// phase 는 .guiding 을 유지하고 탭만 바꾼다(§3-2). detector 는 탭 1 onAppear 가 시작(§5).
     func enterCrossing() {
         guard phase == .guiding else { return }
+        // §4 규칙 2 — 사용자가 이미 수동 조작했다면 자동 전환하지 않는다(탭에 갇힘 방지).
+        guard !userOverride else { return }
+        // §4 규칙 1 — 자동 전환. 기존 발화 그대로 유지(§4-1, 변경 금지).
         tts.speak("횡단보도입니다. 신호를 확인하세요.", display: true)
-        trafficLightDetector.startDetection()
-        phase = .crossing
+        selectedTab = 1
+        enteredSignalTabAutomatically = true
     }
 
-    /// 횡단보도 이탈(FollowingController 콜백) → 안내 화면 복귀.
+    /// 횡단보도 이탈(FollowingController 콜백) → 조건부 자동 복귀.
     func exitCrossing() {
-        guard phase == .crossing else { return }
-        trafficLightDetector.stopDetection()
-        phase = .guiding
+        guard phase == .guiding else { return }
+        // §4 규칙 5 — 자동으로 들어왔던 경우에만 탭 0으로 복귀(사용자 진입은 존중, 규칙 6).
+        if enteredSignalTabAutomatically {
+            selectedTab = 0
+            enteredSignalTabAutomatically = false
+        }
+        // §4 규칙 5·6 공통 — override 리셋(다음 zone 진입 시 자동 전환 재허용).
+        userOverride = false
+    }
+
+    // MARK: - 탭 전환 (§4)
+
+    /// 사용자가 탭바로 직접 탭을 선택했을 때(MainTabView 의 Binding.set) — 규칙 3·4.
+    /// 사용자 조작은 자동 전환보다 우선하므로 userOverride 를 세운다.
+    func selectTabByUser(_ index: Int) {
+        guard index != selectedTab else { return }
+        userOverride = true                       // 규칙 3·4
+        if index == 1 {
+            enteredSignalTabAutomatically = false // 규칙 4 — 수동 진입은 자동 복귀 대상 아님
+            // §4-1 수동 전환 — 1회 안내. 자동 전환 발화("횡단보도입니다…")와 구분된다.
+            tts.speak("신호등 확인 화면입니다.", priority: .high)
+        }
+        selectedTab = index
+    }
+
+    /// 탭 플래그 초기화 + 탭 0 강제 복귀(§4 규칙 7). arrive/reset 에서 호출.
+    /// selectedTab = 0 이 되면 탭 1의 onDisappear 가 detector 를 정지시킨다(§5).
+    private func resetTabState() {
+        userOverride = false
+        enteredSignalTabAutomatically = false
+        selectedTab = 0
     }
 
     /// 목적지 도착(FollowingController 콜백).
     func arrive() {
         following.stop()
-        trafficLightDetector.stopDetection()
+        // §5 — detector 는 직접 멈추지 않는다. resetTabState 가 selectedTab = 0 을 강제하면
+        //        탭 1 onDisappear 가 정지시킨다(규칙 7 선행 완료 전제).
+        resetTabState()
+        // §6 예외 — 도착 안내는 탭 1에서도 반드시 발화한다.
         tts.speakImmediately("목적지에 도착했습니다.", display: true)
         phase = .arrived
     }
@@ -200,8 +245,9 @@ final class NavigationCoordinator: ObservableObject {
         remainingText = "목적지까지 약 \(rounded)미터"
         if let last = lastSpokenRemaining, last - meters < 50 { return }
         lastSpokenRemaining = meters
-        // 크로싱 중엔 신호 안내가 우선 — 남은거리 음성은 생략.
-        if phase == .guiding {
+        // §6-1 — 신호등 탭에 있는 동안 경로 안내 음성 억제(신호 안내가 우선). 상태 갱신은 유지.
+        //         phase 는 횡단 중에도 .guiding 이므로 selectedTab 로 판정한다(조건 삭제 아님, 교체).
+        if selectedTab != 1 {
             tts.speak("목적지까지 약 \(rounded)미터", display: false)
         }
     }
@@ -215,7 +261,8 @@ final class NavigationCoordinator: ObservableObject {
     /// 처음(목적지 입력)으로 복귀.
     func reset() {
         following.stop()
-        trafficLightDetector.stopDetection()
+        // §5 — 직접 정지 대신 탭 0 강제 복귀(§4 규칙 7)로 탭 1 onDisappear 가 detector 를 멈춘다.
+        resetTabState()
         currentRoute = nil
         destinationName = nil
         remainingText = nil

@@ -23,6 +23,7 @@ struct AppRootView: View {
     var body: some View {
         switch coordinator.phase {
         case .safetyNotice:
+            // 동의 전 — 탭바 없음(§3-1). 고지 / 차단 화면만 노출.
             if declined {
                 ConsentBlockedView(onReconsider: { declined = false })
             } else {
@@ -31,17 +32,9 @@ struct AppRootView: View {
                     onDecline: { declined = true }
                 )
             }
-        case .destinationInput:
-            // §4-1 목적지 음성 입력.
-            DestinationInputScreen(deps: deps, coordinator: coordinator)
-        case .guiding:
-            // §4-2 경로 안내 화면(§4-3에서 남은거리 갱신).
-            GuidingView()
-        case .crossing:
-            // 횡단보도 접근 시에만 카메라 신호 인식 (기존 화면 재사용).
-            ContentView()
-        case .arrived:
-            PhasePlaceholderView(title: "도착", onReset: { coordinator.reset() })
+        default:
+            // 동의 후 — 하단 2탭(내비게이션 / 신호등). 내비 phase 라우팅은 탭 0이 담당.
+            MainTabView()
         }
     }
 }

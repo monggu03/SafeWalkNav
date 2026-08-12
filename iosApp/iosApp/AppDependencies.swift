@@ -47,7 +47,6 @@ final class AppDependencies: ObservableObject {
             locationTracker: locationTracker,
             stt: stt,
             tMapClient: tMapClient,
-            trafficLightDetector: trafficLightDetector,
             initialPhase: hasAgreed ? .destinationInput : .safetyNotice
         )
     }
