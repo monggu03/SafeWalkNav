@@ -108,6 +108,9 @@ struct SignalScreen: View {
                     .foregroundColor(.white)
                     .shadow(color: .black, radius: 12)
                     .padding(24)
+                    // 라벨/값 분리 — 포커스 시 현재 신호 상태가 읽힌다. 자동 알림은 TTS 담당.
+                    .accessibilityLabel("신호등 상태")
+                    .accessibilityValue(detector.statusText)
                 Spacer()
             }
         }

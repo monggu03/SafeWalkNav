@@ -57,17 +57,32 @@ struct GuidingView: View {
         }
         .frame(maxWidth: .infinity)
         .background(Color.black)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityLabel)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(panelA11yLabel)
+        .accessibilityValue(panelA11yValue)
     }
 
-    private var accessibilityLabel: String {
-        let name = coordinator.destinationName ?? "목적지"
-        var parts = ["\(name)로 안내 중"]
+    // 라벨(무엇인지)과 값(현재 수치)을 분리 — 포커스할 때마다 갱신된 값이 읽힌다.
+    // 자동 알림은 앱 TTS 담당이므로 announcement 는 쓰지 않는다.
+    private var panelA11yLabel: String {
+        "\(coordinator.destinationName ?? "목적지")로 안내 중"
+    }
+
+    private var panelA11yValue: String {
+        var parts: [String] = []
         if let remaining = coordinator.remainingText { parts.append(remaining) }
         if let crosswalk = coordinator.nextCrosswalkText { parts.append(crosswalk) }
-        return parts.joined(separator: ". ") + "."
+        return parts.isEmpty ? "안내 중" : parts.joined(separator: ". ")
     }
+
+    // 검증 완료 시 제거 — 기존 정적 합성 라벨(값이 라벨에 고정되어 갱신 안 됨, H3):
+    // private var accessibilityLabel: String {
+    //     let name = coordinator.destinationName ?? "목적지"
+    //     var parts = ["\(name)로 안내 중"]
+    //     if let remaining = coordinator.remainingText { parts.append(remaining) }
+    //     if let crosswalk = coordinator.nextCrosswalkText { parts.append(crosswalk) }
+    //     return parts.joined(separator: ". ") + "."
+    // }
 
     // MARK: - 하단 지도
 
