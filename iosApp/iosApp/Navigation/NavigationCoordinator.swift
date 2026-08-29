@@ -69,6 +69,8 @@ final class NavigationCoordinator: ObservableObject {
     private var following: FollowingController!
     /// 마지막으로 음성 안내한 남은거리(m) — "약 N미터" 스팸 방지.
     private var lastSpokenRemaining: Int?
+    /// 마지막으로 화면에 표시한 남은거리(m) — 10m 임계 갱신용(증감 양방향).
+    private var lastDisplayedRemaining: Int?
 
     init(
         tts: TtsManager,
@@ -176,6 +178,7 @@ final class NavigationCoordinator: ObservableObject {
         self.remainingText = nil
         self.nextCrosswalkText = nil
         self.lastSpokenRemaining = nil
+        self.lastDisplayedRemaining = nil
         phase = .guiding
         following.start(route: route, destination: destCoord)
     }
@@ -239,10 +242,14 @@ final class NavigationCoordinator: ObservableObject {
     }
 
     /// 목적지까지 남은 직선거리 갱신(FollowingController 콜백).
-    /// 화면 문구는 매번 갱신, 음성은 ~50m 단위로만.
+    /// 화면 문구는 마지막 표시값과 10m 이상 차이날 때만 갱신(GPS 흔들림에 의한 표시 출렁임 방지),
+    /// 음성은 ~50m 단위로만. VoiceOver accessibilityValue 는 remainingText 를 그대로 읽으므로 함께 갱신된다.
     private func updateRemaining(_ meters: Int) {
         let rounded = (meters / 10) * 10
-        remainingText = "목적지까지 약 \(rounded)미터"
+        if lastDisplayedRemaining.map({ abs(meters - $0) >= 10 }) ?? true {
+            lastDisplayedRemaining = meters
+            remainingText = "목적지까지 약 \(rounded)미터"
+        }
         if let last = lastSpokenRemaining, last - meters < 50 { return }
         lastSpokenRemaining = meters
         // §6-1 — 신호등 탭에 있는 동안 경로 안내 음성 억제(신호 안내가 우선). 상태 갱신은 유지.
@@ -269,6 +276,7 @@ final class NavigationCoordinator: ObservableObject {
         nextCrosswalkText = nil
         destinationCoord = nil
         lastSpokenRemaining = nil
+        lastDisplayedRemaining = nil
         phase = .destinationInput
     }
 }
