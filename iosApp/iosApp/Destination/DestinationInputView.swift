@@ -100,10 +100,14 @@ final class DestinationViewModel: ObservableObject {
         let granted = await stt.requestAuthorization()
         if granted {
             state = .idle
-            tts.speak("목적지를 말씀하세요. 화면을 두 번 누르면 시작합니다.", display: true)
+            // Stage 2 이관: 조작 안내는 VoiceOver 라벨/힌트 담당 — 검증 완료 시 제거.
+            // tts.speak("목적지를 말씀하세요. 화면을 두 번 누르면 시작합니다.", display: true)
         } else {
             state = .error
-            tts.speak("음성 인식 권한이 필요합니다. 설정에서 허용한 뒤 화면을 두 번 눌러 다시 시도해 주세요.", display: true)
+            // 권한 필요(상태 정보)는 TTS 유지, "설정에서 허용 후 재시도"(조작 안내)는 .error 힌트로 이관.
+            tts.speak("음성 인식 권한이 필요합니다.", display: true)
+            // Stage 2 이관 전 원문 — 검증 완료 시 제거.
+            // tts.speak("음성 인식 권한이 필요합니다. 설정에서 허용한 뒤 화면을 두 번 눌러 다시 시도해 주세요.", display: true)
         }
 
         #if DEBUG
@@ -161,7 +165,9 @@ final class DestinationViewModel: ObservableObject {
                 maxResults: 5
             )
             guard !pois.isEmpty else {
-                tts.speak("결과를 찾지 못했습니다. 다시 말씀해 주세요.", display: true)
+                // Stage 2 이관: "다시 말씀해 주세요"(조작 안내)는 .idle 힌트 담당 — 검증 완료 시 원문 제거.
+                // tts.speak("결과를 찾지 못했습니다. 다시 말씀해 주세요.", display: true)
+                tts.speak("결과를 찾지 못했습니다.", display: true)
                 state = .idle
                 return
             }
@@ -178,7 +184,9 @@ final class DestinationViewModel: ObservableObject {
                 candidate = poi
                 candidates = []
                 state = .confirming
-                tts.speak("\(poi.name), \(poi.address). 여기로 안내할까요? 두 번 누르면 시작합니다.", display: true)
+                // Stage 2 이관: "두 번 누르면 시작합니다"(조작 안내)는 .confirming 힌트 담당 — 검증 완료 시 원문 제거.
+                // tts.speak("\(poi.name), \(poi.address). 여기로 안내할까요? 두 번 누르면 시작합니다.", display: true)
+                tts.speak("\(poi.name), \(poi.address). 여기로 안내할까요?", display: true)
 
                 #if DEBUG
                 if UserDefaults.standard.bool(forKey: "debugAutoConfirm") {
@@ -194,7 +202,9 @@ final class DestinationViewModel: ObservableObject {
                 state = .selecting
                 // 화면 표시 개수(최대 3)와 안내 개수를 일치시킨다.
                 let shown = min(cands.count, 3)
-                tts.speak("\(shown)개의 장소를 찾았습니다. 원하는 곳을 선택하세요.", display: true)
+                // Stage 2 이관: "원하는 곳을 선택하세요"(조작 안내)는 후보 카드 힌트 담당 — 검증 완료 시 원문 제거.
+                // tts.speak("\(shown)개의 장소를 찾았습니다. 원하는 곳을 선택하세요.", display: true)
+                tts.speak("\(shown)개의 장소를 찾았습니다.", display: true)
 
                 #if DEBUG
                 if UserDefaults.standard.bool(forKey: "debugAutoConfirm") {
@@ -205,7 +215,9 @@ final class DestinationViewModel: ObservableObject {
                 #endif
             }
         } catch {
-            tts.speak("검색 중 오류가 발생했습니다. 다시 말씀해 주세요.", display: true)
+            // Stage 2 이관: "다시 말씀해 주세요"(조작 안내)는 .idle 힌트 담당 — 검증 완료 시 원문 제거.
+            // tts.speak("검색 중 오류가 발생했습니다. 다시 말씀해 주세요.", display: true)
+            tts.speak("검색 중 오류가 발생했습니다.", display: true)
             state = .idle
         }
     }
@@ -441,8 +453,9 @@ struct DestinationInputView: View {
 
     private var accessibilityHint: String {
         switch viewModel.state {
-        case .idle, .error:  return "화면을 두 번 누르면 목적지를 말합니다."
-        case .confirming:    return "화면을 두 번 누르면 안내를 시작합니다."
+        case .idle:       return "화면을 두 번 누르면 목적지를 말합니다."
+        case .error:      return "설정에서 음성 인식 권한을 허용한 뒤, 화면을 두 번 누르면 다시 시도합니다."
+        case .confirming: return "화면을 두 번 누르면 안내를 시작합니다."
         case .listening, .searching, .selecting: return ""
         }
     }
@@ -479,6 +492,7 @@ private struct CandidateCard: View {
         // 접근성 — 축소돼도 VoiceOver 는 전체 라벨을 읽는다.
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
+        .accessibilityHint("두 번 누르면 이곳으로 안내를 시작합니다.")
         .accessibilityAddTraits(.isButton)
     }
 
