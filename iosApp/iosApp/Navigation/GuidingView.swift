@@ -60,6 +60,7 @@ struct GuidingView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(panelA11yLabel)
         .accessibilityValue(panelA11yValue)
+        .accessibilityIdentifier("navigation.routeStatus")
     }
 
     // 라벨(무엇인지)과 값(현재 수치)을 분리 — 포커스할 때마다 갱신된 값이 읽힌다.
@@ -156,7 +157,12 @@ struct RouteMapView: View {
         }
         .mapControls {
             MapUserLocationButton()
+                .accessibilityLabel("현재 위치 확인")
+                .accessibilityHint("지도를 현재 위치 중심으로 이동합니다.")
+                .accessibilityIdentifier("navigation.currentLocation")
             MapCompass()
+                .accessibilityLabel("지도 북쪽 방향 맞추기")
+                .accessibilityHint("지도의 위쪽을 북쪽으로 맞춥니다.")
         }
         .ignoresSafeArea(edges: .bottom)
         // 첫 유효 위치 픽스 → 자동 추종으로 전환(북쪽 고정).

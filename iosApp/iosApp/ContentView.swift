@@ -38,19 +38,23 @@ struct MainTabView: View {
     var body: some View {
         TabView(selection: tabBinding) {
             NavigationRootView()
-                .tabItem { Label("내비게이션", systemImage: "map.fill") }
+                .tabItem {
+                    Label("내비게이션", systemImage: "map.fill")
+                        .accessibilityLabel("내비게이션")
+                        .accessibilityHint("경로 안내 화면으로 이동합니다.")
+                }
                 .tag(0)
-                .accessibilityLabel("내비게이션")
-                .accessibilityHint("두 번 탭하면 경로 안내 화면으로 이동합니다.")
 
             // §5 — detector lifecycle 은 오직 이 탭의 onAppear/onDisappear 단 한 곳에 연동한다.
             SignalScreen(detector: deps.trafficLightDetector)
                 .onAppear  { deps.trafficLightDetector.startDetection() }
                 .onDisappear { deps.trafficLightDetector.stopDetection() }
-                .tabItem { Label("신호등", systemImage: "eye.fill") }
+                .tabItem {
+                    Label("신호등", systemImage: "eye.fill")
+                        .accessibilityLabel("신호등 확인")
+                        .accessibilityHint("신호등 카메라 화면으로 이동합니다.")
+                }
                 .tag(1)
-                .accessibilityLabel("신호등 확인")
-                .accessibilityHint("두 번 탭하면 신호등 카메라 화면으로 이동합니다.")
         }
     }
 }
@@ -92,12 +96,14 @@ struct SignalScreen: View {
             // 1) 후방 카메라 프리뷰
             CameraPreview(session: detector.captureSession)
                 .ignoresSafeArea()
+                .accessibilityHidden(true)
 
             // 2) 신호 색 전체화면 오버레이 (반투명 — 카메라가 비쳐 보임)
             overlayColor
                 .opacity(overlayColor == .clear ? 0.0 : 0.4)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
+                .accessibilityHidden(true)
 
             // 3) 큰 상태 글씨 (초록불/빨간불/안내). 시각장애인은 음성으로 듣고,
             //    저시력자/보호자는 색·글씨로 확인.
@@ -111,6 +117,7 @@ struct SignalScreen: View {
                     // 라벨/값 분리 — 포커스 시 현재 신호 상태가 읽힌다. 자동 알림은 TTS 담당.
                     .accessibilityLabel("신호등 상태")
                     .accessibilityValue(detector.statusText)
+                    .accessibilityIdentifier("signal.status")
                 Spacer()
             }
         }

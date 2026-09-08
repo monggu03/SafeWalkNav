@@ -324,7 +324,7 @@ struct DestinationInputView: View {
                         .accessibleText(.secondary)
                         .foregroundColor(.yellow)
                         .padding(.horizontal, 24)
-                        .accessibilityHidden(true)   // 음성은 TTS 가 주 채널
+                        .accessibilityHidden(true)   // 접근성 대체 요소의 value로 한 번만 노출
                 }
 
                 Spacer()
@@ -338,7 +338,7 @@ struct DestinationInputView: View {
                             .background(Color.white.opacity(0.15))
                     }
                     .accessibilityLabel("다시 말하기")
-                    .accessibilityHint("두 번 탭하면 목적지를 다시 말합니다.")
+                    .accessibilityHint("목적지 입력 대기로 돌아갑니다.")
                     .padding(.horizontal, 24)
                 }
             }
@@ -349,11 +349,36 @@ struct DestinationInputView: View {
         // 전체화면 큰 탭 영역 — 사이티드 더블탭 + VoiceOver 활성화 모두 지원.
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { viewModel.handleTap() }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(accessibilityLabel)
-        .accessibilityHint(accessibilityHint)
-        .accessibilityAction { viewModel.handleTap() }
+        // 시각적 전체화면 제스처는 유지하고, VoiceOver에는 서로 독립인 컨트롤을 제공한다.
+        .accessibilityRepresentation {
+            VStack(spacing: 20) {
+                if isActionable {
+                    Button(action: { viewModel.handleTap() }) {
+                        Text(accessibilityLabel)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .accessibilityLabel(accessibilityLabel)
+                    .accessibilityValue(accessibilityValue)
+                    .accessibilityHint(accessibilityHint)
+                    .accessibilityIdentifier("destination.primaryAction")
+                } else {
+                    Text(accessibilityLabel)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .accessibilityValue(accessibilityValue)
+                        .accessibilityIdentifier("destination.status")
+                }
+                if viewModel.state == .confirming {
+                    Button(action: { viewModel.cancel() }) {
+                        Text("다시 말하기")
+                            .frame(maxWidth: .infinity, minHeight: 88)
+                    }
+                        .padding(.horizontal, 24)
+                        .accessibilityHint("목적지 입력 대기로 돌아갑니다.")
+                        .accessibilityIdentifier("destination.retry")
+                }
+            }
+            .accessibilityElement(children: .contain)
+        }
     }
 
     // MARK: - 후보 선택 화면(.selecting) — fit-우선(공간 우선), 스크롤 없음
@@ -371,7 +396,8 @@ struct DestinationInputView: View {
                     .foregroundColor(.white)
                     .minimumScaleFactor(0.6)
                     .lineLimit(1)
-                    .accessibilityHidden(true)   // 진입 안내는 이미 TTS 로 1회
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityValue("검색 결과 \(min(viewModel.candidates.count, 3))개")
 
                 // 후보 최대 3개 — 남은 세로 공간을 균등 분할(스크롤 없음).
                 ForEach(Array(viewModel.candidates.prefix(3))) { cand in
@@ -392,7 +418,7 @@ struct DestinationInputView: View {
                 .background(Color.white.opacity(0.15))
                 .cornerRadius(12)
                 .accessibilityLabel("다시 말하기")
-                .accessibilityHint("두 번 탭하면 목적지를 다시 말합니다.")
+                .accessibilityHint("목적지 입력 대기로 돌아갑니다.")
             }
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -436,25 +462,42 @@ struct DestinationInputView: View {
         return "\(poi.name)\n여기로 안내할까요?\n두 번 누르면 시작"
     }
 
+    private var isActionable: Bool {
+        switch viewModel.state {
+        case .idle, .error, .confirming: return true
+        case .listening, .searching, .selecting: return false
+        }
+    }
+
     private var accessibilityLabel: String {
         switch viewModel.state {
-        case .idle:       return "목적지 입력"
-        case .listening:  return "음성 인식 중"
-        case .searching:  return "검색 중"
+        case .idle: return "목적지 음성 입력 시작"
+        case .listening: return "목적지 음성 인식 중"
+        case .searching: return "목적지 검색 중"
+        case .confirming: return "경로 안내 시작"
+        case .selecting: return "목적지 선택"
+        case .error: return "목적지 음성 입력 다시 시도"
+        }
+    }
+
+    private var accessibilityValue: String {
+        switch viewModel.state {
         case .confirming:
-            if let poi = viewModel.candidate {
-                return "\(poi.name), \(poi.address). 여기로 안내할까요?"
-            }
-            return "목적지 확인"
-        case .selecting:  return ""   // selectionView 가 별도 렌더 — 미사용
-        case .error:      return "오류"
+            guard let poi = viewModel.candidate else { return "목적지 확인 필요" }
+            let name = poi.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            return [name.isEmpty ? "이름 없는 목적지" : name, poi.address]
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: ", ")
+        case .listening, .searching: return viewModel.partial
+        case .error: return "음성 인식 또는 마이크 권한을 확인해 주세요."
+        case .idle, .selecting: return ""
         }
     }
 
     private var accessibilityHint: String {
         switch viewModel.state {
         case .idle:       return "화면을 두 번 누르면 목적지를 말합니다."
-        case .error:      return "설정에서 음성 인식 권한을 허용한 뒤, 화면을 두 번 누르면 다시 시도합니다."
+        case .error:      return "설정에서 음성 인식과 마이크 권한을 허용한 뒤, 화면을 두 번 누르면 다시 시도합니다."
         case .confirming: return "화면을 두 번 누르면 안내를 시작합니다."
         case .listening, .searching, .selecting: return ""
         }
@@ -494,10 +537,14 @@ private struct CandidateCard: View {
         .accessibilityLabel(accessibilityLabel)
         .accessibilityHint("두 번 누르면 이곳으로 안내를 시작합니다.")
         .accessibilityAddTraits(.isButton)
+        .accessibilityAction { onTap() }
+        .accessibilityValue(candidate.poi.address)
     }
 
     private var accessibilityLabel: String {
-        if let d = candidate.distanceM { return "\(candidate.poi.name), \(d)미터" }
-        return candidate.poi.name
+        let name = candidate.poi.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = name.isEmpty ? "이름 없는 목적지" : name
+        if let d = candidate.distanceM { return "\(label), 현재 위치에서 약 \(d)미터" }
+        return "\(label), 거리 정보 없음"
     }
 }

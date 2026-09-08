@@ -52,6 +52,7 @@ struct PhasePlaceholderView: View {
                 .foregroundColor(.white)
                 .padding(.horizontal, 24)
                 .accessibilityLabel(title)
+                .accessibilityAddTraits(.isHeader)
             if let onReset {
                 Button(action: onReset) {
                     Text("처음으로")
@@ -100,7 +101,7 @@ struct SafetyNoticeView: View {
                     .background(Color(hex: 0xFFD700))
             }
             .accessibilityLabel("동의하고 시작하기")
-            .accessibilityHint("두 번 탭하면 안내를 동의하고 앱을 시작합니다.")
+            .accessibilityHint("안전 고지에 동의하고 목적지 입력으로 이동합니다.")
 
             Button(action: onDecline) {
                 Text("동의하지 않음")
