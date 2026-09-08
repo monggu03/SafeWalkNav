@@ -422,7 +422,7 @@ struct DestinationInputView: View {
 
     private var headline: String {
         switch viewModel.state {
-        case .idle:       return "목적지를 말하려면\n화면을 두 번 누르세요"
+        case .idle:       return "화면을 두 번 눌러\n목적지를 말해 주세요"
         case .listening:  return "듣고 있어요…"
         case .searching:  return "검색 중…"
         case .confirming: return confirmHeadline
