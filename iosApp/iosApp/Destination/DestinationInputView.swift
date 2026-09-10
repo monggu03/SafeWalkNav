@@ -11,6 +11,7 @@
 //
 
 import SwiftUI
+import UIKit
 import Combine
 import CoreLocation
 import shared
@@ -22,6 +23,7 @@ final class DestinationViewModel: ObservableObject {
 
     enum InputState: Equatable {
         case idle        // 대기 — 더블탭하면 듣기 시작
+        case preparing   // 시작 안내 발화 중, 마이크는 아직 닫힘
         case listening   // STT 수신 중
         case searching   // POI 검색 중
         case confirming  // 후보 1개 확인 대기 — 더블탭하면 확정
@@ -49,6 +51,8 @@ final class DestinationViewModel: ObservableObject {
 
     private var cancellables = Set<AnyCancellable>()
     private var didStart = false
+    private var listeningTask: Task<Void, Never>?
+    @Published private(set) var inputError = ""
 
     init(
         stt: SttManager,
@@ -105,7 +109,7 @@ final class DestinationViewModel: ObservableObject {
         } else {
             state = .error
             // 권한 필요(상태 정보)는 TTS 유지, "설정에서 허용 후 재시도"(조작 안내)는 .error 힌트로 이관.
-            tts.speak("음성 인식 권한이 필요합니다.", display: true)
+            announceStatus("음성 인식 권한이 필요합니다.")
             // Stage 2 이관 전 원문 — 검증 완료 시 제거.
             // tts.speak("음성 인식 권한이 필요합니다. 설정에서 허용한 뒤 화면을 두 번 눌러 다시 시도해 주세요.", display: true)
         }
@@ -120,6 +124,14 @@ final class DestinationViewModel: ObservableObject {
         #endif
     }
 
+    private func announceStatus(_ text: String) {
+        if UIAccessibility.isVoiceOverRunning {
+            UIAccessibility.post(notification: .announcement, argument: text)
+        } else {
+            tts.speak(text, display: true)
+        }
+    }
+
     // MARK: 탭 처리
 
     /// 전체화면 더블탭 / VoiceOver 활성화의 단일 진입점.
@@ -129,7 +141,7 @@ final class DestinationViewModel: ObservableObject {
             beginListening()
         case .confirming:
             confirm()
-        case .listening, .searching, .selecting:
+        case .preparing, .listening, .searching, .selecting:
             break   // 처리 중 / 목록은 개별 행 버튼으로 — 전체화면 탭 무시
         }
     }
@@ -138,8 +150,20 @@ final class DestinationViewModel: ObservableObject {
         partial = ""
         candidate = nil
         candidates = []
-        state = .listening
-        stt.startListening()   // 권한 미허용이면 내부에서 재요청
+        inputError = ""
+        state = .preparing
+        listeningTask = Task { [weak self] in
+            guard let self else { return }
+            let started = await self.stt.startListeningAfterPrompt()
+            guard !Task.isCancelled else { return }
+            self.listeningTask = nil
+            if started {
+                self.state = .listening
+            } else {
+                self.inputError = self.stt.lastError ?? "음성 입력을 시작하지 못했습니다."
+                self.state = .error
+            }
+        }
     }
 
     private func handleFinal(_ text: String) {
@@ -167,7 +191,7 @@ final class DestinationViewModel: ObservableObject {
             guard !pois.isEmpty else {
                 // Stage 2 이관: "다시 말씀해 주세요"(조작 안내)는 .idle 힌트 담당 — 검증 완료 시 원문 제거.
                 // tts.speak("결과를 찾지 못했습니다. 다시 말씀해 주세요.", display: true)
-                tts.speak("결과를 찾지 못했습니다.", display: true)
+                announceStatus("결과를 찾지 못했습니다.")
                 state = .idle
                 return
             }
@@ -186,7 +210,7 @@ final class DestinationViewModel: ObservableObject {
                 state = .confirming
                 // Stage 2 이관: "두 번 누르면 시작합니다"(조작 안내)는 .confirming 힌트 담당 — 검증 완료 시 원문 제거.
                 // tts.speak("\(poi.name), \(poi.address). 여기로 안내할까요? 두 번 누르면 시작합니다.", display: true)
-                tts.speak("\(poi.name), \(poi.address). 여기로 안내할까요?", display: true)
+                announceStatus("\(poi.name), \(poi.address). 여기로 안내할까요?")
 
                 #if DEBUG
                 if UserDefaults.standard.bool(forKey: "debugAutoConfirm") {
@@ -204,7 +228,7 @@ final class DestinationViewModel: ObservableObject {
                 let shown = min(cands.count, 3)
                 // Stage 2 이관: "원하는 곳을 선택하세요"(조작 안내)는 후보 카드 힌트 담당 — 검증 완료 시 원문 제거.
                 // tts.speak("\(shown)개의 장소를 찾았습니다. 원하는 곳을 선택하세요.", display: true)
-                tts.speak("\(shown)개의 장소를 찾았습니다.", display: true)
+                announceStatus("\(shown)개의 장소를 찾았습니다.")
 
                 #if DEBUG
                 if UserDefaults.standard.bool(forKey: "debugAutoConfirm") {
@@ -217,7 +241,7 @@ final class DestinationViewModel: ObservableObject {
         } catch {
             // Stage 2 이관: "다시 말씀해 주세요"(조작 안내)는 .idle 힌트 담당 — 검증 완료 시 원문 제거.
             // tts.speak("검색 중 오류가 발생했습니다. 다시 말씀해 주세요.", display: true)
-            tts.speak("검색 중 오류가 발생했습니다.", display: true)
+            announceStatus("검색 중 오류가 발생했습니다.")
             state = .idle
         }
     }
@@ -234,11 +258,19 @@ final class DestinationViewModel: ObservableObject {
 
     /// 확인/선택 취소 → 대기로 복귀(다시 말하기).
     func cancel() {
+        listeningTask?.cancel()
+        listeningTask = nil
+        inputError = ""
         stt.stopListening()
         partial = ""
         candidate = nil
         candidates = []
         state = .idle
+    }
+
+    func onDisappear() {
+        guard state == .preparing || state == .listening else { return }
+        cancel()
     }
 
     /// 두 좌표 사이 직선거리(m). 후보 거리 표시·정렬용.
@@ -261,10 +293,6 @@ final class DestinationViewModel: ObservableObject {
         Task { await search(keyword) }
     }
 
-    /// confirming 상태에서 확정을 직접 호출(디버그 버튼용).
-    func debugConfirm() {
-        confirm()
-    }
     #endif
 }
 
@@ -303,6 +331,7 @@ struct DestinationInputView: View {
             }
         }
         .onAppear { viewModel.onAppear() }
+        .onDisappear { viewModel.onDisappear() }
         .accessibleFloor()
     }
 
@@ -337,15 +366,15 @@ struct DestinationInputView: View {
                             .frame(maxWidth: .infinity, minHeight: 88)
                             .background(Color.white.opacity(0.15))
                     }
+                    .accessibilityElement(children: .ignore)
                     .accessibilityLabel("다시 말하기")
+                    .accessibilityAddTraits(.isButton)
                     .accessibilityHint("목적지 입력 대기로 돌아갑니다.")
+                    .accessibilityAction { viewModel.cancel() }
                     .padding(.horizontal, 24)
                 }
             }
         }
-        #if DEBUG
-        .overlay(alignment: .top) { debugBar }
-        #endif
         // 전체화면 큰 탭 영역 — 사이티드 더블탭 + VoiceOver 활성화 모두 지원.
         .contentShape(Rectangle())
         .onTapGesture(count: 2) { viewModel.handleTap() }
@@ -372,9 +401,13 @@ struct DestinationInputView: View {
                         Text("다시 말하기")
                             .frame(maxWidth: .infinity, minHeight: 88)
                     }
-                        .padding(.horizontal, 24)
-                        .accessibilityHint("목적지 입력 대기로 돌아갑니다.")
-                        .accessibilityIdentifier("destination.retry")
+                    .padding(.horizontal, 24)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("다시 말하기")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint("목적지 입력 대기로 돌아갑니다.")
+                    .accessibilityAction { viewModel.cancel() }
+                    .accessibilityIdentifier("destination.retry")
                 }
             }
             .accessibilityElement(children: .contain)
@@ -396,8 +429,12 @@ struct DestinationInputView: View {
                     .foregroundColor(.white)
                     .minimumScaleFactor(0.6)
                     .lineLimit(1)
-                    .accessibilityAddTraits(.isHeader)
+                    // 제목의 내용과 역할을 동일한 접근성 요소에 명시한다.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("장소를 선택하세요")
+                    .accessibilityAddTraits([.isStaticText, .isHeader])
                     .accessibilityValue("검색 결과 \(min(viewModel.candidates.count, 3))개")
+                    .accessibilityIdentifier("destination.selectionHeading")
 
                 // 후보 최대 3개 — 남은 세로 공간을 균등 분할(스크롤 없음).
                 ForEach(Array(viewModel.candidates.prefix(3))) { cand in
@@ -417,38 +454,26 @@ struct DestinationInputView: View {
                 .frame(height: 72)
                 .background(Color.white.opacity(0.15))
                 .cornerRadius(12)
+                // 시각적 버튼 내부 텍스트는 별도 노드로 읽지 않고 버튼 자체를 읽는다.
+                .accessibilityElement(children: .ignore)
                 .accessibilityLabel("다시 말하기")
+                .accessibilityAddTraits(.isButton)
                 .accessibilityHint("목적지 입력 대기로 돌아갑니다.")
+                .accessibilityAction { viewModel.cancel() }
+                .accessibilityIdentifier("destination.selectionRetry")
             }
             .padding(16)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    #if DEBUG
-    /// STT 우회 디버그 바 — 마이크 없이 검색/확정을 태운다. 릴리스 제외.
-    private var debugBar: some View {
-        HStack(spacing: 8) {
-            Button("DBG 검색") { viewModel.debugSearch(keyword: "스타벅스") }
-            if viewModel.state == .confirming {
-                Button("DBG 확정") { viewModel.debugConfirm() }
-            }
-        }
-        .font(.system(size: 14, weight: .bold))
-        .foregroundColor(.black)
-        .padding(6)
-        .background(Color.yellow.opacity(0.85))
-        .cornerRadius(6)
-        .padding(.top, 8)
-        .accessibilityHidden(true)
-    }
-    #endif
 
     // MARK: 상태별 문구
 
     private var headline: String {
         switch viewModel.state {
         case .idle:       return "화면을 두 번 눌러\n목적지를 말해 주세요"
+        case .preparing:  return "듣기를 준비하고 있어요…"
         case .listening:  return "듣고 있어요…"
         case .searching:  return "검색 중…"
         case .confirming: return confirmHeadline
@@ -465,14 +490,15 @@ struct DestinationInputView: View {
     private var isActionable: Bool {
         switch viewModel.state {
         case .idle, .error, .confirming: return true
-        case .listening, .searching, .selecting: return false
+        case .preparing, .listening, .searching, .selecting: return false
         }
     }
 
     private var accessibilityLabel: String {
         switch viewModel.state {
         case .idle: return "목적지 음성 입력 시작"
-        case .listening: return "목적지 음성 인식 중"
+        case .preparing: return "목적지 음성 입력 준비 중"
+        case .listening: return "듣고 있어요. 목적지를 말씀해 주세요"
         case .searching: return "목적지 검색 중"
         case .confirming: return "경로 안내 시작"
         case .selecting: return "목적지 선택"
@@ -489,17 +515,17 @@ struct DestinationInputView: View {
                 .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
                 .joined(separator: ", ")
         case .listening, .searching: return viewModel.partial
-        case .error: return "음성 인식 또는 마이크 권한을 확인해 주세요."
-        case .idle, .selecting: return ""
+        case .error: return viewModel.inputError.isEmpty ? "음성 인식 또는 마이크 권한을 확인해 주세요." : viewModel.inputError
+        case .idle, .preparing, .selecting: return ""
         }
     }
 
     private var accessibilityHint: String {
         switch viewModel.state {
         case .idle:       return "화면을 두 번 누르면 목적지를 말합니다."
-        case .error:      return "설정에서 음성 인식과 마이크 권한을 허용한 뒤, 화면을 두 번 누르면 다시 시도합니다."
+        case .error:      return "권한 오류라면 설정에서 음성 인식과 마이크를 허용해 주세요. 두 번 탭하면 다시 시도합니다."
         case .confirming: return "화면을 두 번 누르면 안내를 시작합니다."
-        case .listening, .searching, .selecting: return ""
+        case .preparing, .listening, .searching, .selecting: return ""
         }
     }
 }
@@ -511,6 +537,18 @@ private struct CandidateCard: View {
     let onTap: () -> Void
 
     var body: some View {
+        Button(action: onTap) {
+            cardContent
+        }
+        .buttonStyle(.plain)
+        // 이름·거리·주소를 하나의 실제 버튼으로 제공한다.
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityValue(candidate.poi.address)
+        .accessibilityHint("선택하면 이 목적지까지 보행 경로 안내를 시작합니다.")
+        .accessibilityIdentifier("destination.candidate.\(candidate.id.uuidString)")
+    }
+
+    private var cardContent: some View {
         VStack(spacing: 4) {
             Text(candidate.poi.name)
                 .font(.system(size: 38, weight: .bold))   // 시작은 크게
@@ -531,14 +569,6 @@ private struct CandidateCard: View {
         .background(Color(white: 0.12))
         .cornerRadius(16)
         .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
-        // 접근성 — 축소돼도 VoiceOver 는 전체 라벨을 읽는다.
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityLabel)
-        .accessibilityHint("두 번 누르면 이곳으로 안내를 시작합니다.")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { onTap() }
-        .accessibilityValue(candidate.poi.address)
     }
 
     private var accessibilityLabel: String {

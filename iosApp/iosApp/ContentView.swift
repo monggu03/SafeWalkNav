@@ -38,6 +38,7 @@ struct MainTabView: View {
     var body: some View {
         TabView(selection: tabBinding) {
             NavigationRootView()
+                .background(TabBarAccessibility())
                 .tabItem {
                     Label("내비게이션", systemImage: "map.fill")
                         .accessibilityLabel("내비게이션")
@@ -47,6 +48,7 @@ struct MainTabView: View {
 
             // §5 — detector lifecycle 은 오직 이 탭의 onAppear/onDisappear 단 한 곳에 연동한다.
             SignalScreen(detector: deps.trafficLightDetector)
+                .background(TabBarAccessibility())
                 .onAppear  { deps.trafficLightDetector.startDetection() }
                 .onDisappear { deps.trafficLightDetector.stopDetection() }
                 .tabItem {

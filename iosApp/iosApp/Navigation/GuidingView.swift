@@ -60,6 +60,7 @@ struct GuidingView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(panelA11yLabel)
         .accessibilityValue(panelA11yValue)
+        .accessibilityAddTraits(.isStaticText)
         .accessibilityIdentifier("navigation.routeStatus")
     }
 
@@ -75,15 +76,6 @@ struct GuidingView: View {
         if let crosswalk = coordinator.nextCrosswalkText { parts.append(crosswalk) }
         return parts.isEmpty ? "안내 중" : parts.joined(separator: ". ")
     }
-
-    // 검증 완료 시 제거 — 기존 정적 합성 라벨(값이 라벨에 고정되어 갱신 안 됨, H3):
-    // private var accessibilityLabel: String {
-    //     let name = coordinator.destinationName ?? "목적지"
-    //     var parts = ["\(name)로 안내 중"]
-    //     if let remaining = coordinator.remainingText { parts.append(remaining) }
-    //     if let crosswalk = coordinator.nextCrosswalkText { parts.append(crosswalk) }
-    //     return parts.joined(separator: ". ") + "."
-    // }
 
     // MARK: - 하단 지도
 
@@ -157,12 +149,14 @@ struct RouteMapView: View {
         }
         .mapControls {
             MapUserLocationButton()
-                .accessibilityLabel("현재 위치 확인")
+                .accessibilityLabel("현재 위치로 이동")
+                .accessibilityValue(locationAccessibilityValue)
                 .accessibilityHint("지도를 현재 위치 중심으로 이동합니다.")
                 .accessibilityIdentifier("navigation.currentLocation")
             MapCompass()
                 .accessibilityLabel("지도 북쪽 방향 맞추기")
                 .accessibilityHint("지도의 위쪽을 북쪽으로 맞춥니다.")
+                .accessibilityIdentifier("navigation.compass")
         }
         .ignoresSafeArea(edges: .bottom)
         // 첫 유효 위치 픽스 → 자동 추종으로 전환(북쪽 고정).
@@ -174,6 +168,21 @@ struct RouteMapView: View {
         .task {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             if !didFollow { startFollowing() }
+        }
+    }
+
+    /// 이미 공개된 위치 상태만 읽는다. 좌표 존재를 현재 GPS 수신 정상으로 단정하지 않는다.
+    private var locationAccessibilityValue: String {
+        switch locationTracker.authorizationStatus {
+        case .denied: return "위치 권한이 꺼져 있습니다"
+        case .restricted: return "위치 서비스 사용이 제한되어 있습니다"
+        case .notDetermined: return "위치 권한 확인이 필요합니다"
+        case .authorizedAlways, .authorizedWhenInUse:
+            guard locationTracker.isTracking else { return "위치 추적 중지됨" }
+            return locationTracker.currentLocation == nil
+                ? "현재 위치 확인 중"
+                : "마지막으로 확인한 위치 사용 가능"
+        @unknown default: return "위치 권한 상태를 확인할 수 없습니다"
         }
     }
 

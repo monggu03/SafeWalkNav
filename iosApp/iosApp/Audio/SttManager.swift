@@ -39,6 +39,7 @@ final class SttManager: ObservableObject {
     // MARK: - 협력 객체
     /// TTS 관리자 — STT 시작 직전 강제 중지 위해 의존
     private weak var tts: TtsManager?
+    private let listeningPrompt = ListeningStartPrompt()
 
     // MARK: - 안전장치 타이머
     /// 무음 상태에서 자동 종료. 1.2s 는 한국어 중간 호흡(예: "충무로역… 1번 출구") 사이에서 끊겨서 1.8s 로 완화.
@@ -100,8 +101,25 @@ final class SttManager: ObservableObject {
     }
 
     // MARK: - 시작
+    /// VoiceOver 또는 한국어 TTS의 시작 안내가 끝난 뒤에만 마이크를 연다.
+    func startListeningAfterPrompt() async -> Bool {
+        guard await requestAuthorization(), !Task.isCancelled else { return false }
+        tts?.stop()
+        do { try configureAudioSessionForPlayback() }
+        catch {
+            lastError = "음성 안내를 준비하지 못했습니다. 다시 시도해 주세요."
+            return false
+        }
+        guard await listeningPrompt.play(), !Task.isCancelled else {
+            lastError = "듣기 시작 안내가 중단되었습니다. 다시 시도해 주세요."
+            return false
+        }
+        startListening()
+        return isListening
+    }
+
     /// 버튼 눌렀을 때 호출
-    func startListening() {
+    private func startListening() {
         // 이미 동작 중이면 무시
         guard !isListening else { return }
 
@@ -134,6 +152,7 @@ final class SttManager: ObservableObject {
     // MARK: - 중지
     /// 버튼에서 손 뗐거나, isFinal 도달했거나, 타임아웃 시 호출
     func stopListening() {
+        listeningPrompt.cancel()
         guard isListening else { return }
         isListening = false
         cleanup()
@@ -209,7 +228,7 @@ final class SttManager: ObservableObject {
     private func configureAudioSessionForPlayback() throws {
         // STT 종료 후 TTS가 다시 말할 수 있도록 .playback으로 복귀
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.playback, mode: .default, options: .duckOthers)
+        try session.setCategory(.playback, mode: .voicePrompt, options: [.mixWithOthers, .duckOthers])
         try session.setActive(true, options: .notifyOthersOnDeactivation)
     }
 
