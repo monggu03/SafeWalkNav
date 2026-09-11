@@ -81,7 +81,7 @@ final class FollowingController {
     private func onLocation(_ cur: CLLocationCoordinate2D) {
         // 1) 도착 판정 우선.
         if let dest = destination {
-            let dDest = haversine(cur, dest)
+            let dDest = Self.haversine(cur, dest)
             if dDest <= arrivalR {
                 stop()
                 callbacks.arrive()
@@ -97,7 +97,7 @@ final class FollowingController {
         }
 
         // 3) 다음 횡단보도 진입/이탈.
-        let dCross = haversine(cur, crosswalks[nextIdx])
+        let dCross = Self.haversine(cur, crosswalks[nextIdx])
         callbacks.updateNextCrosswalk(Int(dCross.rounded()))
         if !crossingActive && dCross <= rEnter {
             crossingActive = true
@@ -113,7 +113,8 @@ final class FollowingController {
 
     // MARK: haversine (직선거리 m)
 
-    private func haversine(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Double {
+    /// PedestrianSignalIndex 도 같은 구현을 쓴다(중복 구현 금지) — nonisolated: 백그라운드 파싱 큐에서도 호출됨.
+    nonisolated static func haversine(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Double {
         let R = 6_371_000.0
         let p1 = a.latitude * .pi / 180
         let p2 = b.latitude * .pi / 180
