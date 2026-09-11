@@ -44,6 +44,23 @@ class TrafficLightDetector(context: Context) {
     var lastCrosswalkCenterX: Float = -1f
         private set
 
+    /**
+     * 조준 진동([com.example.safewalknav.AimingFeedback])이 겨눌 대상의 화면 가로 중심(0~1).
+     * 없으면 -1.
+     *
+     * 우선순위: **약한 신호등 후보 > 횡단보도**.
+     * 판정용 임계([confidenceThreshold], 0.25)보다 훨씬 낮은 [AIM_CONFIDENCE] 를 쓴다.
+     * 조준은 "저기 신호등 비슷한 게 있다" 정도만 알면 충분하고, 틀려도 진동 박자가
+     * 잠깐 어긋날 뿐 **안내는 나가지 않기** 때문이다. 안전 판정은 이 값을 절대 쓰지 않는다.
+     *
+     * 횡단보도 폴백을 뒤에 두는 이유: 횡단보도는 발 앞 바닥이라 거의 항상 화면 중앙에
+     * 잡힌다. 그것만 보면 "이미 잘 맞췄다"는 잘못된 신호를 주게 된다. 신호등은 위·건너편에
+     * 있어서 실제로 겨눠야 할 방향을 알려준다.
+     */
+    @Volatile
+    var lastAimTargetCenterX: Float = -1f
+        private set
+
     init {
         val options = Interpreter.Options().apply {
             setNumThreads(4)
@@ -125,6 +142,8 @@ class TrafficLightDetector(context: Context) {
         var crosswalkSeen = false
         var bestCrosswalkConf = 0f
         var bestCrosswalkCx = -1f
+        var bestAimConf = 0f
+        var bestAimCx = -1f
 
         for (i in 0 until spec.numAnchors) {
             val row = rows[i]
@@ -151,6 +170,13 @@ class TrafficLightDetector(context: Context) {
             else { appClassId = APP_CLASS_GREEN; score = confGreen }
             if (score > peakAll) peakAll = score
 
+            // 조준용 — 판정 임계보다 훨씬 낮은 문턱. 여기 걸려도 안내는 나가지 않는다.
+            // (decodeBbox 는 이 가지에서만 도는데, 0.10 을 넘는 anchor 는 극소수라 비용 무시 가능)
+            if (score >= AIM_CONFIDENCE && score > bestAimConf && confCrosswalk <= score) {
+                bestAimConf = score
+                bestAimCx = decodeBbox(row[0], row[1], row[2], row[3]).xCenter
+            }
+
             if (score < threshold) continue
             if (confCrosswalk > score) continue   // 신호등보다 횡단보도에 가까운 anchor
             rawAboveThreshold++
@@ -165,6 +191,12 @@ class TrafficLightDetector(context: Context) {
 
         lastCrosswalkVisible = crosswalkSeen
         lastCrosswalkCenterX = if (crosswalkSeen) bestCrosswalkCx else -1f
+        // 신호등 후보가 있으면 그쪽을, 없으면 횡단보도를 조준 대상으로.
+        lastAimTargetCenterX = when {
+            bestAimCx >= 0f -> bestAimCx
+            crosswalkSeen -> bestCrosswalkCx
+            else -> -1f
+        }
         return PostprocessResult(nonMaxSuppression(candidates), rawAboveThreshold, peakAll, peakRed, peakGreen)
     }
 
@@ -177,6 +209,8 @@ class TrafficLightDetector(context: Context) {
         val candidates = ArrayList<TrafficLightDetection>(64)
         var peakAll = 0f; var peakRed = 0f; var peakGreen = 0f
         var rawAboveThreshold = 0
+        var bestAimConf = 0f
+        var bestAimCx = -1f
 
         for (i in 0 until spec.numAnchors) {
             val scoreRed = ch[4][i]
@@ -189,6 +223,12 @@ class TrafficLightDetector(context: Context) {
             if (scoreRed >= scoreGreen) { maxScore = scoreRed; maxClass = APP_CLASS_RED }
             else { maxScore = scoreGreen; maxClass = APP_CLASS_GREEN }
             if (maxScore > peakAll) peakAll = maxScore
+
+            // 조준용 (runYolov5 와 동일 규칙). 이 모델엔 횡단보도 클래스가 없어 폴백이 없다.
+            if (maxScore >= AIM_CONFIDENCE && maxScore > bestAimConf) {
+                bestAimConf = maxScore
+                bestAimCx = decodeBbox(ch[0][i], ch[1][i], ch[2][i], ch[3][i]).xCenter
+            }
 
             if (maxScore < threshold) continue
             rawAboveThreshold++
@@ -203,6 +243,7 @@ class TrafficLightDetector(context: Context) {
 
         lastCrosswalkVisible = false
         lastCrosswalkCenterX = -1f
+        lastAimTargetCenterX = bestAimCx
         return PostprocessResult(nonMaxSuppression(candidates), rawAboveThreshold, peakAll, peakRed, peakGreen)
     }
 
@@ -310,6 +351,13 @@ class TrafficLightDetector(context: Context) {
         )
 
         const val DIAGNOSTIC_CONFIDENCE_THRESHOLD: Float = 0.15f
+
+        /**
+         * 조준 진동 전용 문턱. 판정 문턱(0.25)보다 낮다.
+         * 조준은 틀려도 진동 박자만 어긋나고 **음성 안내는 나가지 않으므로** 공격적으로 잡는다.
+         * ⚠️ 이 값을 안전 판정 경로에 쓰면 안 된다.
+         */
+        private const val AIM_CONFIDENCE: Float = 0.10f
 
         // kairess data/crosswalk.yaml → names: ['Zebra_Cross', 'R_Signal', 'G_Signal']
         // ⚠️ 이 순서가 틀리면 빨간불을 초록불로 안내한다. export 시 반드시 검증할 것.
