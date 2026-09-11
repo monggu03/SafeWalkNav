@@ -193,6 +193,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 camera = provider.bindToLifecycle(
                     this, CameraSelector.DEFAULT_BACK_CAMERA, *useCases.toTypedArray()
                 )
+                val maxZoom = camera?.cameraInfo?.zoomState?.value?.maxZoomRatio ?: 1f
+                camera?.cameraControl?.setZoomRatio(minOf(2.0f, maxZoom))
                 Log.d(TAG, "Camera bound (use cases: ${useCases.size})")
             } catch (e: Exception) {
                 Log.e(TAG, "Camera bind failed", e)
