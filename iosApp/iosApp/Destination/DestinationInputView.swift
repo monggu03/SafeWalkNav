@@ -523,7 +523,7 @@ struct DestinationInputView: View {
     private var accessibilityHint: String {
         switch viewModel.state {
         case .idle:       return "화면을 두 번 누르면 목적지를 말합니다."
-        case .error:      return "권한 오류라면 설정에서 음성 인식과 마이크를 허용해 주세요. 두 번 탭하면 다시 시도합니다."
+        case .error:      return "두 번 누르면 다시 시도합니다."
         case .confirming: return "화면을 두 번 누르면 안내를 시작합니다."
         case .preparing, .listening, .searching, .selecting: return ""
         }
