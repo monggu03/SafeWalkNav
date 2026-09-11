@@ -134,3 +134,9 @@ Task {
 
 - KMP iOS 통합 공식 가이드: https://kotlinlang.org/docs/multiplatform-mobile-getting-started.html
 - shared 모듈의 NavigationManager 시그니처는 `shared/src/commonMain/kotlin/com/example/safewalknav/navigation/NavigationManager.kt` 참조
+
+## 데이터 출처
+
+- 보행등 위치: 서울시 보행등 위도 경도 현황 (서울특별시, 공공누리 제1유형, 2026-02-13 갱신)
+  - 번들 파일: `iosApp/Resources/pedlights_seoul_20260213.csv` (고유 좌표 25,378개)
+  - 앱 내 출처 표시 화면이 생기면 이 문구를 그쪽으로 옮길 것

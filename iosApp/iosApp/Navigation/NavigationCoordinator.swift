@@ -62,6 +62,10 @@ final class NavigationCoordinator: ObservableObject {
     /// 목적지 좌표(§4-3 도착 판정용).
     private(set) var destinationCoord: CLLocationCoordinate2D?
 
+    /// CROSSWALK waypoint 인덱스(route.waypoints 기준) → 신호등 상태. 경로 탐색 성공 시 채움.
+    /// ⚠️ .hasNearby 는 긍정 안내에 쓰지 않는다(매칭 반경은 경험값, 오탐률 미측정).
+    @Published private(set) var crosswalkSignalStatus: [Int: CrosswalkSignalStatus] = [:]
+
     // MARK: - 주입 의존성
     private let tts: TtsManager
     private let locationTracker: LocationTracker
@@ -120,6 +124,10 @@ final class NavigationCoordinator: ObservableObject {
             return
         }
 
+        // 0-1) 보행등 인덱스 선로드 — CSV 파싱(수십 ms)이 GPS 픽스·TMap 왕복보다 빨리 끝나
+        //      경로 성공 시점에는 status() 가 대부분 로드 완료 상태. 미완료면 .noData 로 처리(아래).
+        PedestrianSignalIndex.shared.loadIfNeeded { _ in }
+
         // 1) 출발 좌표 — 첫 GPS 픽스가 없으면 최대 ~5초 폴링.
         locationTracker.start()
         var start = locationTracker.currentLocation
@@ -164,6 +172,19 @@ final class NavigationCoordinator: ObservableObject {
             return
         }
 
+        // 4-1) 횡단보도별 신호등 상태 부착 — 서울시 보행등 데이터 기준 (횡단보도 단위 판정).
+        //      인덱스 미로드면 .noData 취급(부정 판정 금지 — 없다고 단정하지 않는다).
+        crosswalkSignalStatus = [:]
+        for (i, wp) in route.waypoints.enumerated() where wp.pointType == "CROSSWALK" {
+            let status = PedestrianSignalIndex.shared.status(lat: wp.lat, lon: wp.lon)
+            if status == nil { print("🚦 [PEDLIGHT] index not loaded — idx=\(i) → noData") }
+            crosswalkSignalStatus[i] = status ?? .noData
+            let n50 = PedestrianSignalIndex.shared.countWithin(
+                lat: wp.lat, lon: wp.lon, radiusM: PedestrianSignalIndex.matchRadiusM
+            )
+            print("🚦 [PEDLIGHT] idx=\(i) n50=\(n50.map(String.init) ?? "-") status=\(crosswalkSignalStatus[i]!)")
+        }
+
         // 5) 요약 음성.
         let distanceM = Int(route.totalDistance)
         let count = route.waypoints.filter { $0.pointType == "CROSSWALK" }.count
@@ -173,7 +194,11 @@ final class NavigationCoordinator: ObservableObject {
         } else {
             distanceText = String(format: "%.1f킬로미터", Double(distanceM) / 1000.0)
         }
-        tts.speak("도착지까지 \(distanceText), 횡단보도는 \(count)개입니다. 경로 안내를 시작하겠습니다. 안내 시작 버튼을 누르세요.", display: true)
+        // 데이터 커버리지 밖 횡단보도가 하나라도 있으면 1회 고지.
+        // .noneNearby 개수는 말하지 않는다 — 나머지에 신호등이 있다는 암시(긍정 안내)가 되므로.
+        let hasNoData = crosswalkSignalStatus.values.contains(.noData)
+        let notice = hasNoData ? " 이 지역은 신호등 정보가 확인되지 않습니다." : ""
+        tts.speak("도착지까지 \(distanceText), 횡단보도는 \(count)개입니다.\(notice) 경로 안내를 시작하겠습니다. 안내 시작 버튼을 누르세요.", display: true)
 
         // 6) 상태 저장 후 안내 준비 화면으로.
         //    추종(following.start)은 여기서 시작하지 않고 startGuidance()(버튼 탭)로 미룬다.
@@ -254,6 +279,7 @@ final class NavigationCoordinator: ObservableObject {
         //        탭 1 onDisappear 가 정지시킨다(규칙 7 선행 완료 전제).
         resetTabState()
         guidanceStarted = false
+        crosswalkSignalStatus = [:]
         // §6 예외 — 도착 안내는 탭 1에서도 반드시 발화한다.
         tts.speakImmediately("목적지에 도착했습니다.", display: true)
         phase = .arrived
@@ -289,6 +315,7 @@ final class NavigationCoordinator: ObservableObject {
         // §5 — 직접 정지 대신 탭 0 강제 복귀(§4 규칙 7)로 탭 1 onDisappear 가 detector 를 멈춘다.
         resetTabState()
         guidanceStarted = false
+        crosswalkSignalStatus = [:]
         currentRoute = nil
         destinationName = nil
         remainingText = nil
