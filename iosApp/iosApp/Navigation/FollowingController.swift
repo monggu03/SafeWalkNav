@@ -20,7 +20,9 @@ final class FollowingController {
 
     /// 좌표 이벤트를 받는 쪽(coordinator)이 채우는 콜백 묶음.
     struct Callbacks {
-        let enterCrossing: () -> Void          // 다음 횡단보도 반경 진입
+        // 다음 횡단보도 반경 진입. 인자는 경로상 몇 번째 CROSSWALK 인지(0-base, crosswalks 배열 인덱스)
+        // — coordinator 가 신호등 상태(waypoint 인덱스 키)를 찾는 데 쓴다.
+        let enterCrossing: (_ crosswalkOrdinal: Int) -> Void
         let exitCrossing: () -> Void           // 횡단보도 반경 이탈(히스테리시스)
         let arrive: () -> Void                 // 목적지 도착
         let updateRemaining: (_ meters: Int) -> Void        // 목적지까지 남은 직선거리
@@ -102,7 +104,7 @@ final class FollowingController {
         if !crossingActive && dCross <= rEnter {
             crossingActive = true
             print("🚦 [Following] 횡단보도[\(nextIdx)] 진입 (\(Int(dCross))m)")
-            callbacks.enterCrossing()
+            callbacks.enterCrossing(nextIdx)
         } else if crossingActive && dCross > rExit {
             crossingActive = false
             print("🚦 [Following] 횡단보도[\(nextIdx)] 이탈 (\(Int(dCross))m)")
