@@ -54,6 +54,11 @@ final class NavigationCoordinator: ObservableObject {
     /// 다음 횡단보도까지 거리 문구(§4-3에서 갱신). 남은 횡단보도 없으면 nil.
     @Published private(set) var nextCrosswalkText: String?
 
+    /// 「안내 시작」 버튼을 눌러 실제 추종을 시작했는가.
+    /// false = 안내 준비(버튼·지도 표시, 추종 미시작), true = 안내 중(전체 화면 StatusPanel).
+    /// .guiding 진입 시 false 로 리셋, startGuidance()에서 true.
+    @Published private(set) var guidanceStarted: Bool = false
+
     /// 목적지 좌표(§4-3 도착 판정용).
     private(set) var destinationCoord: CLLocationCoordinate2D?
 
@@ -168,9 +173,10 @@ final class NavigationCoordinator: ObservableObject {
         } else {
             distanceText = String(format: "%.1f킬로미터", Double(distanceM) / 1000.0)
         }
-        tts.speak("도착지까지 \(distanceText), 횡단보도는 \(count)개입니다. 경로 안내를 시작하겠습니다.", display: true)
+        tts.speak("도착지까지 \(distanceText), 횡단보도는 \(count)개입니다. 경로 안내를 시작하겠습니다. 안내 시작 버튼을 누르세요.", display: true)
 
-        // 6) 상태 저장 후 안내 화면으로 + 추종 시작(§4-3).
+        // 6) 상태 저장 후 안내 준비 화면으로.
+        //    추종(following.start)은 여기서 시작하지 않고 startGuidance()(버튼 탭)로 미룬다.
         let destCoord = CLLocationCoordinate2D(latitude: destLat, longitude: destLon)
         self.currentRoute = route
         self.destinationName = poi.name
@@ -179,8 +185,18 @@ final class NavigationCoordinator: ObservableObject {
         self.nextCrosswalkText = nil
         self.lastSpokenRemaining = nil
         self.lastDisplayedRemaining = nil
+        self.guidanceStarted = false
         phase = .guiding
-        following.start(route: route, destination: destCoord)
+    }
+
+    /// 「안내 시작」 버튼 탭(§4-1) → 실제 추종 시작.
+    /// 이 시점부터 위치 업데이트가 남은거리·횡단보도 안내로 이어진다.
+    func startGuidance() {
+        guard phase == .guiding, !guidanceStarted else { return }   // 중복 탭 방지
+        guard let route = currentRoute, let dest = destinationCoord else { return }
+        guidanceStarted = true
+        tts.speak("경로 안내를 시작합니다.", display: true)
+        following.start(route: route, destination: dest)
     }
 
     /// 경로상 횡단보도 진입(FollowingController 콜백) → 신호등 탭으로 자동 전환.
@@ -236,6 +252,7 @@ final class NavigationCoordinator: ObservableObject {
         // §5 — detector 는 직접 멈추지 않는다. resetTabState 가 selectedTab = 0 을 강제하면
         //        탭 1 onDisappear 가 정지시킨다(규칙 7 선행 완료 전제).
         resetTabState()
+        guidanceStarted = false
         // §6 예외 — 도착 안내는 탭 1에서도 반드시 발화한다.
         tts.speakImmediately("목적지에 도착했습니다.", display: true)
         phase = .arrived
@@ -270,6 +287,7 @@ final class NavigationCoordinator: ObservableObject {
         following.stop()
         // §5 — 직접 정지 대신 탭 0 강제 복귀(§4 규칙 7)로 탭 1 onDisappear 가 detector 를 멈춘다.
         resetTabState()
+        guidanceStarted = false
         currentRoute = nil
         destinationName = nil
         remainingText = nil
