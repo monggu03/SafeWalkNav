@@ -181,7 +181,8 @@ final class NavigationCoordinator: ObservableObject {
         self.currentRoute = route
         self.destinationName = poi.name
         self.destinationCoord = destCoord
-        self.remainingText = nil
+        // 준비 화면에서도 총 거리를 보여준다(§3). following.start 이후에는 §4-3 갱신값이 덮어쓴다.
+        self.remainingText = "목적지까지 약 \(distanceText)"
         self.nextCrosswalkText = nil
         self.lastSpokenRemaining = nil
         self.lastDisplayedRemaining = nil
