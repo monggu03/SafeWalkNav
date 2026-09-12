@@ -43,6 +43,21 @@ import kotlin.math.abs
  *
  * 또한 파형은 **티어가 바뀔 때만** 다시 건다. 프레임마다 vibrate() 를 부르면 파형이
  * 매번 처음부터 재시작해 뚝뚝 끊긴 느낌이 난다.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 진동 어휘는 셋이다 — 서로 확실히 구분돼야 한다
+ * ─────────────────────────────────────────────────────────────────────────────
+ *   1) **찾았다** (여기 [playAcquired]) — 강한 2연타. "멈춰요, 여기예요."
+ *   2) **조준 중** (이 클래스의 소나)        — 약한 단발 반복. 간격이 정렬도.
+ *   3) **판정** (MainActivity 의 vibrateShort/vibrateWarning) — 색 확정·점멸 경고.
+ *
+ * (1)이 왜 필요한가: [SignalDecisionEngine] 은 확정에 **경과 시간**을 요구한다(0.6~0.8초).
+ * 그런데 2배 줌이면 가로 화각이 20°라, 사용자가 90°/s 로 훑을 때 신호등이 화면에 머무는
+ * 시간은 0.23초뿐이다. 즉 **훑는 중에는 절대 확정되지 않는다** — 멈춰야 한다.
+ *
+ * 그런데 소나만으로는 "언제 멈춰야 하는지"를 알 수 없다. 계속 울리고 있으니까.
+ * 그래서 대상이 처음 잡히는 순간에 확실히 다른 촉감을 한 번 준다. 그래야
+ * "빠르게 훑다가 → 2연타 → 멈춤 → 0.6초 → 판정" 의 흐름이 성립한다.
  */
 class AimingFeedback(private val vibrator: Vibrator) {
 
@@ -75,18 +90,50 @@ class AimingFeedback(private val vibrator: Vibrator) {
     /** 이 시각까지는 아무것도 걸지 않는다 — 안전 진동 보호 구간. */
     private var holdOffUntilMs = 0L
 
+    /** 마지막으로 "찾았다"를 울린 시각. 검출이 깜빡일 때 연타되는 걸 막는 쿨다운용. */
+    private var lastAcquiredAtMs = 0L
+
+    /** 마지막으로 대상이 보인 시각. "충분히 오래 없었다가 다시 나타났나" 판단용. */
+    private var lastTargetSeenAtMs = 0L
+
     /**
      * 이번 프레임의 조준 대상 위치로 진동을 갱신한다.
      *
      * @param targetCenterX 대상의 화면 가로 중심(0~1). 대상이 없으면 null 또는 음수.
      */
     fun update(targetCenterX: Float?) {
-        if (!usable || armFailed) return
-        if (System.currentTimeMillis() < holdOffUntilMs) return   // 안전 진동 보호 중
+        // ⚠️ armFailed 를 여기서 보면 안 된다. 그 플래그는 **반복** 파형(repeat=0)을 거부하는
+        //    기기에서만 서고, 단발(repeat=-1)인 "찾았다"는 그 기기에서도 잘 울린다.
+        //    위에서 막으면 소나와 획득 진동이 **함께** 사라져 촉각 안내가 통째로 없어진다.
+        if (!usable) return
+        val now = System.currentTimeMillis()
+        if (now < holdOffUntilMs) return   // 안전 진동 / 획득 패턴 보호 중
         val tier = tierFor(targetCenterX)
+        val targetPresent = tier != Tier.NONE
+
+        // 아무것도 없다가 대상이 잡힌 순간 = "찾았다". 소나보다 먼저, 확실히 다른 촉감으로.
+        //
+        // 조건이 셋인 이유: 이 진동은 "멈추세요"라는 **지시**다. 검출이 경계에서 깜빡일 때
+        // 2초마다 계속 울리면, 잡히지도 않은 상태에서 계속 멈추라고 하는 꼴이 된다.
+        // 그래서 (1) 지금 막 잡혔고 (2) 그 전에 충분히 오래 없었고 (3) 쿨다운도 지났을 때만.
+        if (targetPresent &&
+            currentTier == Tier.NONE &&
+            now - lastTargetSeenAtMs >= ACQUIRE_REARM_GAP_MS &&
+            now - lastAcquiredAtMs >= ACQUIRE_COOLDOWN_MS
+        ) {
+            lastAcquiredAtMs = now
+            lastTargetSeenAtMs = now
+            playAcquired()
+            // 패턴이 끝날 때까지 소나를 막는다. currentTier 는 NONE 으로 두므로
+            // 홀드가 끝나면 다음 update 가 소나를 새로 건다.
+            holdOffUntilMs = now + ACQUIRE_HOLD_MS
+            return
+        }
+        if (targetPresent) lastTargetSeenAtMs = now
+
         if (tier == currentTier) return   // 같은 구간이면 파형 유지 — 재설정하면 끊긴다
         currentTier = tier
-        if (tier == Tier.NONE) cancel() else arm(tier.gapMs)
+        if (tier == Tier.NONE) cancel() else if (!armFailed) arm(tier.gapMs)
     }
 
     /**
@@ -119,6 +166,27 @@ class AimingFeedback(private val vibrator: Vibrator) {
             offset < ALIGNED_OFFSET -> Tier.ALIGNED
             offset < NEAR_OFFSET -> Tier.NEAR
             else -> Tier.FAR
+        }
+    }
+
+    /**
+     * "찾았다" — 강한 2연타. **한 번만** 울린다(repeat = -1).
+     *
+     * 소나(20ms · 진폭 160 · 단발)와 촉감이 확실히 달라야 하므로
+     * 더 길고(45ms) 더 세게(최대 진폭) 두 번 친다. 손등이 아니라 손바닥으로 느껴지는 세기다.
+     * 무한 반복이 아니므로 [armed] 는 건드리지 않는다 — 취소할 것이 남지 않는다.
+     */
+    private fun playAcquired() {
+        val timings = longArrayOf(0, ACQUIRE_PULSE_MS, ACQUIRE_GAP_MS, ACQUIRE_PULSE_MS)
+        val effect = if (hasAmplitudeControl) {
+            VibrationEffect.createWaveform(timings, intArrayOf(0, 255, 0, 255), -1)
+        } else {
+            VibrationEffect.createWaveform(timings, -1)
+        }
+        try {
+            vibrator.vibrate(effect)
+        } catch (_: Exception) {
+            // 보조 채널이라 실패해도 조용히 넘어간다. 소나는 계속 동작한다.
         }
     }
 
@@ -166,5 +234,29 @@ class AimingFeedback(private val vibrator: Vibrator) {
 
         private const val ALIGNED_OFFSET = 0.10f
         private const val NEAR_OFFSET = 0.25f
+
+        // ── "찾았다" 패턴 ──
+        /** 소나의 20ms 보다 확실히 길게 — 손이 "다른 신호"로 인식할 만큼. */
+        private const val ACQUIRE_PULSE_MS = 45L
+        private const val ACQUIRE_GAP_MS = 70L
+
+        /**
+         * 패턴(45+70+45 = 160ms)이 끝나고 한 박자 쉰 뒤 소나가 이어지도록.
+         * 추론 간격(333ms)보다 **짧게** 둔다 — 넘으면 추론 한 사이클을 통째로 날린다.
+         */
+        private const val ACQUIRE_HOLD_MS = 320L
+
+        /**
+         * "찾았다"를 다시 울리려면 대상이 이만큼 **안 보였어야** 한다.
+         * 쿨다운만으로는 부족하다 — 쿨다운은 빈도만 제한할 뿐,
+         * "정말 놓쳤다가 다시 찾았나"를 묻지 않는다.
+         */
+        private const val ACQUIRE_REARM_GAP_MS = 800L
+
+        /**
+         * 검출이 깜빡일 때 2연타가 연달아 터지는 걸 막는다.
+         * 너무 길면 "다음 신호등을 새로 찾았다"를 놓치므로 2초로 잡았다.
+         */
+        private const val ACQUIRE_COOLDOWN_MS = 2_000L
     }
 }

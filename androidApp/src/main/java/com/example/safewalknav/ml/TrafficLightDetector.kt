@@ -61,6 +61,18 @@ class TrafficLightDetector(context: Context) {
     var lastAimTargetCenterX: Float = -1f
         private set
 
+    // ── 전처리 크롭 → 원본 프레임 환원 계수 ──
+    // preprocess() 가 쓰고 decodeBbox() 가 읽는다. 둘 다 같은 detect() 호출 안에서,
+    // 단일 분석 스레드에서만 실행되므로 동기화가 필요 없다.
+    private var cropLeftNorm = 0f
+    private var cropTopNorm = 0f
+    private var cropWidthNorm = 1f
+    private var cropHeightNorm = 1f
+
+    // ── 재사용 버퍼 (입력 크기가 모델당 고정이라 한 번만 잡으면 된다) ──
+    private var inputBuffer: ByteBuffer? = null
+    private var pixelCache: IntArray? = null
+
     init {
         val options = Interpreter.Options().apply {
             setNumThreads(4)
@@ -248,21 +260,99 @@ class TrafficLightDetector(context: Context) {
     }
 
     /**
-     * bbox 스케일 자동 감지 — export 옵션에 따라 픽셀 좌표일 수도, 이미 0~1 정규화일 수도 있다.
+     * bbox 스케일 자동 감지 + **크롭 좌표계 → 원본 프레임 좌표계 환원**.
+     *
+     * 스케일: export 옵션에 따라 픽셀 좌표일 수도, 이미 0~1 정규화일 수도 있다.
      * raw 최댓값이 1.5 초과면 픽셀 단위로 간주 (정규화 값은 1.0 을 넘지 않는다).
+     *
+     * 환원: [preprocess] 가 프레임의 가운데 정사각형만 잘라 모델에 넣으므로, 모델이 돌려주는
+     * 0~1 좌표는 **크롭 영역 기준**이다. 이걸 그대로 흘려보내면 박스가 실제보다 커 보여서
+     * [SignalDecisionConfig.minBoxDimension] 같은 기존 임계값의 의미가 조용히 바뀐다.
+     * (세로 크롭 비율이 0.5625 면 높이가 1.78배로 부풀려진다 — 안전 임계가 그만큼 헐거워지는 셈)
+     * 그래서 여기서 원본 프레임 기준으로 되돌린다. 덕분에 엔진·조준 쪽은 아무것도 안 고쳐도 된다.
      */
     private fun decodeBbox(cx: Float, cy: Float, w: Float, h: Float): BoundingBox {
         val maxRaw = maxOf(maxOf(cx, cy), maxOf(w, h))
         val s = if (maxRaw > 1.5f) 1f / spec.inputSize else 1f
-        return BoundingBox(cx * s, cy * s, w * s, h * s)
+        return BoundingBox(
+            xCenter = cropLeftNorm + cx * s * cropWidthNorm,
+            yCenter = cropTopNorm + cy * s * cropHeightNorm,
+            width = w * s * cropWidthNorm,
+            height = h * s * cropHeightNorm,
+        )
     }
 
+    /**
+     * 카메라 프레임 → 모델 입력 텐서.
+     *
+     * ─────────────────────────────────────────────────────────────────────────
+     * 왜 '가운데 정사각 크롭' 인가 (2026-09)
+     * ─────────────────────────────────────────────────────────────────────────
+     * 이전에는 `createScaledBitmap(bitmap, 640, 640)` 으로 프레임 전체를 정사각형에
+     * **찌그러뜨려** 넣었다. 그런데 분석 프레임은 1280×720 을 세로로 회전한 720×1280 이라,
+     * 가로는 ×0.89 로 줄고 **세로는 ×0.5 로 줄었다** — 세로가 1.78배 더 눌린 것이다.
+     *
+     * 결과는 두 가지로 나빴다.
+     *  (1) 원래도 10px 남짓이던 원거리 신호등 등기구가 세로로 반 토막 나 9px 아래로 떨어졌다.
+     *      광폭 도로 건너편(30~50m)이 딱 이 구간이다.
+     *  (2) YOLOv5 는 학습 때 레터박스(비율 유지)로 들어간다. 즉 모델이 한 번도 본 적 없는
+     *      찌그러진 이미지를 추론에 먹이고 있었다. 작은 물체일수록 손해가 크다.
+     *
+     * 가운데 정사각형만 잘라 넣으면 비율이 유지되고(×0.89 등방), 같은 물체가 **세로로 약 1.7배**
+     * 크게 들어간다. 버리는 건 화면 맨 위(하늘)와 맨 아래(발밑)뿐이고,
+     * **가로 화각은 하나도 안 줄어든다** — 사용자가 좌우로 훑는 동작에는 영향이 없다.
+     *
+     * 레터박스(비율 유지 + 패딩) 대신 크롭을 고른 이유: 레터박스는 긴 변을 640 에 맞추므로
+     * 물체가 오히려 더 작아진다(≈9px). 크롭은 짧은 변을 맞추므로 더 크게 들어간다(≈16px).
+     */
     private fun preprocess(bitmap: Bitmap): ByteBuffer {
         val size = spec.inputSize
-        val scaled = Bitmap.createScaledBitmap(bitmap, size, size, true)
-        val buffer = ByteBuffer.allocateDirect(4 * size * size * 3)
-        buffer.order(ByteOrder.nativeOrder())
-        val pixels = IntArray(size * size)
+
+        // ── 1) 정사각 크롭 + 환원 계수 기록 ──
+        //
+        // 가로는 가운데. 세로는 **살짝 위로** 치우치게 자른다 ([CROP_TOP_BIAS]).
+        //
+        // 이유는 "가까운 신호등을 담기 위해"가 아니다. 실측 계산상 8m 이상 거리의 신호등은
+        // 어떤 편향값에서도 프레임에 들어오고, 6m 이하는 어떤 값에서도 안 들어온다
+        // (그 거리는 어차피 사용자가 고개를 들 듯 폰을 들어 올리는 상황이다).
+        //
+        // 진짜 이유는 **기울임 여유의 대칭성**이다. 신호등은 항상 광축보다 위에 맺히므로,
+        // 크롭을 가운데 두면 여유가 "위로 7°/아래로 13°"로 엉뚱하게 비대칭이 된다.
+        // 화면을 못 보는 사용자는 폰 각도를 정확히 맞출 수 없으니, 양쪽 여유가 비슷해야
+        // 어느 쪽으로 틀어져도 비슷하게 버틴다. 0.35 에서 위 9.6° / 아래 10.4° 로 맞는다.
+        //
+        // 대가: 발 앞 바닥이 보이기 시작하는 거리가 7.6m → 9.9m 로 멀어진다.
+        // 바닥은 횡단보도(Zebra_Cross) 검출용이고, 그건 조준 폴백에만 쓰이는 보조 정보다.
+        val side = minOf(bitmap.width, bitmap.height)
+        val left = (bitmap.width - side) / 2
+        val slack = bitmap.height - side
+        val top =
+            if (bitmap.height > bitmap.width) (slack * CROP_TOP_BIAS).toInt()
+            else slack / 2
+        cropLeftNorm = left.toFloat() / bitmap.width
+        cropTopNorm = top.toFloat() / bitmap.height
+        cropWidthNorm = side.toFloat() / bitmap.width
+        cropHeightNorm = side.toFloat() / bitmap.height
+
+        val square =
+            if (bitmap.width == side && bitmap.height == side) bitmap
+            else Bitmap.createBitmap(bitmap, left, top, side, side)
+        val scaled =
+            if (side == size) square
+            else Bitmap.createScaledBitmap(square, size, size, true)
+
+        // ── 2) float32 RGB 변환 ──
+        // 버퍼는 매 프레임 새로 잡지 않고 재사용한다. 예전에는 프레임마다
+        // ByteBuffer 4.9MB + IntArray 1.6MB 를 새로 할당해 3fps 기준 초당 20MB 가까이
+        // GC 에 던졌다. 입력 크기는 모델당 고정이라 한 번 잡으면 계속 쓸 수 있다.
+        // (detect() 는 단일 분석 스레드에서만 불리므로 동기화 불필요)
+        val buffer = inputBuffer ?: ByteBuffer
+            .allocateDirect(4 * size * size * 3)
+            .order(ByteOrder.nativeOrder())
+            .also { inputBuffer = it }
+        buffer.clear()
+
+        val pixels = pixelCache ?: IntArray(size * size).also { pixelCache = it }
         scaled.getPixels(pixels, 0, size, 0, 0, size, size)
         for (p in pixels) {
             buffer.putFloat(((p shr 16) and 0xFF) / 255.0f)
@@ -294,6 +384,9 @@ class TrafficLightDetector(context: Context) {
 
     fun close() {
         try { interpreter.close() } catch (_: Exception) {}
+        // 직접 버퍼 4.7MB 는 GC 가 회수하지만, 참조를 끊어 즉시 반환되게 한다.
+        inputBuffer = null
+        pixelCache = null
     }
 
     private data class PostprocessResult(
@@ -358,6 +451,18 @@ class TrafficLightDetector(context: Context) {
          * ⚠️ 이 값을 안전 판정 경로에 쓰면 안 된다.
          */
         private const val AIM_CONFIDENCE: Float = 0.10f
+
+        /**
+         * 세로 크롭 시 버리는 픽셀 중 **위쪽에서 버릴 비율**. 0.5 면 가운데 정렬.
+         *
+         * 0.35 = 위에서 35%, 아래에서 65% 를 버린다 → 시야가 위로 약 2° 올라가고,
+         * 30m 신호등 기준 기울임 여유가 위 9.6° / 아래 10.4° 로 거의 대칭이 된다.
+         *
+         * ⚠️ 실기에서 조정할 첫 번째 상수다. 평가 킷의 `조준→첫판독(초)` 과
+         * `30초내 성공률` 을 보고 맞출 것. 올리면(→0.5) 바닥이 더 보이고,
+         * 내리면(→0.2) 위쪽 여유가 늘지만 바닥을 잃는다.
+         */
+        private const val CROP_TOP_BIAS: Float = 0.35f
 
         // kairess data/crosswalk.yaml → names: ['Zebra_Cross', 'R_Signal', 'G_Signal']
         // ⚠️ 이 순서가 틀리면 빨간불을 초록불로 안내한다. export 시 반드시 검증할 것.

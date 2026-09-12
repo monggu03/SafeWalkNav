@@ -60,6 +60,7 @@ class SignalDecisionEngine(
     // ── 상태 (순수 데이터. 부수효과 없음) ──
     private var currentColorCandidate: Int = COLOR_NONE   // 안정성 필터에서 추적 중인 색
     private var colorStreak: Int = 0                       // 연속 검출 수
+    private var candidateSinceMs: Long = 0L                // 현재 후보 스트릭이 시작된 시각
     private var lastConfirmedColor: Int = COLOR_NONE       // 확정된 마지막 색
     private var lastHeartbeatMs: Long = 0L                 // 마지막 반복 안내 시각
     private var lastValidatedMs: Long = 0L                 // 마지막 유효 검출 시각 (timeout 판정)
@@ -76,6 +77,7 @@ class SignalDecisionEngine(
     fun reset() {
         currentColorCandidate = COLOR_NONE
         colorStreak = 0
+        candidateSinceMs = 0L
         lastConfirmedColor = COLOR_NONE
         lastHeartbeatMs = 0L
         lastValidatedMs = 0L
@@ -129,6 +131,7 @@ class SignalDecisionEngine(
         // ── 4) 검출 타임아웃 → 상태 리셋 ──
         //    유효 검출이 오래 끊겼다 다시 오면 이전 확정색을 신뢰하지 않는다
         //    (그 사이 신호가 바뀌었을 수 있음).
+        val observationGapMs = if (lastValidatedMs > 0L) nowMs - lastValidatedMs else 0L
         if (lastValidatedMs > 0L && nowMs - lastValidatedMs > config.detectionTimeoutMs) {
             currentColorCandidate = COLOR_NONE
             colorStreak = 0
@@ -136,20 +139,54 @@ class SignalDecisionEngine(
         }
         lastValidatedMs = nowMs
 
+        // ── 4-b) 관찰이 끊겼으면 스트릭을 새로 시작한다 ──
+        //
+        // ⚠️ 이게 없으면 시간 바닥이 뚫린다. 검출이 없거나 확신이 모자란 프레임은
+        //    위에서 조기 반환하므로 colorStreak 을 건드리지 않는다. 그래서
+        //    "초록 1프레임 → 10초 공백 → 초록 4프레임(160ms)" 같은 시퀀스가
+        //    스트릭 5 + 경과 10초로 통과해 버린다. 확정 프레임 중 4장이 160ms 안에
+        //    몰려 있는데도 말이다 — 시간 바닥으로 막으려던 바로 그 상황이다.
+        //
+        //    시간 바닥이 보장해야 하는 건 "스트릭이 오래 전에 시작됐다"가 아니라
+        //    "그동안 **계속** 같은 색을 보고 있었다"이다. 그래서 관찰이 끊기면 리셋한다.
+        if (observationGapMs > config.maxObservationGapMs) {
+            currentColorCandidate = COLOR_NONE
+            colorStreak = 0
+        }
+
         // ── 5) 안정성 필터 — 빨강은 빠르게, 초록은 보수적으로 확정 ──
+        //
+        // 조건이 **두 개**다: 연속 프레임 수 AND 경과 시간. 둘 다 채워야 확정된다.
+        // 왜 시간까지 보는지는 [SignalDecisionConfig.redStabilityMs] 주석 참조.
         if (detectedColor == currentColorCandidate) {
             colorStreak++
         } else {
             currentColorCandidate = detectedColor
             colorStreak = 1
+            candidateSinceMs = nowMs
         }
         val requiredFrames = when {
             detectedColor == red -> config.redStabilityFrames
             lastConfirmedColor == red -> config.greenTransitionStabilityFrames
             else -> config.greenStabilityFrames
         }
-        if (colorStreak < requiredFrames) {
-            return SignalDecision.Silent(SilentReason.STABILITY_PENDING, colorStreak, requiredFrames, detectedColor)
+        val requiredMs = when {
+            detectedColor == red -> config.redStabilityMs
+            lastConfirmedColor == red -> config.greenTransitionStabilityMs
+            else -> config.greenStabilityMs
+        }
+        val elapsedMs = nowMs - candidateSinceMs
+        if (colorStreak < requiredFrames || elapsedMs < requiredMs) {
+            // 프레임과 시간을 모두 실어 보낸다 — 현장에서 "4/4 프레임인데 왜 조용하지?" 를
+            // 로그만 보고 5초 안에 진단할 수 있어야 한다.
+            return SignalDecision.Silent(
+                reason = SilentReason.STABILITY_PENDING,
+                streak = colorStreak,
+                requiredFrames = requiredFrames,
+                color = detectedColor,
+                elapsedMs = elapsedMs,
+                requiredMs = requiredMs,
+            )
         }
 
         // ── 6) 안정성 통과 = 확정 ──
@@ -295,6 +332,10 @@ sealed class SignalDecision {
         val streak: Int = 0,
         val requiredFrames: Int = 0,
         val color: Int = SignalDecisionEngine.COLOR_NONE,
+        /** STABILITY_PENDING 일 때 현재 후보를 관찰한 시간(ms). 진단용. */
+        val elapsedMs: Long = 0L,
+        /** STABILITY_PENDING 일 때 요구되는 관찰 시간(ms). 진단용. */
+        val requiredMs: Long = 0L,
     ) : SignalDecision()
 
     /** 같은 색이 지속되어 heartbeat 간격이 됨 → 같은 색 재안내. */
@@ -330,14 +371,44 @@ data class SignalDecisionConfig(
     // 2026-07 실측: 0.008(≈27m)은 광폭 도로 건너편 신호(30~50m)를 ALL_TOO_SMALL 로 버렸다.
     // 완화해도 초록 오탐은 뒤의 높은 신뢰도 게이트(0.45~0.55)와 안정성 프레임이 막는다.
     val minBoxDimension: Float = 0.004f,
-    // 안정성 (연속 프레임)
-    // 2026-07: 추론이 3fps(약 333ms/프레임)라 프레임 수가 곧 시간이다.
-    //   구값(빨강 2·초록 3)은 0.67~1.0초라, 화면에 색이 잠깐만 스쳐도 확정돼
+    // ── 안정성 (연속 프레임) ──
+    // 2026-07: 구값(빨강 2·초록 3)은 화면에 색이 잠깐만 스쳐도 확정돼
     //   "켜자마자 빨간불" · "깜빡이지 않는데 깜빡임" 오작동을 냈다(모델 순간 오탐이 상태로 굳음).
-    //   시간 기준으로 올려 순간 노이즈를 걸러낸다. 빨강 4≈1.3s / 초록 5≈1.7s / 전환 4≈1.3s.
+    //   표본 수를 늘려 순간 노이즈를 걸러낸다.
     val redStabilityFrames: Int = 4,
     val greenStabilityFrames: Int = 5,
     val greenTransitionStabilityFrames: Int = 4,
+
+    // ── 안정성 (경과 시간) ──
+    // ⚠️ 2026-09 추가. **프레임 수만으로는 안전이 보장되지 않는다.**
+    //
+    //   2026-07 주석은 "추론이 3fps라 프레임 수가 곧 시간이다"라고 적었다. 그건 Android 얘기였고,
+    //   iOS 는 스로틀 없이 초당 20~30회 추론하고 있었다. 같은 '4프레임'이
+    //   Android 에서는 1.33초, iOS 에서는 0.16초였다 —
+    //   **같은 앱이 두 OS 에서 8배 다르게 위험했다.** 이 엔진을 shared 에 둔 이유가
+    //   바로 그런 분기를 막기 위해서인데, 단위가 프레임이라 뚫렸다.
+    //
+    //   그래서 벽시계 시간 바닥을 함께 건다. 프레임 수 AND 경과 시간을 둘 다 채워야 확정된다.
+    //   이러면 추론 속도를 올려도(조준 성공률을 위해 필요하다) 안전이 깎이지 않고,
+    //   플랫폼이 달라도 "최소 이만큼은 같은 색을 보고 있었다"가 보장된다.
+    //
+    //   값 근거: 초록은 오탐 비용이 비대칭적으로 크므로 빨강보다 길게.
+    //   R→G 전환은 유일하게 "건너세요"를 부르므로 정적 초록과 같은 최장 시간을 요구한다.
+    //   (보행 초록은 보통 15~30초라 0.8초 늦게 알리는 손해보다 틀리는 손해가 비교할 수 없이 크다)
+    val redStabilityMs: Long = 600L,
+    val greenStabilityMs: Long = 800L,
+    val greenTransitionStabilityMs: Long = 800L,
+
+    /**
+     * 유효 검출 사이의 최대 허용 공백. 이보다 오래 끊기면 안정성 스트릭을 새로 시작한다.
+     *
+     * 시간 바닥([redStabilityMs] 등)이 "계속 보고 있었다"를 뜻하려면 이 가드가 반드시 있어야 한다.
+     * 없으면 "1프레임 → 긴 공백 → 몰아서 N프레임" 으로 바닥을 우회할 수 있다.
+     *
+     * 1초 = Android 3fps 기준 3프레임. 모션 게이트로 한두 프레임 건너뛰는 정도는 견디고,
+     * 실제로 시야에서 놓친 경우는 걸러낸다.
+     */
+    val maxObservationGapMs: Long = 1_000L,
     // 선택 단계 R→G 안전 바이어스 (빨강·초록 동시 검출 시 초록이 이기는 조건)
     val greenTransitionMinConfidence: Float = 0.55f,
     val greenOverRedConfidenceMargin: Float = 0.05f,

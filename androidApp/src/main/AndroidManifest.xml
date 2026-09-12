@@ -28,8 +28,22 @@
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round">
 
+        <!--
+        세로 고정. 취향이 아니라 정확성 문제다.
+
+        가로로 돌아가면 ImageAnalysis 의 rotationDegrees 가 0 이 되어 분석 프레임이
+        1280×720 가로로 들어온다. 그러면 TrafficLightDetector.preprocess 의 정사각 크롭이
+        **가로 화각을 좌우 각각 22% 씩 잘라낸다** — 사용자가 좌우로 훑는 동작의 시야가
+        44% 사라진다. 게다가 lastAimTargetCenterX 가 0.219~0.781 로 압축돼
+        AimingFeedback 의 FAR 구간(0.25 이상)에 도달할 수 없게 되고, 화면 가장자리에 있는
+        신호등에도 "잘 겨눴다"는 빠른 진동이 나간다. 시각장애인에게 거짓 신호다.
+
+        어차피 화면을 보지 않는 사용자가 폰을 돌릴 이유가 없고,
+        회전 시 Activity 재생성으로 카메라가 끊기는 것도 막는다.
+        -->
         <activity
             android:name=".SafetyNoticeActivity"
+            android:screenOrientation="portrait"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -39,6 +53,7 @@
 
         <activity
             android:name=".MainActivity"
+            android:screenOrientation="portrait"
             android:exported="false" />
 
     </application>
