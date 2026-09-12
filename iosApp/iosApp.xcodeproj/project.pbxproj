@@ -11,6 +11,16 @@
 		EC46FBF42FA5267B006A262F /* shared.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = EC46FBF22FA5267B006A262F /* shared.framework */; platformFilters = (xros, ); settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		AB12CD0100000000000000A7 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = EC46FBCE2FA51D59006A262F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = EC46FBD52FA51D59006A262F;
+			remoteInfo = iosApp;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXCopyFilesBuildPhase section */
 		EC46FBF52FA5267B006A262F /* Embed Frameworks */ = {
 			isa = PBXCopyFilesBuildPhase;
@@ -24,16 +34,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXCopyFilesBuildPhase section */
-
-/* Begin PBXContainerItemProxy section */
-		AB12CD0100000000000000A7 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = EC46FBCE2FA51D59006A262F /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = EC46FBD52FA51D59006A262F;
-			remoteInfo = iosApp;
-		};
-/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		AB12CD0100000000000000A2 /* iosAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = iosAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -441,7 +441,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = 722FNMWTR8;
 				ENABLE_PREVIEWS = YES;
 				"FRAMEWORK_SEARCH_PATHS[arch=*]" = "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)";
@@ -473,7 +473,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = 722FNMWTR8;
 				ENABLE_PREVIEWS = YES;
 				"FRAMEWORK_SEARCH_PATHS[arch=*]" = "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)";
