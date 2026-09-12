@@ -20,7 +20,9 @@ final class FollowingController {
 
     /// 좌표 이벤트를 받는 쪽(coordinator)이 채우는 콜백 묶음.
     struct Callbacks {
-        let enterCrossing: () -> Void          // 다음 횡단보도 반경 진입
+        // 다음 횡단보도 반경 진입. 인자는 경로상 몇 번째 CROSSWALK 인지(0-base, crosswalks 배열 인덱스)
+        // — coordinator 가 신호등 상태(waypoint 인덱스 키)를 찾는 데 쓴다.
+        let enterCrossing: (_ crosswalkOrdinal: Int) -> Void
         let exitCrossing: () -> Void           // 횡단보도 반경 이탈(히스테리시스)
         let arrive: () -> Void                 // 목적지 도착
         let updateRemaining: (_ meters: Int) -> Void        // 목적지까지 남은 직선거리
@@ -81,7 +83,7 @@ final class FollowingController {
     private func onLocation(_ cur: CLLocationCoordinate2D) {
         // 1) 도착 판정 우선.
         if let dest = destination {
-            let dDest = haversine(cur, dest)
+            let dDest = Self.haversine(cur, dest)
             if dDest <= arrivalR {
                 stop()
                 callbacks.arrive()
@@ -97,12 +99,12 @@ final class FollowingController {
         }
 
         // 3) 다음 횡단보도 진입/이탈.
-        let dCross = haversine(cur, crosswalks[nextIdx])
+        let dCross = Self.haversine(cur, crosswalks[nextIdx])
         callbacks.updateNextCrosswalk(Int(dCross.rounded()))
         if !crossingActive && dCross <= rEnter {
             crossingActive = true
             print("🚦 [Following] 횡단보도[\(nextIdx)] 진입 (\(Int(dCross))m)")
-            callbacks.enterCrossing()
+            callbacks.enterCrossing(nextIdx)
         } else if crossingActive && dCross > rExit {
             crossingActive = false
             print("🚦 [Following] 횡단보도[\(nextIdx)] 이탈 (\(Int(dCross))m)")
@@ -113,7 +115,8 @@ final class FollowingController {
 
     // MARK: haversine (직선거리 m)
 
-    private func haversine(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Double {
+    /// PedestrianSignalIndex 도 같은 구현을 쓴다(중복 구현 금지) — nonisolated: 백그라운드 파싱 큐에서도 호출됨.
+    nonisolated static func haversine(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Double {
         let R = 6_371_000.0
         let p1 = a.latitude * .pi / 180
         let p2 = b.latitude * .pi / 180

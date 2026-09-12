@@ -18,16 +18,34 @@ struct GuidingView: View {
     @EnvironmentObject var coordinator: NavigationCoordinator
     @EnvironmentObject var deps: AppDependencies
 
+    /// 준비 화면 진입 시 VoiceOver 포커스를 「안내 시작」 버튼으로 옮기기 위한 상태.
+    @AccessibilityFocusState private var startButtonFocused: Bool
+
     var body: some View {
         VStack(spacing: 0) {
+            // 안내 중이면 StatusPanel 전체 화면, 준비 중이면 버튼·지도와 반반.
             statusPanel
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            mapSection
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            if !coordinator.guidanceStarted {
+                StartGuidanceButton { coordinator.startGuidance() }
+                    .accessibilityFocused($startButtonFocused)
+
+                mapSection
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         .background(Color.black)
         .ignoresSafeArea(edges: .bottom)
         .accessibleFloor()
+        .onAppear {
+            // 경로 요약 TTS 발화가 끝난 뒤 포커스를 버튼으로 이동(자동 알림은 앱 TTS 담당).
+            if !coordinator.guidanceStarted {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    startButtonFocused = true
+                }
+            }
+        }
     }
 
     // MARK: - 상단 상태 패널
@@ -87,6 +105,27 @@ struct GuidingView: View {
             // 경로가 아직 없으면(이론상 도달 안 함) 지도 자리는 검정.
             Color.black
         }
+    }
+}
+
+// MARK: - 「안내 시작」 버튼
+
+/// StatusPanel 과 지도 사이에 놓이는 큰 노란 버튼(§4-3).
+/// 저시력자 기준 큰 글씨(.action = 48pt bold)와 넉넉한 터치 영역(≥88pt).
+struct StartGuidanceButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text("안내 시작")
+                .accessibleText(.action)
+                .foregroundColor(.black)
+                .frame(maxWidth: .infinity, minHeight: 88)
+        }
+        .background(Color.yellow)
+        .accessibilityLabel("안내 시작")
+        .accessibilityHint("두 번 누르면 경로 안내를 시작하고 지도를 숨깁니다.")
+        .accessibilityIdentifier("navigation.startGuidance")
     }
 }
 
