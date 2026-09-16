@@ -26,6 +26,9 @@ class TrafficLightAnalyzer(
 
     private val lastFrameAt = AtomicLong(0L)
 
+    /** 연속 추론 실패 횟수. 단일 분석 스레드에서만 접근하므로 동기화 불필요. */
+    private var consecutiveFailures = 0
+
     override fun analyze(image: ImageProxy) {
         // 비활성 (예: 횡단보도 zone 밖) — 추론 자체 안 돌림. CPU/배터리 0 비용.
         if (!isActive()) {
@@ -43,9 +46,19 @@ class TrafficLightAnalyzer(
         try {
             val bitmap = imageProxyToBitmap(image)
             val detections = detector.detect(bitmap)
+            consecutiveFailures = 0
             onDetection(detections)
         } catch (e: Exception) {
             Log.e(TAG, "Analyze frame failed", e)
+            // ⚠️ 예외를 삼키고 끝내면 onDetection 이 **한 번도** 안 불린다.
+            //    그러면 호출자의 미탐지 안내 타이머 자체가 돌지 않아서,
+            //    추론이 매 프레임 터지는 상황이 "조용한 정상"과 구별되지 않는다.
+            //    (출력 shape 불일치·NNAPI 위임 실패·비트맵 OOM 등이 실제로 이 경로다)
+            //    몇 프레임 연속 실패하면 빈 결과로라도 콜백을 쳐서 사다리를 돌린다.
+            consecutiveFailures++
+            if (consecutiveFailures >= FAILURE_CALLBACK_THRESHOLD) {
+                onDetection(emptyList())
+            }
         } finally {
             image.close()
         }
@@ -69,5 +82,11 @@ class TrafficLightAnalyzer(
 
     companion object {
         private const val TAG = "TrafficLightAnalyzer"
+
+        /**
+         * 이만큼 연속 실패하면 빈 결과로 콜백해 미탐지 안내 사다리를 깨운다.
+         * 일시적인 한두 프레임 실패로 "신호등을 못 찾는다"고 말하지는 않도록 여유를 둔다.
+         */
+        private const val FAILURE_CALLBACK_THRESHOLD = 3
     }
 }

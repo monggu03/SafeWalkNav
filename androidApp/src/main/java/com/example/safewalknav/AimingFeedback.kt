@@ -1,5 +1,6 @@
 package com.example.safewalknav
 
+import android.media.AudioAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
 import kotlin.math.abs
@@ -49,7 +50,8 @@ import kotlin.math.abs
  * ─────────────────────────────────────────────────────────────────────────────
  *   1) **찾았다** (여기 [playAcquired]) — 강한 2연타. "멈춰요, 여기예요."
  *   2) **조준 중** (이 클래스의 소나)        — 약한 단발 반복. 간격이 정렬도.
- *   3) **판정** (MainActivity 의 vibrateShort/vibrateWarning) — 색 확정·점멸 경고.
+ *   3) **판정** (MainActivity 의 vibrateColor/vibrateWarning) — 색 확정·점멸 경고.
+ *      빨강은 길게 한 번, 초록은 짧게 두 번으로 **색 자체가 촉각으로 구분된다.**
  *
  * (1)이 왜 필요한가: [SignalDecisionEngine] 은 확정에 **경과 시간**을 요구한다(0.6~0.8초).
  * 그런데 2배 줌이면 가로 화각이 20°라, 사용자가 90°/s 로 훑을 때 신호등이 화면에 머무는
@@ -59,7 +61,16 @@ import kotlin.math.abs
  * 그래서 대상이 처음 잡히는 순간에 확실히 다른 촉감을 한 번 준다. 그래야
  * "빠르게 훑다가 → 2연타 → 멈춤 → 0.6초 → 판정" 의 흐름이 성립한다.
  */
-class AimingFeedback(private val vibrator: Vibrator) {
+class AimingFeedback(
+    private val vibrator: Vibrator,
+    /**
+     * 접근성 용도 오디오 속성. **반드시 붙여야 한다** —
+     * 속성 없이 vibrate() 하면 USAGE_UNKNOWN 으로 취급돼 절전 모드와 시스템 진동 설정에서
+     * 통째로 억제된다. 음성이 안 들리는 상황에서는 이게 유일한 채널이라, 사용자가 다른 이유로
+     * 켜 둔 절전 모드 하나에 조준 안내가 전부 사라지면 안 된다.
+     */
+    private val attrs: AudioAttributes,
+) {
 
     /** 정렬 정도 구간. [gapMs] 는 펄스 시작 사이의 주기. */
     private enum class Tier(val gapMs: Long) {
@@ -96,6 +107,15 @@ class AimingFeedback(private val vibrator: Vibrator) {
     /** 마지막으로 대상이 보인 시각. "충분히 오래 없었다가 다시 나타났나" 판단용. */
     private var lastTargetSeenAtMs = 0L
 
+    /** 소나를 연속으로 걸기 시작한 시각. 0 이면 안 걸린 상태. */
+    private var sonarSinceMs = 0L
+
+    /**
+     * 소나가 상한([SONAR_MAX_MS])에 걸려 잠긴 상태.
+     * 대상이 한 번 사라져야 풀린다.
+     */
+    private var sonarExhausted = false
+
     /**
      * 이번 프레임의 조준 대상 위치로 진동을 갱신한다.
      *
@@ -131,6 +151,34 @@ class AimingFeedback(private val vibrator: Vibrator) {
         }
         if (targetPresent) lastTargetSeenAtMs = now
 
+        // 대상이 사라지면 상한 잠금을 푼다 — 다음에 다시 찾으면 소나가 새로 시작한다.
+        if (!targetPresent) {
+            sonarSinceMs = 0L
+            sonarExhausted = false
+        }
+
+        // ⚠️ 소나에 시간 상한을 둔다.
+        //
+        // 조준 임계(0.10)와 판정 임계(0.25~0.55) 사이 간격이 커서, "대상은 보이는데
+        // 엔진은 확정하지 않는" 구간이 **무한히** 이어질 수 있다. 원거리 신호등이 딱 그
+        // 구간이고, 간판·후미등 같은 오탐도 거기 산다. 그동안 손은 계속 울린다.
+        //
+        // 20~30초면 촉각이 순응해서 펄스 간격 차이를 못 느끼게 된다. 그러면 소나의
+        // 정보(정렬 정도)가 사라질 뿐 아니라, 같은 모터를 쓰는 "찾았다"와 판정 진동까지
+        // 이 배경 위에 묻힌다. 게다가 한 손은 흰지팡이를 쥐고 있어 쉴 손이 없다.
+        //
+        // 상한에 걸리면 조용해지고, 그 뒤는 MainActivity 의 생존 워치독이 말로 설명한다.
+        if (targetPresent && !sonarExhausted) {
+            if (sonarSinceMs == 0L) sonarSinceMs = now
+            if (now - sonarSinceMs >= SONAR_MAX_MS) {
+                sonarExhausted = true
+                currentTier = Tier.NONE
+                cancel()
+                return
+            }
+        }
+        if (sonarExhausted) return
+
         if (tier == currentTier) return   // 같은 구간이면 파형 유지 — 재설정하면 끊긴다
         currentTier = tier
         if (tier == Tier.NONE) cancel() else if (!armFailed) arm(tier.gapMs)
@@ -145,6 +193,8 @@ class AimingFeedback(private val vibrator: Vibrator) {
     fun stop() {
         if (!usable) return
         currentTier = Tier.NONE
+        sonarSinceMs = 0L
+        sonarExhausted = false
         if (!armed) return   // 판정 진동을 취소하지 않기 위한 조기 반환
         cancel()
     }
@@ -152,10 +202,16 @@ class AimingFeedback(private val vibrator: Vibrator) {
     /**
      * [durationMs] 동안 조준 진동을 걸지 않는다. **안전 진동을 울리기 직전에** 호출한다.
      * 이미 뛰고 있던 조준 파형은 즉시 끈다.
+     *
+     * ⚠️ [stop] 과 달리 **소나 예산([sonarSinceMs]·[sonarExhausted])은 건드리지 않는다.**
+     * holdOff 는 "잠깐 비켜라"이지 "처음부터 다시"가 아니다. 예산을 함께 비우면,
+     * 상한에 걸려 조용해진 소나를 안전 진동 한 번이 되살려서 25초 켜짐 / 20초 꺼짐이
+     * 무한 반복된다 — 상한을 둔 이유(촉각 순응)가 통째로 무효가 된다.
      */
     fun holdOff(durationMs: Long) {
         if (!usable) return
-        stop()
+        currentTier = Tier.NONE
+        if (armed) cancel()
         holdOffUntilMs = System.currentTimeMillis() + durationMs
     }
 
@@ -184,7 +240,7 @@ class AimingFeedback(private val vibrator: Vibrator) {
             VibrationEffect.createWaveform(timings, -1)
         }
         try {
-            vibrator.vibrate(effect)
+            vibrator.vibrate(effect, attrs)
         } catch (_: Exception) {
             // 보조 채널이라 실패해도 조용히 넘어간다. 소나는 계속 동작한다.
         }
@@ -204,7 +260,7 @@ class AimingFeedback(private val vibrator: Vibrator) {
         // 거짓 양성(실제로는 안 걸렸는데 armed=true)의 대가는 불필요한 cancel() 한 번뿐이다.
         armed = true
         try {
-            vibrator.vibrate(effect)
+            vibrator.vibrate(effect, attrs)
         } catch (_: Exception) {
             // 일부 기기가 반복 파형을 거부한다. 조준 진동은 보조 채널이므로 조용히 포기하되,
             // 매 프레임(333ms) 재시도하며 예외를 쏟지 않도록 영구히 꺼 둔다.
@@ -258,5 +314,12 @@ class AimingFeedback(private val vibrator: Vibrator) {
          * 너무 길면 "다음 신호등을 새로 찾았다"를 놓치므로 2초로 잡았다.
          */
         private const val ACQUIRE_COOLDOWN_MS = 2_000L
+
+        /**
+         * 소나를 연속으로 걸 수 있는 최대 시간.
+         * 촉각 순응이 시작되는 20~30초 구간보다 앞에서 끊는다.
+         * 대상이 한 번 사라져야 다시 걸린다.
+         */
+        private const val SONAR_MAX_MS = 25_000L
     }
 }

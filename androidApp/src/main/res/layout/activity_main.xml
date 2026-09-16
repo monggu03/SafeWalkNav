@@ -5,13 +5,25 @@ SafeWalk — 카메라 단일 기능 화면.
 앱 실행 즉시 후방 카메라 프리뷰가 전체화면으로 뜨고, 그 위에 신호 색 오버레이 + 큰 상태
 글씨를 얹는다. 시각장애인은 화면을 안 봐도 음성·진동으로 안내받고, 저시력자/보호자/시연자는
 색과 글씨로 상태를 즉시 확인할 수 있다. (도보 내비게이션 UI 는 2026-07 제거.)
+
+⚠️ 루트에 noHideDescendants — 이 화면은 TalkBack 에게 **아무것도 노출하지 않는다.**
+
+왜: overlayStatusText 가 TalkBack 포커스 대상이었는데, 그 글씨는 의도적으로 축약된
+**시각용** 문구다("초록불"). 음성은 더 긴 문장을 말한다("초록불입니다. 일단 멈춰서 다음
+신호를 기다리세요."). TalkBack 이 그 축약본을 읽으면 **정반대 의미가 전달된다** —
+멈추라는 안내가 "초록불" 한 단어로 바뀐다. 점멸일 때는 더 심해서, 음성은 "깜빡입니다"인데
+화면 글씨는 "빨간불"이라 TalkBack 이 없는 사실을 말한다.
+
+게다가 이 화면에는 누를 것이 하나도 없다. 스크린리더가 할 일 자체가 없으므로,
+음성 채널은 앱이 온전히 소유하고 TalkBack 은 침묵하는 것이 맞다.
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools"
     android:id="@+id/rootLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#000000">
+    android:background="#000000"
+    android:importantForAccessibility="noHideDescendants">
 
     <!-- 후방 카메라 프리뷰 (코드에서 PreviewView 추가) -->
     <FrameLayout
