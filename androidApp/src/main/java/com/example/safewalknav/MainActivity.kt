@@ -198,7 +198,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // "아직도 못 찾고 있다"는 사실만 가끔 확인해 주면 된다.
     private val NO_DET_REPEAT_MS = 30_000L
     private val NO_DET_SAFETY_MS = 20_000L
-    private val NO_DET_SUPPRESS_PEAK_CONFIDENCE = 0.25f
+    // ⚠️ 판정 임계(0.25)보다 반드시 낮아야 한다. 같으면 "임계 미만 후보" 억제가 영영 발동 안 함.
+    private val NO_DET_SUPPRESS_PEAK_CONFIDENCE = 0.18f
+
+    /** '곧 잡힐 듯' 억제의 시작 시각. 0 이면 비활성. */
+    private var noDetSuppressStartedAt = 0L
+
+    /** '곧 잡힐 듯' 억제의 최대 지속 시간 — 이걸 넘기면 약한 오탐으로 보고 안내를 돌린다. */
+    private val NO_DET_SUPPRESS_MAX_MS = 10_000L
     private var detectStartHoldUntil = 0L
     private val DETECT_START_HOLD_MS = 3_000L   // 카메라 켠 직후 겨눌 시간
 
@@ -234,7 +241,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             // 여기서 끄지 않으면 마지막 박자가 그대로 반복된다(거짓 정보).
             onFastMotionStart = { aiming.stop() },
             // 1.5초 넘게 계속 휘두르면 한 번만 짚어 준다 (쿨다운은 MotionGate 가 관리).
-            onSustainedFastMotion = { speakTrafficLight("천천히 돌려 주세요", interrupt = false) },
+            onSustainedFastMotion = {
+                speakTrafficLight("천천히 돌려 주세요", interrupt = false, countsAsLiveness = false)
+            },
         )
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -243,7 +252,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // 회전·복원으로 다시 만들어졌다면 일시정지 상태를 되살린다.
         userPaused = savedInstanceState?.getBoolean(STATE_USER_PAUSED, false) ?: false
         if (userPaused) {
-            startPausedReminder()
+            // ⚠️ 남은 알림 횟수도 함께 복원한다. startPausedReminder() 는 횟수를 0 으로
+            //    되돌리므로, 다크모드 전환·글꼴 변경 한 번마다 잔소리 예산이 리필돼
+            //    "3번만 알린다"는 약속이 깨진다 (onResume 쪽은 이미 지키고 있는 약속).
+            pausedReminderCount = savedInstanceState?.getInt(STATE_PAUSED_REMINDER_COUNT, 0) ?: 0
+            resumePausedReminder()
             return   // 카메라도 권한 요청도 하지 않는다 — 멈춰 있던 상태 그대로
         }
 
@@ -458,10 +471,26 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (detections.isEmpty()) {
             setIdleVisual()
             updateAiming()
-            // 약한 후보(임계 근처)가 보이면 미탐지 안내를 억제 — 곧 잡힐 수 있음.
+            // 약한 후보(임계 근처)가 보이면 미탐지 안내를 잠시 억제 — 곧 잡힐 수 있음.
+            //
+            // ⚠️ 두 가지 함정을 막아야 한다.
+            //  (1) 이 임계가 판정 임계(0.25)와 같으면 "임계 미만의 약한 후보"는 조건을
+            //      영영 못 넘어서, 실제로는 횡단보도 무늬 바닥을 비출 때만 발동했다 —
+            //      정확히 잘못된 경우에만 억제하고 있었던 셈이다. 그래서 판정 임계보다
+            //      확실히 낮게 둔다.
+            //  (2) 무기한 억제 금지. 약한 오탐(간판·차양)이 계속 흘러들면 "곧 잡힐 듯"만
+            //      반복하며 음성 사다리가 영영 침묵한다. 상한을 넘기면 억제를 풀고
+            //      사다리를 돌린다.
             if (stats != null && stats.peakConfidence >= NO_DET_SUPPRESS_PEAK_CONFIDENCE) {
-                resetNoDetection()
-                return
+                val nowMs = System.currentTimeMillis()
+                if (noDetSuppressStartedAt == 0L) noDetSuppressStartedAt = nowMs
+                if (nowMs - noDetSuppressStartedAt < NO_DET_SUPPRESS_MAX_MS) {
+                    resetNoDetection()
+                    return
+                }
+                // 상한 초과 — 억제를 풀고 아래의 handleNoDetection 으로 떨어진다.
+            } else {
+                noDetSuppressStartedAt = 0L
             }
             handleNoDetection()
             return
@@ -469,6 +498,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         val now = System.currentTimeMillis()
         lastDetectionAtMs = now
+        noDetSuppressStartedAt = 0L   // 진짜 검출이 나왔으니 억제 창을 새로 시작
 
         val rawSignals = detections.map {
             RawSignalDetection(it.classId, it.confidence, it.bbox.width, it.bbox.height)
@@ -569,6 +599,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun resetAimingState() {
         lastDetectionAtMs = 0L
         lastValidatedAtMs = 0L
+        noDetSuppressStartedAt = 0L
     }
 
     // ==================== 생존 신호 (워치독) ====================
@@ -812,8 +843,15 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         lastAnnouncementAtMs = SystemClock.elapsedRealtime()
     }
 
-    private fun speakTrafficLight(message: String, interrupt: Boolean) {
-        lastAudibleAtMs = SystemClock.elapsedRealtime()
+    /**
+     * @param countsAsLiveness 이 발화가 "인식 파이프라인이 살아 있다"는 증거인가.
+     *   기본 true. **센서만으로 나오는 발화는 false 여야 한다** — 예: "천천히 돌려 주세요"는
+     *   자이로만 있으면 나오는 말이라, 이걸로 워치독 스탬프를 갱신하면 계속 휘두르는 사용자는
+     *   (모션 쿨다운 15초 < 워치독 45초) 스탬프가 15초마다 리필돼 인식이 완전히 죽어 있어도
+     *   워치독이 영영 안 운다. 정확히 워치독이 지켜야 할 사용자가 빠져나간다.
+     */
+    private fun speakTrafficLight(message: String, interrupt: Boolean, countsAsLiveness: Boolean = true) {
+        if (countsAsLiveness) lastAudibleAtMs = SystemClock.elapsedRealtime()
         if (!ttsReady) return
         tts.speak(
             message,
@@ -847,7 +885,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      * 그때 "뭔가 확정됐다"만 전달되고 정작 빨강인지 초록인지는 사라졌다.
      *
      * 빨강 = 길게 한 번(멈춤을 뜻하는 묵직한 느낌).
-     * 초록 = 짧게 두 번(움직임을 뜻하는 가벼운 느낌).
+     * 초록 = 짧게 세 번(움직임을 뜻하는 가벼운 느낌).
+     * 두 번이 아니라 세 번인 이유: 2연타는 AimingFeedback 의 "찾았다"(45·70·45)와 닮아서
+     * 장갑 낀 손으로는 구분이 안 된다. 아래 waveform 과 이 문장은 항상 함께 고칠 것.
      */
     private fun vibrateColor(color: Int) {
         // ⚠️ else 로 뭉뚱그리지 않는다. 모르는 색을 초록으로 진동하면,
@@ -1089,6 +1129,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // ⚠️ 이게 없으면 다크모드 전환·글꼴 크기 변경·프로세스 복원으로 Activity 가 다시 만들어질 때
         //    일시정지가 풀려서, 멈춰 둔 줄 알고 주머니에 넣은 폰이 혼자 말하기 시작한다.
         outState.putBoolean(STATE_USER_PAUSED, userPaused)
+        outState.putInt(STATE_PAUSED_REMINDER_COUNT, pausedReminderCount)
     }
 
     override fun onPause() {
@@ -1182,6 +1223,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         /** 사용자가 직접 멈춘 상태인지 — 화면 회전·프로세스 복원 후에도 유지한다. */
         private const val STATE_USER_PAUSED = "userPaused"
+        private const val STATE_PAUSED_REMINDER_COUNT = "pausedReminderCount"
 
         /**
          * 점멸 감지 후 조준 진동 차단 구간.

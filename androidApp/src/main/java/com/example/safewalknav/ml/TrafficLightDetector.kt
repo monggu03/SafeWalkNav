@@ -323,23 +323,38 @@ class TrafficLightDetector(context: Context) {
         //
         // 대가: 발 앞 바닥이 보이기 시작하는 거리가 7.6m → 9.9m 로 멀어진다.
         // 바닥은 횡단보도(Zebra_Cross) 검출용이고, 그건 조준 폴백에만 쓰이는 보조 정보다.
-        val side = minOf(bitmap.width, bitmap.height)
-        val left = (bitmap.width - side) / 2
-        val slack = bitmap.height - side
-        val top =
-            if (bitmap.height > bitmap.width) (slack * CROP_TOP_BIAS).toInt()
-            else slack / 2
-        cropLeftNorm = left.toFloat() / bitmap.width
-        cropTopNorm = top.toFloat() / bitmap.height
-        cropWidthNorm = side.toFloat() / bitmap.width
-        cropHeightNorm = side.toFloat() / bitmap.height
-
-        val square =
-            if (bitmap.width == side && bitmap.height == side) bitmap
-            else Bitmap.createBitmap(bitmap, left, top, side, side)
-        val scaled =
-            if (side == size) square
-            else Bitmap.createScaledBitmap(square, size, size, true)
+        // ⚠️ 2026-09 현장 테스트: 정사각 크롭 도입 후 인식률이 급락하고 초록을 빨강으로
+        //    오인하는 문제가 보고됨. kairess YOLOv5 는 학습 때 전체 프레임을 640 에 넣었고,
+        //    크롭은 모델이 본 적 없는 구도라 검출 분포가 어긋난다. 크롭 이전(작동하던) 방식으로
+        //    되돌리되, 기기에서 A/B 비교가 가능하도록 스위치로 둔다.
+        val scaled: Bitmap
+        if (USE_SQUARE_CROP) {
+            // 세로는 살짝 위로 치우쳐 크롭 (기울임 여유 대칭화). 자세한 근거는 CROP_TOP_BIAS 주석.
+            val side = minOf(bitmap.width, bitmap.height)
+            val left = (bitmap.width - side) / 2
+            val slack = bitmap.height - side
+            val top =
+                if (bitmap.height > bitmap.width) (slack * CROP_TOP_BIAS).toInt()
+                else slack / 2
+            cropLeftNorm = left.toFloat() / bitmap.width
+            cropTopNorm = top.toFloat() / bitmap.height
+            cropWidthNorm = side.toFloat() / bitmap.width
+            cropHeightNorm = side.toFloat() / bitmap.height
+            val square =
+                if (bitmap.width == side && bitmap.height == side) bitmap
+                else Bitmap.createBitmap(bitmap, left, top, side, side)
+            scaled =
+                if (side == size) square
+                else Bitmap.createScaledBitmap(square, size, size, true)
+        } else {
+            // 크롭 이전 동작: 전체 프레임을 640×640 으로 (비율은 눌리지만 학습과 같은 방식).
+            // bbox 는 원본 프레임 전체 기준이므로 환원 계수는 항등.
+            cropLeftNorm = 0f
+            cropTopNorm = 0f
+            cropWidthNorm = 1f
+            cropHeightNorm = 1f
+            scaled = Bitmap.createScaledBitmap(bitmap, size, size, true)
+        }
 
         // ── 2) float32 RGB 변환 ──
         // 버퍼는 매 프레임 새로 잡지 않고 재사용한다. 예전에는 프레임마다
@@ -462,6 +477,15 @@ class TrafficLightDetector(context: Context) {
          * `30초내 성공률` 을 보고 맞출 것. 올리면(→0.5) 바닥이 더 보이고,
          * 내리면(→0.2) 위쪽 여유가 늘지만 바닥을 잃는다.
          */
+        /**
+         * 전처리에 정사각 크롭을 쓸지. **기본 false = 크롭 이전(작동하던) 방식.**
+         *
+         * 현장 테스트에서 크롭이 인식률을 떨어뜨리고 초록→빨강 오인을 유발하는 것으로 보고돼
+         * 되돌렸다. 크롭의 이점(원거리 신호 확대)을 다시 시도할 때만 true 로 바꿔
+         * 반드시 실기 A/B 로 검증할 것. true 로 켤 거면 CROP_TOP_BIAS 도 함께 본다.
+         */
+        private const val USE_SQUARE_CROP: Boolean = false
+
         private const val CROP_TOP_BIAS: Float = 0.35f
 
         // kairess data/crosswalk.yaml → names: ['Zebra_Cross', 'R_Signal', 'G_Signal']
