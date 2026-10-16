@@ -1,5 +1,6 @@
 package com.example.safewalknav.ml
 
+import android.os.SystemClock
 import android.graphics.Bitmap
 import android.graphics.Matrix
 import android.util.Log
@@ -21,6 +22,8 @@ class TrafficLightAnalyzer(
     private val detector: TrafficLightDetector,
     private val frameIntervalMs: Long = 333L,
     private val isActive: () -> Boolean = { true },
+    /** 추론이 [FAILURE_CALLBACK_THRESHOLD] 번 이상 연속 실패할 때마다 (연속 실패 횟수). 분석 스레드에서 불린다. */
+    private val onFailure: (Int) -> Unit = {},
     private val onDetection: (List<TrafficLightDetection>) -> Unit,
 ) : ImageAnalysis.Analyzer {
 
@@ -36,7 +39,7 @@ class TrafficLightAnalyzer(
             return
         }
 
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
         if (now - lastFrameAt.get() < frameIntervalMs) {
             image.close()   // skip
             return
@@ -48,16 +51,21 @@ class TrafficLightAnalyzer(
             val detections = detector.detect(bitmap)
             consecutiveFailures = 0
             onDetection(detections)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // Throwable — 비트맵 OOM 은 Exception 이 아니라서 예전 catch 로는 분석 스레드가 죽었다.
             Log.e(TAG, "Analyze frame failed", e)
-            // ⚠️ 예외를 삼키고 끝내면 onDetection 이 **한 번도** 안 불린다.
-            //    그러면 호출자의 미탐지 안내 타이머 자체가 돌지 않아서,
-            //    추론이 매 프레임 터지는 상황이 "조용한 정상"과 구별되지 않는다.
+            detector.clearLastResult()
+            // ⚠️ 예외를 삼키고 끝내면 호출자는 "조용한 정상"과 구별할 수 없다.
             //    (출력 shape 불일치·NNAPI 위임 실패·비트맵 OOM 등이 실제로 이 경로다)
-            //    몇 프레임 연속 실패하면 빈 결과로라도 콜백을 쳐서 사다리를 돌린다.
+            // ⚠️ 2026-10: 예전에는 빈 결과(검출 0건)로 위장해 넘겼다. 그러면 미탐지 안내가 나가며
+            //    생존 신호로 세어져 워치독이 영영 안 울렸다. 이제 실패는 실패로 따로 알린다.
             consecutiveFailures++
+            if (consecutiveFailures == FAILURE_CALLBACK_THRESHOLD) {
+                // NNAPI 드라이버가 run() 에서 터지는 기기 — CPU 로 바꿔 한 번 살려 본다.
+                if (detector.fallbackToCpu()) consecutiveFailures = 0
+            }
             if (consecutiveFailures >= FAILURE_CALLBACK_THRESHOLD) {
-                onDetection(emptyList())
+                onFailure(consecutiveFailures)
             }
         } finally {
             image.close()

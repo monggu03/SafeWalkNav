@@ -35,6 +35,27 @@ class SignalDecisionEngineTest {
         return t
     }
 
+    /** [durationMs] 동안 같은 검출을 STEP 간격으로 계속 넣는다(실제 기기처럼 계속 보고 있음). 다음 시각을 돌려준다. */
+    private fun SignalDecisionEngine.watch(det: RawSignalDetection, startMs: Long, durationMs: Long): Long {
+        var t = startMs
+        val until = startMs + durationMs
+        while (t < until) { decide(listOf(det), t); t += STEP }
+        return t
+    }
+
+    /** 확정(Announce/Flicker)이 나올 때까지 최대 [maxFrames] 넣고, 그 결정을 돌려준다. */
+    private fun SignalDecisionEngine.feedUntilDecision(
+        det: RawSignalDetection, startMs: Long, maxFrames: Int = 20,
+    ): Pair<SignalDecision, Long> {
+        var t = startMs
+        var last: SignalDecision = SignalDecision.Silent(SilentReason.NO_DETECTION)
+        repeat(maxFrames) {
+            last = decide(listOf(det), t); t += STEP
+            if (last is SignalDecision.Announce || last is SignalDecision.Flicker) return last to t
+        }
+        return last to t
+    }
+
     // ─────────────────────────────────────────────────────────────
     // 1) 크기 하한
     // ─────────────────────────────────────────────────────────────
@@ -176,12 +197,17 @@ class SignalDecisionEngineTest {
     @Test
     fun 한두프레임_드롭은_견딘다() {
         // 모션 게이트가 한 프레임을 건너뛰어도(666ms 공백) 스트릭이 살아 있어야 한다.
+        // ⚠️ 2026-10 수정: 예전엔 **마지막** 결정이 Announce 이길 기대했는데, 확정은 5번째 프레임
+        //    (1665ms)에서 일어나고 6번째는 같은 색 유지(SAME_COLOR_QUIET)라 테스트가 늘 실패했다.
+        //    검증하려던 것은 "드롭이 있어도 확정에 도달한다"이므로 시퀀스 중 확정 여부를 본다.
         val engine = SignalDecisionEngine(cfg)
-        var last: SignalDecision = SignalDecision.Silent(SilentReason.NO_DETECTION)
-        listOf(0L, 333L, 999L, 1332L, 1665L, 1998L).forEach {
-            last = engine.decide(listOf(green()), 1_000_000 + it)
+        val decisions = listOf(0L, 333L, 999L, 1332L, 1665L, 1998L).map {
+            engine.decide(listOf(green()), 1_000_000 + it)
         }
-        assertIs<SignalDecision.Announce>(last)
+        assertTrue(
+            decisions.any { it is SignalDecision.Announce },
+            "666ms 드롭 한 번으로 스트릭이 끊기면 안 된다. got=$decisions"
+        )
     }
 
     @Test
@@ -221,8 +247,10 @@ class SignalDecisionEngineTest {
         // 빨강 확정
         var t = engine.confirm(red(), cfg.redStabilityFrames, 1000)
         assertEquals(SignalDecisionEngine.COLOR_RED, engine.confirmedColor)
-        // 시간 충분히 흘려 점멸 오판 방지 (minPhaseDuration 초과)
-        t += cfg.minPhaseDurationMs + 1000
+        // 빨강을 **계속 보면서** 시간을 흘린다 (minPhaseDuration 초과).
+        // ⚠️ 2026-10: 예전엔 빈 시간으로 건너뛰었는데, 그건 "빨강을 못 본 채 초록을 만난" 경우라
+        //    이제는 전환 목격이 아니다(정적 초록으로 강등 — 아래 별도 테스트).
+        t = engine.watch(red(), t, cfg.minPhaseDurationMs + 1000)
         // 강한 초록(0.9) 으로 전환 — greenTransitionMinConfidence(0.55) 넘고 빨강 없음
         var last: SignalDecision = SignalDecision.Silent(SilentReason.NO_DETECTION)
         repeat(cfg.greenTransitionStabilityFrames) { last = engine.decide(listOf(green()), t); t += STEP }
@@ -240,7 +268,11 @@ class SignalDecisionEngineTest {
     fun 빨강확정_상태에서_약한초록은_빨강을_이기지_못한다() {
         val engine = SignalDecisionEngine(cfg)
         var t = engine.confirm(red(0.9f), cfg.redStabilityFrames, 1000)
-        t += cfg.minPhaseDurationMs + 1000
+        // ⚠️ 2026-10 수정: 예전엔 5초를 **빈 시간**으로 건너뛰었다. maxObservationGapMs(2초) 도입 뒤로는
+        //    그 공백이 스트릭을 리셋해 STABILITY_PENDING 이 나와 테스트가 늘 실패했다.
+        //    실제 기기처럼 그동안 빨강을 계속 보고 있었다고 두고 시간을 흘린다.
+        val until = t + cfg.minPhaseDurationMs + 1000
+        while (t < until) { engine.decide(listOf(red(0.9f)), t); t += STEP }
         // 초록 0.50 (< 0.55 임계) + 빨강 0.9 동시 존재 → 초록이 이기면 안 됨 → 빨강 유지
         val d = engine.decide(listOf(green(0.50f), red(0.9f)), t)
         // 빨강이 선택돼 같은 색 유지 → SAME_COLOR_QUIET 또는 Repeat (둘 다 빨강 유지 의미)
@@ -282,13 +314,22 @@ class SignalDecisionEngineTest {
         val engine = SignalDecisionEngine(cfg)
         var t = engine.confirm(red(), cfg.redStabilityFrames, 1000)  // 빨강 확정(첫 Announce)
         // 바로 다음 프레임 — 조용
-        val quiet = engine.decide(listOf(red()), t + 100)
+        val quiet = engine.decide(listOf(red()), t)
         assertIs<SignalDecision.Silent>(quiet)
         assertEquals(SilentReason.SAME_COLOR_QUIET, quiet.reason)
-        // heartbeat 간격 경과 후 — 재안내
-        val repeat = engine.decide(listOf(red()), t + cfg.heartbeatIntervalMs + 200)
-        assertIs<SignalDecision.Repeat>(repeat)
-        assertEquals(SignalDecisionEngine.COLOR_RED, repeat.color)
+        t += STEP
+        // heartbeat 간격 동안 빨강을 **계속** 본다 — 재안내가 정확히 한 번 나와야 한다.
+        // ⚠️ 2026-10 수정: 예전엔 12초를 빈 시간으로 건너뛰어, maxObservationGapMs(2초) 리셋에 걸려
+        //    STABILITY_PENDING 이 나왔다(늘 실패). 실제 기기는 그동안 프레임이 계속 온다.
+        val until = t + cfg.heartbeatIntervalMs + 200
+        val repeats = mutableListOf<SignalDecision.Repeat>()
+        while (t < until) {
+            val d = engine.decide(listOf(red()), t)
+            if (d is SignalDecision.Repeat) repeats += d
+            t += STEP
+        }
+        assertEquals(1, repeats.size, "heartbeat 간격 안에서는 정확히 한 번 재안내")
+        assertEquals(SignalDecisionEngine.COLOR_RED, repeats[0].color)
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -332,7 +373,7 @@ class SignalDecisionEngineTest {
     fun 빨강직후_약한초록_단독은_건너세요로_확정되지_않는다() {
         val engine = SignalDecisionEngine(cfg)
         var t = engine.confirm(red(), cfg.redStabilityFrames, 1000)
-        t += cfg.minPhaseDurationMs + 1000
+        t = engine.watch(red(), t, cfg.minPhaseDurationMs + 1000)
         // 빨강 사라지고 초록만 존재하되 신뢰도 0.50 (< minConfidenceGreenAfterRed 0.55)
         // → 필터에서 걸러져 침묵. R→G "건너세요" 로 넘어가면 안 된다.
         var last: SignalDecision = SignalDecision.Announce(
@@ -347,11 +388,87 @@ class SignalDecisionEngineTest {
         }
         assertTrue(notCrossing, "빨강 직후 0.50 초록은 확신 부족으로 침묵해야 한다, got=$last")
 
-        // 반면 강한 초록(0.60 ≥ 0.55)은 정상적으로 R→G 확정
-        var t2 = t + 1000
+        // 반면 강한 초록(0.60 ≥ 0.55)은 정상적으로 R→G 확정 — 빨강을 다시 보고 있다가 바로 바뀐 경우
+        var t2 = engine.watch(red(), t + STEP, 2_000)
         var strong: SignalDecision = SignalDecision.Silent(SilentReason.NO_DETECTION)
         repeat(cfg.greenTransitionStabilityFrames) { strong = engine.decide(listOf(green(0.60f)), t2); t2 += STEP }
         assertIs<SignalDecision.Announce>(strong)
         assertEquals(SignalTransition.RED_TO_GREEN, strong.transition)
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 12) R→G 는 "목격"해야 한다 — 빨강을 놓친 뒤 만난 초록은 "건너세요"가 아니다
+    // ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun 빨강을_듣고_폰을_내렸다_다시_들면_초록은_정적초록이다() {
+        val engine = SignalDecisionEngine(cfg)
+        var t = engine.confirm(red(), cfg.redStabilityFrames, 1000)
+        assertEquals(SignalDecisionEngine.COLOR_RED, engine.confirmedColor)
+        // 15초 동안 아무것도 못 봄 (detectionTimeoutMs 20초보다 짧아 빨강 확정은 남아 있다)
+        t += 15_000
+        val (d, _) = engine.feedUntilDecision(green(), t)
+        assertIs<SignalDecision.Announce>(d)
+        assertEquals(
+            SignalTransition.STATIC_GREEN, d.transition,
+            "그 사이 언제 초록이 됐는지 모른다 — '방금 바뀌었습니다, 건너세요'를 말하면 안 된다"
+        )
+        assertTrue(!d.vibrate, "정적 초록은 진동하지 않는다")
+    }
+
+    @Test
+    fun 빨강을_보다가_목격창_안에서_바뀐_초록은_RED_TO_GREEN() {
+        val engine = SignalDecisionEngine(cfg)
+        var t = engine.confirm(red(), cfg.redStabilityFrames, 1000)
+        t = engine.watch(red(), t, cfg.minPhaseDurationMs + 1000)
+        // 프레임 몇 장 놓침(목격창보다 짧은 공백) 뒤 초록
+        t += cfg.transitionWitnessWindowMs - 1000
+        val (d, _) = engine.feedUntilDecision(green(), t)
+        assertIs<SignalDecision.Announce>(d)
+        assertEquals(SignalTransition.RED_TO_GREEN, d.transition)
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 13) 초록→빨강 직후 몇 초 만의 초록은 "건너세요"가 아니라 점멸(오탐)
+    // ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun 초록에서_빨강으로_바뀐_직후_초록은_점멸로_본다() {
+        val engine = SignalDecisionEngine(cfg)
+        var t = engine.confirm(green(), cfg.greenStabilityFrames, 1000)
+        t = engine.watch(green(), t, cfg.minPhaseDurationMs + 1000)
+        val (toRed, t1) = engine.feedUntilDecision(red(), t)
+        assertIs<SignalDecision.Announce>(toRed)
+        assertEquals(SignalTransition.GREEN_TO_RED, toRed.transition)
+        // 빨강이 된 지 몇 초 안에 강한 초록이 잡힘 — 보행 빨강이 이렇게 짧을 수 없다
+        val (d, _) = engine.feedUntilDecision(green(), t1)
+        assertIs<SignalDecision.Flicker>(d, "G→R 직후 R→G 는 '건너세요'가 아니라 점멸 경고여야 한다, got=$d")
+    }
+
+    @Test
+    fun 점멸_락아웃_직후의_빨강에서_곧바로_초록은_점멸로_본다() {
+        val engine = SignalDecisionEngine(cfg)
+        // 초록 확정 → 곧바로 빨강 = 점멸 → 락아웃
+        var t = engine.confirm(green(), cfg.greenStabilityFrames, 1000)
+        val (flick, t1) = engine.feedUntilDecision(red(), t)
+        assertIs<SignalDecision.Flicker>(flick)
+        // 락아웃이 끝날 때까지 빨강을 계속 본다
+        t = engine.watch(red(), t1, cfg.flickerLockoutMs + 100)
+        val (redAgain, t2) = engine.feedUntilDecision(red(), t)
+        assertIs<SignalDecision.Announce>(redAgain)
+        assertEquals(SignalTransition.RED_NEW, redAgain.transition)
+        // 방금까지 깜빡이던 신호 — 몇 초 만의 초록을 "건너세요"로 통과시키면 안 된다
+        val (d, _) = engine.feedUntilDecision(green(), t2)
+        assertIs<SignalDecision.Flicker>(d, "락아웃 직후 빨강 → 곧바로 초록은 점멸이어야 한다, got=$d")
+    }
+
+    @Test
+    fun 첫_빨강_확정_직후의_초록은_정상_전환이다() {
+        // 긴 빨강의 끝자락을 잡은 경우 — 점멸로 보면 안 된다(기존 동작 유지)
+        val engine = SignalDecisionEngine(cfg)
+        val t = engine.confirm(red(), cfg.redStabilityFrames, 1000)
+        val (d, _) = engine.feedUntilDecision(green(), t)
+        assertIs<SignalDecision.Announce>(d)
+        assertEquals(SignalTransition.RED_TO_GREEN, d.transition)
     }
 }

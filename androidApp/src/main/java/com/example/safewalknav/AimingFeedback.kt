@@ -1,5 +1,6 @@
 package com.example.safewalknav
 
+import android.os.SystemClock
 import android.media.AudioAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -126,7 +127,7 @@ class AimingFeedback(
         //    기기에서만 서고, 단발(repeat=-1)인 "찾았다"는 그 기기에서도 잘 울린다.
         //    위에서 막으면 소나와 획득 진동이 **함께** 사라져 촉각 안내가 통째로 없어진다.
         if (!usable) return
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
         if (now < holdOffUntilMs) return   // 안전 진동 / 획득 패턴 보호 중
         val tier = tierFor(targetCenterX)
         val targetPresent = tier != Tier.NONE
@@ -212,7 +213,7 @@ class AimingFeedback(
         if (!usable) return
         currentTier = Tier.NONE
         if (armed) cancel()
-        holdOffUntilMs = System.currentTimeMillis() + durationMs
+        holdOffUntilMs = SystemClock.elapsedRealtime() + durationMs
     }
 
     private fun tierFor(targetCenterX: Float?): Tier {

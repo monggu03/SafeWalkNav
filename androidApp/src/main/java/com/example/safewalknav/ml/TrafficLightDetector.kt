@@ -4,9 +4,11 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
 import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.support.common.FileUtil
+import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
 import kotlin.math.max
 import kotlin.math.min
 
@@ -23,7 +25,11 @@ class TrafficLightDetector(context: Context) {
 
     enum class ModelKind { KAIRESS_YOLOV5, HYBRID_P2 }
 
-    private val interpreter: Interpreter
+    // var: 추론 중 NNAPI 가 계속 실패하면 CPU 인터프리터로 갈아 끼운다([fallbackToCpu]).
+    // 분석 스레드(단일)에서만 바뀌고 쓰이며, close() 는 그 스레드가 끝난 뒤에만 불린다.
+    private var interpreter: Interpreter
+    private val modelBuffer: ByteBuffer
+    private var usingNnapi: Boolean
     private val spec: ModelSpec
 
     var confidenceThreshold: Float
@@ -74,26 +80,41 @@ class TrafficLightDetector(context: Context) {
     private var pixelCache: IntArray? = null
 
     init {
-        val options = Interpreter.Options().apply {
+        fun options(useNnapi: Boolean) = Interpreter.Options().apply {
             setNumThreads(4)
             @Suppress("DEPRECATION")
-            setUseNNAPI(true)
+            setUseNNAPI(useNnapi)
         }
 
-        // ACTIVE_MODEL 의 tflite 가 없으면 검증된 기존 모델로 폴백 (크래시 방지).
+        // ACTIVE_MODEL 의 tflite 가 없으면 다른 모델로 폴백.
+        // ⚠️ 2026-07 정리로 FALLBACK_MODEL 파일(safewalknav_tl.tflite)은 assets 에서 빠졌다.
+        //    그래서 주 모델이 없으면 여기서 예외가 나고, MainActivity 가 "인식을 시작할 수 없습니다"를 말한다.
+        //    (조용히 죽지는 않는다 — 폴백을 되살리려면 파일을 다시 넣을 것)
         var loadedSpec = SPECS.getValue(ACTIVE_MODEL)
         val buffer = try {
-            FileUtil.loadMappedFile(context, loadedSpec.assetFilename)
+            loadMappedAsset(context, loadedSpec.assetFilename)
         } catch (e: Exception) {
             Log.w(TAG, "⚠️ $ACTIVE_MODEL 모델(assets/${loadedSpec.assetFilename}) 없음: ${e.message}")
             Log.w(TAG, "   → $FALLBACK_MODEL 로 폴백. export 후 assets/ 에 넣으십시오.")
             loadedSpec = SPECS.getValue(FALLBACK_MODEL)
-            FileUtil.loadMappedFile(context, loadedSpec.assetFilename)
+            loadMappedAsset(context, loadedSpec.assetFilename)
         }
 
         spec = loadedSpec
+        modelBuffer = buffer
         confidenceThreshold = spec.defaultConfidence
-        interpreter = Interpreter(buffer, options)
+        // NNAPI 가속기 초기화가 실패하는 기기(드라이버 문제·일부 저가형)가 있다. 그때 예외로 기능
+        // 전체가 죽지 않도록 CPU 로 한 번 더 시도한다 — 느려도 인식은 된다.
+        var nnapi = true
+        interpreter = try {
+            Interpreter(buffer, options(useNnapi = true))
+        } catch (e: Throwable) {
+            Log.w(TAG, "NNAPI 로 인터프리터 생성 실패 → CPU 로 재시도: ${e.message}")
+            nnapi = false
+            buffer.rewind()
+            Interpreter(buffer, options(useNnapi = false))
+        }
+        usingNnapi = nnapi
 
         val outShape = interpreter.getOutputTensor(0).shape().toList()
         Log.d(TAG, "Model=${spec.kind} in=${interpreter.getInputTensor(0).shape().toList()} out=$outShape conf=$confidenceThreshold")
@@ -112,6 +133,42 @@ class TrafficLightDetector(context: Context) {
             Log.e(TAG, "   → numAnchors / numClasses 를 실제 모델에 맞추십시오.")
         } else {
             Log.d(TAG, "✅ 출력 shape 일치")
+        }
+    }
+
+    /**
+     * 추론이 예외로 끝났을 때 분석기가 부른다 — 지난 프레임의 조준 좌표·통계를 비운다.
+     * 안 비우면 조준 진동이 옛 목표를 따라가고, "왼쪽으로"가 옛 위치로 반복되며,
+     * 옛 신뢰도가 미탐지 안내를 최대 10초 막는다.
+     * (detect() 시작에서 비우지 않는 이유: UI 스레드가 직전 결과를 아직 읽는 중일 수 있다)
+     */
+    fun clearLastResult() {
+        lastAimTargetCenterX = -1f
+        lastStats = null
+    }
+
+    /**
+     * 추론(run)이 계속 실패할 때 분석기가 부른다 — NNAPI 를 쓰고 있었다면 CPU 인터프리터로 바꾼다.
+     * 생성 때만 폴백하면, 만들어지긴 했는데 run() 에서 터지는 드라이버(실기에서 있다)는 영영 못 살린다.
+     * @return 바꿨으면 true (이미 CPU 였거나 실패하면 false). **분석 스레드에서만** 부를 것.
+     */
+    fun fallbackToCpu(): Boolean {
+        if (!usingNnapi) return false
+        return try {
+            modelBuffer.rewind()
+            val cpu = Interpreter(modelBuffer, Interpreter.Options().apply {
+                setNumThreads(4)
+                @Suppress("DEPRECATION")
+                setUseNNAPI(false)
+            })
+            try { interpreter.close() } catch (_: Exception) {}
+            interpreter = cpu
+            usingNnapi = false
+            Log.w(TAG, "추론이 계속 실패해 NNAPI → CPU 로 전환")
+            true
+        } catch (e: Throwable) {
+            Log.e(TAG, "CPU 인터프리터 전환 실패", e)
+            false
         }
     }
 
@@ -498,5 +555,27 @@ class TrafficLightDetector(context: Context) {
         const val APP_CLASS_RED = 0
         const val APP_CLASS_GREEN = 1
         private val APP_CLASS_NAMES = listOf("red_pedestrian", "green_pedestrian")
+
+        /**
+         * assets 의 모델 파일을 메모리 매핑으로 연다.
+         *
+         * tensorflow-lite-support 의 `FileUtil.loadMappedFile` 과 같은 동작이다. 그 라이브러리는
+         * 옛 tensorflow-lite(4KB 정렬 .so)를 끌고 들어와 Play 16KB 요건을 다시 깨뜨리므로
+         * 이 한 함수만 직접 구현하고 의존성은 뺐다.
+         *
+         * 매핑은 채널을 닫은 뒤에도 유효하다. openFd 는 압축되지 않은 asset 에만 되는데,
+         * AGP 는 .tflite 를 기본으로 비압축 처리한다 (예전 FileUtil 도 같은 전제였다).
+         */
+        private fun loadMappedAsset(context: Context, filename: String): MappedByteBuffer {
+            context.assets.openFd(filename).use { fd ->
+                FileInputStream(fd.fileDescriptor).use { input ->
+                    return input.channel.map(
+                        FileChannel.MapMode.READ_ONLY,
+                        fd.startOffset,
+                        fd.declaredLength,
+                    )
+                }
+            }
+        }
     }
 }

@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">SafeWalk</string>
+
+    <!-- 앱 아이콘 바로가기 (res/xml/shortcuts.xml). 짧은 이름은 10자 안팎. -->
+    <string name="shortcut_signal_short">신호등 카메라</string>
+    <string name="shortcut_signal_long">신호등 카메라 바로 켜기</string>
+    <string name="shortcut_nearby_short">내 위치</string>
+    <string name="shortcut_nearby_long">내 위치와 주변 장소</string>
 </resources>

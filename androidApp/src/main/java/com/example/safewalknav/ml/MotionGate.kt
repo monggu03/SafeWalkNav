@@ -1,5 +1,6 @@
 package com.example.safewalknav.ml
 
+import android.os.SystemClock
 import android.content.Context
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -131,7 +132,7 @@ class MotionGate(
 
         val onThreshold = if (isGyro) GYRO_ON else ACC_ON
         val offThreshold = if (isGyro) GYRO_OFF else ACC_OFF
-        val now = System.currentTimeMillis()
+        val now = SystemClock.elapsedRealtime()
 
         // 히스테리시스 — 켜는 문턱과 끄는 문턱을 다르게 둬서 경계에서 떨지 않게.
         if (!isFastMotion && smoothed >= onThreshold) {

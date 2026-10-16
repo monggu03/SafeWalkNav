@@ -66,6 +66,9 @@ class SignalDecisionEngine(
     private var lastValidatedMs: Long = 0L                 // 마지막 유효 검출 시각 (timeout 판정)
     private var lastTransitionMs: Long = 0L                // 마지막 색 전환 시각 (점멸 판정)
     private var flickerLockoutUntilMs: Long = 0L           // 점멸 락아웃 종료 시각
+    private var lastRedSeenMs: Long = 0L                   // 빨강이 선택된 마지막 유효 프레임 시각 (R→G 목격 판정)
+    private var lastTransitionWasFirstRed: Boolean = false // 마지막 전환이 "첫 빨강 확정"이었나 (점멸 예외 판정)
+    private var restartedAfterFlicker: Boolean = false     // 점멸 락아웃이 막 끝나 다시 시작하는 중인가
 
     /** 마지막 확정 색 (읽기용). 호출자의 문맥 판단·디버그에 쓴다. -1/0/1. */
     val confirmedColor: Int get() = lastConfirmedColor
@@ -83,6 +86,9 @@ class SignalDecisionEngine(
         lastValidatedMs = 0L
         lastTransitionMs = 0L
         flickerLockoutUntilMs = 0L
+        lastRedSeenMs = 0L
+        lastTransitionWasFirstRed = false
+        restartedAfterFlicker = false
     }
 
     /**
@@ -126,6 +132,9 @@ class SignalDecisionEngine(
             colorStreak = 0
             lastConfirmedColor = COLOR_NONE
             flickerLockoutUntilMs = 0L
+            // 락아웃 직후의 첫 빨강은 "처음 보는 긴 빨강의 끝자락"이 아니다 — 방금까지 깜빡이던 신호다.
+            // 그 뒤 몇 초 만의 초록을 점멸 예외로 통과시키면 "건너세요"가 나간다.
+            restartedAfterFlicker = true
         }
 
         // ── 4) 검출 타임아웃 → 상태 리셋 ──
@@ -165,14 +174,30 @@ class SignalDecisionEngine(
             colorStreak = 1
             candidateSinceMs = nowMs
         }
+        if (detectedColor == red) lastRedSeenMs = nowMs
+
+        // ── 5-a) R→G 를 "목격"했는가 ──
+        //
+        // ⚠️ 2026-10 추가. "빨강 확정" 상태는 detectionTimeoutMs(20초)까지 남는다. 그래서 예전에는
+        //    "빨간불입니다" 를 듣고 폰을 내렸다가 15초 뒤 다시 들면, 신호는 이미 12초째 초록인데도
+        //    0.8초 뒤 "방금 초록불로 바뀌었습니다. 건너세요" 가 나갔다 — 남은 시간이 몇 초뿐일 수 있다.
+        //    폰을 돌려 옆 횡단보도의 초록을 본 경우도 같다.
+        //
+        //    "방금 바뀌었다"고 말하려면 빨강을 **직전까지** 보고 있었어야 한다. 이 초록 스트릭이 시작되기
+        //    직전 [SignalDecisionConfig.transitionWitnessWindowMs] 안에 빨강을 봤을 때만 전환으로 친다.
+        //    아니면 정적 초록("멈춰서 다음 신호를 기다리세요")으로 강등한다.
+        val redWitnessed = lastConfirmedColor == red &&
+            lastRedSeenMs > 0L &&
+            candidateSinceMs - lastRedSeenMs <= config.transitionWitnessWindowMs
+
         val requiredFrames = when {
             detectedColor == red -> config.redStabilityFrames
-            lastConfirmedColor == red -> config.greenTransitionStabilityFrames
+            redWitnessed -> config.greenTransitionStabilityFrames
             else -> config.greenStabilityFrames
         }
         val requiredMs = when {
             detectedColor == red -> config.redStabilityMs
-            lastConfirmedColor == red -> config.greenTransitionStabilityMs
+            redWitnessed -> config.greenTransitionStabilityMs
             else -> config.greenStabilityMs
         }
         val elapsedMs = nowMs - candidateSinceMs
@@ -204,11 +229,19 @@ class SignalDecisionEngine(
         }
 
         // (6-2) 색 변경 (또는 첫 확정)
-        val isRedToGreen = previous == red && confirmed == green
+        // 빨강 확정 상태였어도 전환을 목격하지 못했으면(5-a) "빨강을 놓쳤다" = 첫 확정과 같게 다룬다.
+        // → 정적 초록, 진동 없음, 점멸 판정 대상도 아님(본 적 없는 전환으로 점멸 경고를 내지 않는다).
+        val effectivePrevious =
+            if (previous == red && confirmed == green && !redWitnessed) COLOR_NONE else previous
+        val isRedToGreen = effectivePrevious == red && confirmed == green
         // 점멸 감지: 정상 신호 phase 는 최소 시간 지속한다. 그보다 짧은 간격의 전환은 점멸로 본다.
-        // 단 R→G 전환과 첫 확정은 제외 (첫 확정은 항상 정상 안내).
-        if (!isRedToGreen &&
-            previous != COLOR_NONE &&
+        // 첫 확정은 제외 (항상 정상 안내).
+        // R→G 는 직전 전환이 "첫 빨강 확정"일 때만 제외한다 — 긴 빨강의 끝자락을 잡은 것일 수 있어서.
+        // ⚠️ 2026-10: 예전에는 R→G 를 무조건 제외해, 초록→빨강 직후 1~3초 만에 초록(차량 신호·간판 오탐)이
+        //    잡혀도 "건너세요"가 나갔다. 보행 빨강이 몇 초 만에 끝나는 일은 없다 → 점멸(오탐)로 본다.
+        val exemptFromFlicker = isRedToGreen && lastTransitionWasFirstRed
+        if (!exemptFromFlicker &&
+            effectivePrevious != COLOR_NONE &&
             lastTransitionMs > 0L &&
             nowMs - lastTransitionMs < config.minPhaseDurationMs
         ) {
@@ -220,6 +253,7 @@ class SignalDecisionEngine(
             colorStreak = 0
             lastTransitionMs = nowMs
             lastHeartbeatMs = nowMs
+            lastTransitionWasFirstRed = false
             return SignalDecision.Flicker(gapMs, previous, confirmed)
         }
 
@@ -229,11 +263,13 @@ class SignalDecisionEngine(
         lastTransitionMs = nowMs
 
         val transition = when {
-            confirmed == red && previous == green -> SignalTransition.GREEN_TO_RED
+            confirmed == red && effectivePrevious == green -> SignalTransition.GREEN_TO_RED
             confirmed == red -> SignalTransition.RED_NEW
-            confirmed == green && previous == red -> SignalTransition.RED_TO_GREEN
+            isRedToGreen -> SignalTransition.RED_TO_GREEN
             else -> SignalTransition.STATIC_GREEN
         }
+        lastTransitionWasFirstRed = transition == SignalTransition.RED_NEW && !restartedAfterFlicker
+        restartedAfterFlicker = false
         // 진동: 초록→빨강 전환, R→G 전환에서만. 정적 초록/신규 빨강은 진동 없음.
         val vibrate = transition == SignalTransition.GREEN_TO_RED ||
             transition == SignalTransition.RED_TO_GREEN
@@ -414,6 +450,13 @@ data class SignalDecisionConfig(
      *   (같은 색 연속 스트릭에만 관여하므로, 그 사이 다른 색이 잡히면 어차피 스트릭은 새로 시작된다)
      */
     val maxObservationGapMs: Long = 2_000L,
+    /**
+     * R→G "전환을 목격했다"고 인정하는 최대 간격: 마지막 빨강 프레임 ~ 초록 스트릭 시작.
+     * 이보다 길면 그 사이 언제 초록이 됐는지 모르므로 "방금 바뀌었습니다"(건너세요) 대신 정적 초록으로 안내.
+     * 보행 신호는 빨강→초록이 즉시 바뀐다. 3초면 발열 스로틀(약 2fps)과 모션 게이트의 프레임 누락을 견디면서,
+     * "폰을 내렸다 15초 뒤 다시 듦" 같은 경우는 확실히 걸러낸다.
+     */
+    val transitionWitnessWindowMs: Long = 3_000L,
     // 선택 단계 R→G 안전 바이어스 (빨강·초록 동시 검출 시 초록이 이기는 조건)
     val greenTransitionMinConfidence: Float = 0.55f,
     val greenOverRedConfidenceMargin: Float = 0.05f,
