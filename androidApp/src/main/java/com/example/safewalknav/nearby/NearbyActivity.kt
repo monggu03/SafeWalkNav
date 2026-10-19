@@ -115,8 +115,15 @@ class NearbyActivity : AppCompatActivity() {
     /** 설정 화면으로 보냈다 — 돌아오면 권한을 다시 보고 찾기 시작하거나 무엇이 빠졌는지 말한다. */
     private var sentToSettings = false
 
+    /** 우리가 띄운 권한 창이 떠 있다 — 그동안의 onPause 는 "떠남"이 아니다. */
+    private var permissionDialogShowing = false
+
+    /** 안내를 말하던 중에 화면을 떠났다 — 돌아오면 다시 들려준다. */
+    private var speechCutOff = false
+
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            permissionDialogShowing = false
             if (hasFineLocation()) {
                 locationPermissionBlocked = false
                 refresh()
@@ -166,7 +173,7 @@ class NearbyActivity : AppCompatActivity() {
         // 보행 신호등이 가까우면 곧바로 신호등 카메라로 — 홈으로 돌아갈 필요 없이.
         btnCamera.setOnClickListener {
             // 진행 중인 검색도 멈춘다. 안 그러면 몇 초 뒤 이 화면의 음성이 신호등 카메라 안내 위로
-            // "주변 장소 N곳을 찾았습니다"를 덮어 말한다. 돌아오면 다시 찾는다(onRestart).
+            // "주변 장소 N곳을 찾았습니다"를 덮어 말한다. 돌아오면 다시 찾는다(onResume).
             cancelSearchForLeaving()
             stopBeacon()
             speaker.stop()
@@ -214,6 +221,24 @@ class NearbyActivity : AppCompatActivity() {
                 tvAddress.text = "위치 권한 필요"
                 speaker.speak(locationPermissionMessage())
             }
+            return
+        }
+        // 돌아왔을 때 다시 찾는다 — ① 떠나며 검색을 끊었거나 ② 위치가 오래됐을 때.
+        // 신호등 카메라로 길을 건너고 돌아오면 예전 박스는 수십 m 전 위치 기준이라, 누르면 엉뚱한 방향을 말한다.
+        // (같은 자리면 장소 목록은 캐시에서 나와 API 비용은 거의 없다)
+        val stale = fix != null && SystemClock.elapsedRealtime() - fixAtMs > STALE_FIX_ON_RETURN_MS
+        if (refreshOnReturn || stale) {
+            refreshOnReturn = false
+            speechCutOff = false   // 다시 찾으면서 새로 안내한다
+            refresh()
+            return
+        }
+        // 안내(위치 설명·요약)를 듣다가 나갔다 돌아옴 — 끊긴 안내를 처음부터 다시 들려준다.
+        // 상태 줄에는 마지막으로 한 말이 그대로 있다(라이브 리전 토글용 보이지 않는 문자만 뗀다).
+        if (speechCutOff) {
+            speechCutOff = false
+            val last = tvStatus.text.toString().replace("​", "").trim()
+            if (last.isNotEmpty()) speaker.speak(last)
         }
     }
 
@@ -229,6 +254,7 @@ class NearbyActivity : AppCompatActivity() {
         }
         if (!speaker.isScreenReaderOn()) speaker.speak(PERMISSION_DIALOG_HINT)
         locationPermissionRequestedAt = PermissionGate.markRequested()
+        permissionDialogShowing = true   // 권한 창이 이 화면을 가려도(onPause) 위 안내는 끝까지 들려준다
         permissionLauncher.launch(
             arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
         )
@@ -248,24 +274,17 @@ class NearbyActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 화면이 완전히 가려졌다 — 안전망. 보통은 onPause 에서 이미 멈췄다.
+     * 권한 창이 떠 있는 동안 홈 버튼을 누른 경우(onPause 에서는 일부러 안 멈춤)가 여기서 걸린다.
+     */
     override fun onStop() {
         super.onStop()
-        // 다른 화면으로 가려졌다 — 검색이 돌고 있으면 멈춘다(위와 같은 이유: 남의 화면 위로 말하지 않게).
         cancelSearchForLeaving()
-        // 홈 버튼·최근 앱으로 나가도 하던 말을 멈춘다 — 다른 앱 위로 몇 초씩 이어지지 않게.
-        // 단, 우리가 설정 화면을 연 경우는 "허용한 뒤 돌아오세요"를 끝까지 들려준다.
-        if (!sentToSettings) speaker.stop()
-    }
-
-    override fun onRestart() {
-        super.onRestart()
-        // 돌아왔을 때 위치가 오래됐으면 다시 찾는다. 신호등 카메라로 길을 건너고 돌아오면
-        // 예전 박스는 수십 m 전 위치 기준이라, 누르면 엉뚱한 방향을 말한다.
-        // (같은 자리면 장소 목록은 캐시에서 나와 API 비용은 거의 없다)
-        val stale = fix != null && SystemClock.elapsedRealtime() - fixAtMs > STALE_FIX_ON_RETURN_MS
-        if (refreshOnReturn || stale) {
-            refreshOnReturn = false
-            refresh()
+        // 우리가 설정 화면을 연 경우만 "허용한 뒤 돌아오세요"를 끝까지 들려준다.
+        if (!sentToSettings) {
+            if (speaker.isBusy()) speechCutOff = true
+            speaker.stop()
         }
     }
 
@@ -288,11 +307,22 @@ class NearbyActivity : AppCompatActivity() {
         return if (stale) "$message ${NearbyPhrases.STALE_LOCATION_HINT}" else message
     }
 
+    /**
+     * 홈 버튼·최근 앱·화면 끄기 → **즉시** 말과 검색을 멈춘다.
+     * 예전에는 onStop 에서만 멈춰서, 앱 밖으로 나간 뒤에도 안내가 조금 더 이어졌다.
+     * 예외: 우리가 띄운 권한 창이 이 화면을 가린 경우(그 창을 설명하는 안내를 끊지 않게),
+     *       우리가 연 설정 화면으로 가는 경우("허용한 뒤 돌아오세요"를 끝까지).
+     */
     override fun onPause() {
         super.onPause()
         // 화면을 떠나면 방향 진동도 끝 — 주머니 속에서 계속 떨면 안 된다.
         stopBeacon()
         heading.stop()
+        if (!permissionDialogShowing && !sentToSettings) {
+            cancelSearchForLeaving()   // 남의 화면 위로 "주변 장소 N곳을 찾았습니다"가 나오지 않게
+            if (speaker.isBusy()) speechCutOff = true
+            speaker.stop()
+        }
     }
 
     override fun onDestroy() {

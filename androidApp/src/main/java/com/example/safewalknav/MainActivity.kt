@@ -155,6 +155,14 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     /** 첫 안내를 아직 못 내보냄 (TalkBack 지연 중이거나 화면이 가려져 있음). 문장은 내보낼 때 고른다. */
     private var introPending = false
 
+    /**
+     * 첫 안내(조작법)를 말하는 중. TTS 콜백 스레드가 내리므로 @Volatile.
+     * 홈 버튼으로 나가며 끊기면 onPause 가 [introPending] 을 다시 세워, 돌아왔을 때 처음부터 들려준다 —
+     * 볼륨 키 조작법은 이 안내가 아니면 알 방법이 없다.
+     */
+    @Volatile
+    private var introInFlight = false
+
     /** 카메라 권한을 "다시 묻지 않음"으로 거부함 — 시스템이 권한 창을 더 띄우지 않으므로 설정 화면으로 보낸다. */
     private var cameraPermissionBlocked = false
 
@@ -1018,6 +1026,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             override fun onError(utteranceId: String?) = finished(utteranceId)
             override fun onStop(utteranceId: String?, interrupted: Boolean) = finished(utteranceId)
             private fun finished(id: String?) {
+                if (id == UTTERANCE_INTRO) introInFlight = false
                 if (id == UTTERANCE_SYSTEM_ACTION) runOnUiThread { runPendingSystemAction() }
             }
         })
@@ -1081,7 +1090,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (isFinishing || isDestroyed) return
         if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) return
         introPending = false
-        speakTts(introMessage())
+        lastAudibleAtMs = SystemClock.elapsedRealtime()
+        if (!ttsReady) return
+        // 따로 표시해 둔다 — 듣는 도중 화면을 떠나면 onPause 가 알아채고, 돌아왔을 때 다시 들려준다.
+        introInFlight = true
+        tts.speak(introMessage(), TextToSpeech.QUEUE_ADD, null, UTTERANCE_INTRO)
     }
 
     /**
@@ -1525,6 +1538,11 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         // 큐에 남은 발화를 비운다. 그러지 않으면 사용자가 폰을 주머니에 넣은 뒤에
         // "빨간불입니다. 정지하세요." 가 뒤늦게 나갈 수 있다 — 맥락 없는 안전 지시는
         // 아무 안내도 없는 것보다 위험하다.
+        // 첫 안내가 도중에 끊기는 거라면 돌아왔을 때 다시 들려준다(onResume 이 introPending 을 본다).
+        if (introInFlight) {
+            introInFlight = false
+            introPending = true
+        }
         if (::tts.isInitialized) tts.stop()
     }
 
@@ -1591,6 +1609,9 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         /** [speakThen] 의 발화 ID — 완료 콜백에서 이 발화만 골라낸다. */
         private const val UTTERANCE_SYSTEM_ACTION = "system_action"
+
+        /** 첫 안내의 발화 ID — 끊겼는지 알아내는 데 쓴다([introInFlight]). */
+        private const val UTTERANCE_INTRO = "intro"
 
         /** 완료 콜백이 안 와도 이만큼 지나면 권한 창·설정 화면을 연다(가장 긴 안내도 이 안에 끝난다). */
         private const val SYSTEM_ACTION_MAX_WAIT_MS = 10_000L

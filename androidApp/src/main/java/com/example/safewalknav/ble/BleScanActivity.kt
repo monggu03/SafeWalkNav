@@ -109,8 +109,15 @@ class BleScanActivity : AppCompatActivity() {
     /** 마지막 권한 요청 시각 — 창이 뜨지도 않고 즉시 거부됐는지 판단용([PermissionGate]). */
     private var permissionRequestedAt = 0L
 
+    /** 우리가 띄운 권한 창이 떠 있다 — 그동안의 onPause 는 "떠남"이 아니다. */
+    private var permissionDialogShowing = false
+
+    /** 안내를 말하던 중에 화면을 떠났다 — 돌아오면 지금 상태를 다시 말해 준다. */
+    private var speechCutOff = false
+
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+            permissionDialogShowing = false
             if (hasScanPermissions()) {
                 permissionBlocked = false
                 startScan()
@@ -165,6 +172,7 @@ class BleScanActivity : AppCompatActivity() {
         super.onResume()
         if (sentToSettings) {
             sentToSettings = false
+            speechCutOff = false
             if (hasScanPermissions()) {
                 permissionBlocked = false
                 startScan()
@@ -172,19 +180,37 @@ class BleScanActivity : AppCompatActivity() {
                 // 설정에서 허용하지 않고(또는 하나만 허용하고) 돌아옴 — 예전엔 아무 말도 없었다.
                 speaker.speak(permissionMessage())
             }
+            return
+        }
+        // 안내를 듣다가 나갔다 돌아옴 — 조용하면 어느 화면인지 모른다. 지금 상태를 한 마디로.
+        if (speechCutOff) {
+            speechCutOff = false
+            speaker.speak(if (hasScanPermissions()) RESTORED else permissionMessage())
         }
     }
 
+    /**
+     * 홈 버튼·최근 앱·화면 끄기 → **즉시** 스캔과 말을 멈춘다(예전엔 말은 onStop 에서야 멈춰 앱 밖에서도 조금 더 들렸다).
+     * 예외: 우리가 띄운 권한 창이 이 화면을 가린 경우(창을 설명하는 안내를 끊지 않게),
+     *       우리가 연 설정 화면으로 가는 경우("허용한 뒤 돌아오세요"를 끝까지).
+     */
     override fun onPause() {
         super.onPause()
         // 화면을 떠나면 스캔을 멈춘다 — 배터리, 그리고 백그라운드 스캔 제한.
         stopScan(announce = false)
+        if (!permissionDialogShowing && !sentToSettings) {
+            if (speaker.isBusy()) speechCutOff = true
+            speaker.stop()
+        }
     }
 
+    /** 안전망 — 권한 창이 떠 있는 동안 홈 버튼을 누른 경우(onPause 에서는 일부러 안 멈춤)가 여기서 걸린다. */
     override fun onStop() {
         super.onStop()
-        // 다른 앱으로 나가면 하던 말도 멈춘다. 우리가 설정 화면을 연 경우는 안내를 끝까지 들려준다.
-        if (!sentToSettings) speaker.stop()
+        if (!sentToSettings) {
+            if (speaker.isBusy()) speechCutOff = true
+            speaker.stop()
+        }
     }
 
     override fun onDestroy() {
@@ -257,6 +283,7 @@ class BleScanActivity : AppCompatActivity() {
                 // (TalkBack 사용자는 TalkBack 이 창을 읽는다)
                 if (announceDialog && !speaker.isScreenReaderOn()) speaker.speak(PERMISSION_DIALOG_HINT)
                 permissionRequestedAt = PermissionGate.markRequested()
+                permissionDialogShowing = true   // 권한 창이 이 화면을 가려도(onPause) 위 안내는 끝까지 들려준다
                 permissionLauncher.launch(requestedPermissions())
             }
         }

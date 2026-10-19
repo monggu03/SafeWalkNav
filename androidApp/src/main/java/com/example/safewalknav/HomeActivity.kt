@@ -25,6 +25,10 @@ class HomeActivity : AppCompatActivity() {
     private lateinit var speaker: Speaker
     private var skipNextResumeCue = false
 
+    /** 첫 안내(버튼 배치)를 말하는 중인가 / 그게 화면을 떠나며 끊겼는가. */
+    private var introPlaying = false
+    private var introCutOff = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_home)
@@ -32,18 +36,9 @@ class HomeActivity : AppCompatActivity() {
 
         speaker = Speaker(this, statusView = null)
 
-        findViewById<Button>(R.id.btnNearby).setOnClickListener {
-            speaker.stop()
-            startActivity(Intent(this, NearbyActivity::class.java))
-        }
-        findViewById<Button>(R.id.btnSignal).setOnClickListener {
-            speaker.stop()
-            startActivity(Intent(this, MainActivity::class.java))
-        }
-        findViewById<Button>(R.id.btnAps).setOnClickListener {
-            speaker.stop()
-            startActivity(Intent(this, BleScanActivity::class.java))
-        }
+        findViewById<Button>(R.id.btnNearby).setOnClickListener { open(NearbyActivity::class.java) }
+        findViewById<Button>(R.id.btnSignal).setOnClickListener { open(MainActivity::class.java) }
+        findViewById<Button>(R.id.btnAps).setOnClickListener { open(BleScanActivity::class.java) }
 
         // (아이콘 바로가기는 SafetyNoticeActivity 가 홈+목적 화면을 한 번에 쌓는다 — 홈은
         //  사용자가 뒤로 가기를 했을 때 여기서 처음 만들어지고, 그때 아래 첫 안내가 나간다)
@@ -51,9 +46,21 @@ class HomeActivity : AppCompatActivity() {
         // 프로세스당 한 번 (회전·재생성으로 다시 말하지 않게 savedInstanceState 도 본다)
         if (savedInstanceState == null && !introSpoken) {
             introSpoken = true
-            speaker.speak(INTRO)
+            speakIntro()
             skipNextResumeCue = true   // 바로 이어지는 onResume 에서 "홈입니다"를 겹쳐 말하지 않게
         }
+    }
+
+    /** 사용자가 고른 화면으로 — 버튼을 고른 것이니 하던 안내는 끊는다(다시 들려줄 필요도 없다). */
+    private fun open(target: Class<*>) {
+        introPlaying = false
+        speaker.stop()
+        startActivity(Intent(this, target))
+    }
+
+    private fun speakIntro() {
+        introPlaying = true
+        speaker.speak(INTRO)
     }
 
     /**
@@ -67,11 +74,20 @@ class HomeActivity : AppCompatActivity() {
             skipNextResumeCue = false
             return
         }
+        // 첫 안내(버튼 배치)를 듣다가 홈 버튼으로 나갔다면, 돌아왔을 때 "홈입니다"가 아니라 배치를 다시 알려 준다.
+        if (introCutOff) {
+            introCutOff = false
+            speakIntro()
+            return
+        }
         speaker.speak(BACK_HOME)
     }
 
+    /** 홈 버튼·최근 앱으로 나가면 즉시 말을 멈춘다. */
     override fun onPause() {
         super.onPause()
+        if (introPlaying && speaker.isBusy()) introCutOff = true
+        introPlaying = false
         speaker.stop()
     }
 

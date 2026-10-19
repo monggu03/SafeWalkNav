@@ -70,6 +70,30 @@ class SafetyNoticeActivity : AppCompatActivity() {
         showNotice()
     }
 
+    /** 고지를 읽던 중에 화면을 떠났다 — 돌아오면 처음부터 다시 들려준다. */
+    private var cutOffWhileLeaving = false
+
+    /**
+     * 홈 버튼·최근 앱으로 나가면 **즉시** 말을 멈춘다.
+     * 예전에는 이 화면만 멈추는 코드가 없어서, 앱 밖으로 나가도 긴 고지문이 끝까지 흘러나왔다
+     * (새로 설치하면 맨 먼저 뜨는 화면이라 가장 먼저 겪는다).
+     */
+    override fun onPause() {
+        super.onPause()
+        val s = speaker ?: return
+        if (s.isBusy()) cutOffWhileLeaving = true
+        s.stop()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 끊긴 채 조용한 동의 화면은 막다른 길이다 — 무엇에 동의하는지, 버튼이 어디인지 다시 알려 준다.
+        if (cutOffWhileLeaving) {
+            cutOffWhileLeaving = false
+            if (blockedContainer.visibility == View.VISIBLE) showBlocked() else showNotice()
+        }
+    }
+
     override fun onDestroy() {
         speaker?.shutdown()
         super.onDestroy()

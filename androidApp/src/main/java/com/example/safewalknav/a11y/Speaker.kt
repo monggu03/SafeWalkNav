@@ -111,6 +111,14 @@ class Speaker(
         if (ready) tts.stop()
     }
 
+    /**
+     * 앱 음성이 말하는 중이거나, 엔진 준비를 기다리는 말이 있는가.
+     * 화면을 떠나며 [stop] 하기 **전에** 물어서, 안내가 중간에 끊겼는지 알아낸다
+     * (돌아왔을 때 다시 들려줄지 판단 — 끊긴 채 조용하면 시각장애인은 어디인지 모른다).
+     * TalkBack 이 켜져 있으면 앱 음성을 쓰지 않으므로 늘 false.
+     */
+    fun isBusy(): Boolean = pending != null || (ready && tts.isSpeaking)
+
     fun shutdown() {
         pending = null
         tts.stop()
