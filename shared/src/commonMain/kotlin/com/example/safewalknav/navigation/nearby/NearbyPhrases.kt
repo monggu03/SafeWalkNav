@@ -39,7 +39,8 @@ object NearbyPhrases {
      *
      * @param withinError 장소까지 거리가 위치 오차에 비해 충분히 멀지 않음 — 이때 방향은 크게 틀릴 수 있다
      *   (거리 = 오차 이면 최대 ±90°, 거리 = 오차×2 여야 ±30° 안쪽). 방향을 말하되 그 사실을 붙인다.
-     *   "아주 가까워서"라고 하지 않는다 — 40m 떨어진 곳도 오차가 45m 면 여기 해당한다.
+     *   단서는 "위치 오차가 커서" — 원인을 거리("너무 가까워서")로 말하면 틀린다. 오차가 45m 면 40m 떨어진
+     *   곳도 여기 해당하는데, 그걸 "너무 가깝다"고 하면 사실과 다르다.
      *   방향 **앞에** "대략"을 붙인다 — 단서가 뒤에만 있으면 방향을 먼저 믿어 버린다.
      */
     fun placeDetail(
@@ -48,12 +49,23 @@ object NearbyPhrases {
         noDirectionReason: NoDirectionReason?,
         withinError: Boolean = false,
         beaconStarted: Boolean = false,
+        closeRange: Boolean = false,
+        beaconWithheld: Boolean = false,
     ): String {
         val dist = distanceText(place.distanceM)
         if (clockHour != null) {
             val rough = if (withinError) "대략 " else ""
-            val caveat = if (withinError) " 위치 오차에 비해 가까워서 방향이 정확하지 않을 수 있습니다." else ""
-            val beacon = if (beaconStarted) " $BEACON_HINT" else ""
+            // 이유를 사실대로: 보고된 오차가 커서인지, 오차는 작은데 아주 가까워서인지.
+            val caveat = when {
+                !withinError -> ""
+                closeRange -> " 가까운 곳이라 방향이 정확하지 않을 수 있습니다."
+                else -> " 위치 오차가 커서 방향이 정확하지 않을 수 있습니다."
+            }
+            val beacon = when {
+                beaconStarted -> " $BEACON_HINT"
+                beaconWithheld -> " 방향이 확실하지 않아 진동 안내는 하지 않습니다."
+                else -> ""
+            }
             return "${place.name}. $rough${clockHour}시 방향, ${dist}.$caveat$beacon"
         }
         val why = when (noDirectionReason) {
@@ -102,8 +114,9 @@ object NearbyPhrases {
     ): String {
         val parts = mutableListOf<String>()
         // 오차 경고를 **맨 앞에**. 뒤에 붙이면 사용자는 이미 "○○ 근처입니다"를 믿고 들은 뒤다.
+        // "아래 안내" 같은 화면 위치 말은 쓰지 않는다 — 듣는 사람에게는 위아래가 없다.
         if (accuracyM > NearbyPolicy.POOR_ACCURACY_M) {
-            parts += "위치 오차가 ${distanceText(accuracyM)}라 아래 안내가 정확하지 않을 수 있습니다."
+            parts += "위치가 ${distanceText(accuracyM)}까지 틀릴 수 있어, 이어지는 안내가 정확하지 않을 수 있습니다."
         }
         val building = buildingName(info)
         val dong = dongName(info)
@@ -135,13 +148,27 @@ object NearbyPhrases {
     }
 
     // ── 방향 찾기 진동 ──
-    /** 박스를 눌러 진동 안내가 시작될 때 덧붙인다. 멈추는 법까지 한 번에 알려 준다. */
-    const val BEACON_HINT = "그쪽을 향하면 진동이 울립니다. 같은 장소를 다시 누르면 멈춥니다."
-    const val BEACON_STOPPED = "방향 찾기를 멈췄습니다."
-    const val BEACON_TIMEOUT = "방향 찾기를 마쳤습니다. 다시 하려면 장소를 다시 누르세요."
+    /**
+     * 박스를 눌러 진동 안내가 시작될 때 덧붙인다. 멈추는 법까지 한 번에 알려 준다.
+     * 자세를 구체적으로 말한다 — 손목만 돌리면 나침반 기준(휴대폰 정면)과 몸 방향이 어긋난다.
+     */
+    const val BEACON_HINT =
+        "휴대폰을 가슴 앞에 들고 몸 전체를 천천히 돌려 보세요. 그 장소 쪽을 향하면 진동이 울립니다. 진동을 끄려면 같은 장소를 다시 누르세요."
 
+    /** "방향 찾기"라는 이름 대신 실제로 느끼는 것(진동)으로 말한다. */
+    const val BEACON_STOPPED = "진동을 껐습니다."
+    const val BEACON_TIMEOUT = "진동이 끝났습니다. 다시 하려면 장소를 다시 누르세요."
+
+    /** "8자를 그리듯 돌려"는 동작이 잘 안 그려진다 — 공중에 숫자 8을 그리는 것으로. */
     const val CALIBRATE_COMPASS =
-        "나침반이 부정확합니다. 휴대폰을 8자를 그리듯 천천히 돌려 주세요."
+        "나침반이 부정확합니다. 휴대폰으로 공중에 숫자 8을 몇 번 그려 주세요."
+
+    /**
+     * 주변 쇠붙이(주차된 차·버스정류장·철골) 때문에 자기장이 흐트러진 경우. 8자 보정으로는 안 고쳐진다 —
+     * 그 자리를 벗어나야 한다. 보정 안내를 하면 아무리 그려도 안 돼서 앱이 고장 난 줄 안다.
+     */
+    const val MAGNETIC_INTERFERENCE =
+        "근처의 차나 쇠붙이 때문에 나침반이 흔들립니다. 몇 걸음 옮긴 뒤 다시 해 보세요."
 
     /** 원인이 인터넷만은 아니다(검색 한도 초과·서버 오류·와이파이 로그인 화면) — 단정하지 않는다. */
     const val SEARCH_FAILED = "주변 장소를 불러오지 못했습니다. 인터넷 연결을 확인하거나 잠시 후 다시 시도해 주세요."

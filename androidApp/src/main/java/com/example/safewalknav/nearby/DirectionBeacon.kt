@@ -20,8 +20,10 @@ import kotlin.math.abs
  * (경로 안내가 아니다. "어느 쪽인가" 만 알려 준다.)
  *
  * 진동 어휘 (이 화면 전용, 신호등 카메라의 진동과 겹치지 않게 짧고 가볍게)
- *  - 정면에 들어온 순간: 60ms 한 번 ("찾았다")
- *  - 정면에 머무는 동안: 25ms 톡 — 0.5초마다
+ *  - 정면에 들어온 순간: 60ms·쉼 70ms·60ms 두 번 ("찾았다")
+ *    — 한 번짜리 짧은 진동은 TalkBack 의 포커스 이동 진동과 구별이 안 됐다. 두 번 톡톡은 겹치지 않는다.
+ *  - 정면에 머무는 동안: 45ms 톡 — 0.5초마다
+ *    — 25ms 는 장갑·두꺼운 케이스 너머나 값싼 진동 모터(ERM, 회전 시작이 느림)에서 거의 안 느껴졌다.
  *  - 벗어나면: 조용
  *
  * 들어올 때 ±15°, 나갈 때 ±22° — 경계에서 손이 조금 떨려도 켜졌다 꺼졌다 하지 않게(히스테리시스).
@@ -103,10 +105,11 @@ class DirectionBeacon(context: Context, private val heading: HeadingTracker) {
                 val limit = if (inside) EXIT_DEG else ENTER_DEG
                 val nowInside = off <= limit
                 if (nowInside && !inside) {
-                    vibrate(FOUND_MS)
-                    lastTickAt = now
+                    vibrate(FOUND_EFFECT)
+                    // 다음 톡은 두 번 진동이 끝난 뒤 0.5초부터 — 바로 이어지면 세 번 진동처럼 느껴진다.
+                    lastTickAt = now + FOUND_TOTAL_MS
                 } else if (nowInside && now - lastTickAt >= TICK_INTERVAL_MS) {
-                    vibrate(TICK_MS)
+                    vibrate(TICK_EFFECT)
                     lastTickAt = now
                 }
                 inside = nowInside
@@ -122,9 +125,8 @@ class DirectionBeacon(context: Context, private val heading: HeadingTracker) {
      * 접근성 용도로 진동한다 — 아니면 절전 모드·시스템 진동 설정에서 억제된다
      * (신호등 카메라와 같은 이유).
      */
-    private fun vibrate(ms: Long) {
+    private fun vibrate(effect: VibrationEffect) {
         if (!vibrator.hasVibrator()) return
-        val effect = VibrationEffect.createOneShot(ms, VibrationEffect.DEFAULT_AMPLITUDE)
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 vibrator.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ACCESSIBILITY))
@@ -142,9 +144,19 @@ class DirectionBeacon(context: Context, private val heading: HeadingTracker) {
         private const val EXIT_DEG = 22.0
         private const val POLL_MS = 100L
         private const val TICK_INTERVAL_MS = 500L
-        private const val FOUND_MS = 60L
-        private const val TICK_MS = 25L
+
+        /** "찾았다" = 두 번 톡톡 (60ms, 쉼 70ms, 60ms). 클래스 주석의 진동 어휘 참고. */
+        private const val FOUND_PULSE_MS = 60L
+        private const val FOUND_GAP_MS = 70L
+        private const val FOUND_TOTAL_MS = FOUND_PULSE_MS + FOUND_GAP_MS + FOUND_PULSE_MS
+        private const val TICK_MS = 45L
         const val MAX_DURATION_MS = 30_000L
+
+        private val FOUND_EFFECT: VibrationEffect = VibrationEffect.createWaveform(
+            longArrayOf(0L, FOUND_PULSE_MS, FOUND_GAP_MS, FOUND_PULSE_MS), -1
+        )
+        private val TICK_EFFECT: VibrationEffect =
+            VibrationEffect.createOneShot(TICK_MS, VibrationEffect.DEFAULT_AMPLITUDE)
 
         /** 나침반 불량이 이만큼 이어지면 멈추고 알린다 (잠깐 튀는 건 견딘다). */
         private const val COMPASS_LOST_MS = 2_000L

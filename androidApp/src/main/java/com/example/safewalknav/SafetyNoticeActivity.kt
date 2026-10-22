@@ -3,13 +3,16 @@ package com.example.safewalknav
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.View
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import com.example.safewalknav.a11y.AudioRouting
 import com.example.safewalknav.a11y.Speaker
+import com.example.safewalknav.a11y.VolumeDownRepeat
 import com.example.safewalknav.a11y.WindowFocus
 
 /**
@@ -19,7 +22,12 @@ import com.example.safewalknav.a11y.WindowFocus
  *  - 이미 동의함(SharedPreferences) → 즉시 HomeActivity 이동 (고지 스킵)
  *  - 미동의 → 고지 화면 표시
  *      · [동의]   → 동의 저장 후 HomeActivity 이동
- *      · [비동의] → 차단 화면 ("다시 고지 보기" 로 복귀 가능)
+ *      · [비동의] → 차단 화면 ("안내 다시 듣기" 로 복귀 가능)
+ *
+ * 버튼 배치 (2026-10 변경): 위 [동의하지 않음](회색·작게) / **맨 아래 [동의하고 시작하기](노랑·크게)**.
+ * 예전엔 [동의] 가 위, [동의하지 않음] 이 맨 아래였는데, 화면 아래 가장자리를 손끝으로 더듬어 누르는
+ * 시각장애인이 "동의하지 않음"을 눌러 막혔다. 손이 먼저 가는 맨 아래에 앞으로 나아가는 버튼을 둔다.
+ * TalkBack 읽는 순서는 고지 문장 → 동의 → 동의하지 않음 그대로(레이아웃의 traversalBefore/After).
  *
  * 접근성 (2026-10 수정)
  *  - TalkBack 켜짐: 창이 포커스를 얻은 뒤 **고지 문장에 접근성 포커스를 옮긴다.** TalkBack 이 그 문장을
@@ -27,13 +35,19 @@ import com.example.safewalknav.a11y.WindowFocus
  *    예전에는 announceForAccessibility 로 따로 읽혀서 TalkBack 이 포커스 낭독과 겹쳐 **두 번** 읽거나,
  *    창 전환 직후라 아예 묻혔다. (그 API 는 Android 16 에서 폐기 예정이기도 하다)
  *  - TalkBack 꺼짐: 예전에는 **아무 소리도 안 났다** — TalkBack 을 안 쓰는 시각장애인은 고지를 들을
- *    방법이 없었다. 이제 앱 음성으로 고지 + 버튼 위치를 읽는다.
+ *    방법이 없었다. 이제 앱 음성으로 고지 + 버튼 위치를 읽는다. 볼륨 아래 짧게 = 다시 듣기.
  */
 class SafetyNoticeActivity : AppCompatActivity() {
 
     private lateinit var noticeContainer: LinearLayout
     private lateinit var blockedContainer: LinearLayout
     private var speaker: Speaker? = null
+
+    /**
+     * 볼륨 아래 짧게 = 지금 화면(고지 또는 차단)을 처음 보여 줄 때처럼 다시 들려준다.
+     * 긴 고지를 한 번에 못 알아들으면 다시 들을 방법이 없었다(TalkBack 꺼진 사용자용 — 켜져 있으면 손대지 않음).
+     */
+    private val volumeRepeat = VolumeDownRepeat(this) { presentCurrent() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,7 +68,9 @@ class SafetyNoticeActivity : AppCompatActivity() {
         }
 
         setContentView(R.layout.activity_safety_notice)
-        title = "SafeWalk 안전 고지"
+        title = "SafeWalk 안전 안내"
+        // 볼륨 올리기가 벨소리가 아니라 안내 음성 볼륨을 움직이게.
+        AudioRouting.bindVolumeKeys(this)
         speaker = Speaker(this, statusView = null)
 
         noticeContainer = findViewById(R.id.noticeContainer)
@@ -90,8 +106,21 @@ class SafetyNoticeActivity : AppCompatActivity() {
         // 끊긴 채 조용한 동의 화면은 막다른 길이다 — 무엇에 동의하는지, 버튼이 어디인지 다시 알려 준다.
         if (cutOffWhileLeaving) {
             cutOffWhileLeaving = false
-            if (blockedContainer.visibility == View.VISIBLE) showBlocked() else showNotice()
+            presentCurrent()
         }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
+        volumeRepeat.onKeyDown(keyCode, event) || super.onKeyDown(keyCode, event)
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean =
+        volumeRepeat.onKeyUp(keyCode, event) || super.onKeyUp(keyCode, event)
+
+    /** 지금 보이는 화면(고지 / 차단)을 처음 보여 줄 때와 똑같이 다시 들려준다. */
+    private fun presentCurrent() {
+        // 이미 동의해 곧바로 닫히는 경우엔 화면을 만들지 않았다.
+        if (!::blockedContainer.isInitialized || isFinishing) return
+        if (blockedContainer.visibility == View.VISIBLE) showBlocked() else showNotice()
     }
 
     override fun onDestroy() {
@@ -159,10 +188,14 @@ class SafetyNoticeActivity : AppCompatActivity() {
         private const val PREFS = "safewalk_prefs"
         private const val KEY_AGREED = "hasAgreedToSafetyNotice"
 
-        /** TalkBack 이 꺼진 사용자용 — 버튼을 눈으로 못 찾으므로 위치를 말해 준다. */
+        /**
+         * TalkBack 이 꺼진 사용자용 — 버튼을 눈으로 못 찾으므로 위치를 말해 준다.
+         * 동의 버튼이 맨 아래(손끝이 먼저 닿는 곳), 그 위가 회색 [동의하지 않음].
+         */
         private const val NOTICE_GUIDE =
-            "화면 아래쪽 노란 버튼을 누르면 동의하고 시작합니다. 그 아래 버튼은 동의하지 않음입니다."
+            "동의하려면 화면 맨 아래 큰 노란 버튼을 누르세요. 그 위 회색 버튼은 동의하지 않음입니다. " +
+                "소리 줄이는 버튼을 짧게 누르면 다시 들을 수 있습니다."
         private const val BLOCKED_GUIDE =
-            "다시 들으려면 화면 아래쪽 노란 버튼을 누르세요."
+            "안내를 다시 들으려면 화면 아래쪽 노란 버튼을 누르세요."
     }
 }

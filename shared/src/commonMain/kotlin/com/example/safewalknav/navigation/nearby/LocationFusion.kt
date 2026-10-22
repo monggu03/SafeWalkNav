@@ -5,6 +5,7 @@ import kotlin.math.max
 
 /**
  * 위치 픽스 하나. accuracyM 은 OS 가 보고한 수평 정확도(68% 신뢰 반경, m).
+ * timeMs 는 픽스 시각(ms) — 한 목록 안에서 같은 시계면 된다(차이만 쓴다). Android 는 단조 시계를 넣는다.
  */
 data class LocationSample(
     val lat: Double,
@@ -53,6 +54,15 @@ object LocationFusion {
     const val GOOD_ENOUGH_ACCURACY_M = 8f
     const val GOOD_ENOUGH_MIN_SAMPLES = 2
 
+    /**
+     * 조기 종료 전에 최소한 모을 픽스 수와 시간 폭.
+     * 도심(빌딩 사이)에서는 OS 가 "오차 5m"라고 해도 실제로는 15~30m 틀리는 일이 흔하다.
+     * 멀티패스 오차는 몇 초 안의 픽스끼리 같은 쪽으로 틀려서, 1초 간격 픽스 둘은 서로 맞아 보인다.
+     * 3초 이상·4개 이상 모아야 흩어짐(spread)이 드러나고 [fuse] 가 오차를 넓혀 보고할 기회가 생긴다.
+     */
+    const val GOOD_ENOUGH_MIN_TOTAL_SAMPLES = 4
+    const val GOOD_ENOUGH_MIN_SPAN_MS = 3_000L
+
     fun fuse(samples: List<LocationSample>): FusedFix? {
         val valid = samples.filter { it.accuracyM > 0f && it.accuracyM.isFinite() }
         if (valid.isEmpty()) return null
@@ -98,8 +108,16 @@ object LocationFusion {
         return kotlin.math.sqrt(sum / samples.size).toFloat()
     }
 
-    /** 조기 종료해도 되는가. */
+    /**
+     * 조기 종료해도 되는가.
+     * 좋은 픽스 수만 보지 않고, 전체 픽스 수와 처음~마지막 픽스 사이 시간 폭도 본다
+     * ([GOOD_ENOUGH_MIN_TOTAL_SAMPLES] 주석 — 짧게 모은 픽스는 서로 같은 쪽으로 틀려 정확해 보인다).
+     * 시간 폭은 min~max 로 잰다 — 제공자(GPS·네트워크)가 섞이면 도착 순서와 시각 순서가 다를 수 있다.
+     */
     fun isGoodEnough(samples: List<LocationSample>): Boolean {
+        if (samples.size < GOOD_ENOUGH_MIN_TOTAL_SAMPLES) return false
+        val span = samples.maxOf { it.timeMs } - samples.minOf { it.timeMs }
+        if (span < GOOD_ENOUGH_MIN_SPAN_MS) return false
         val good = samples.count { it.accuracyM > 0f && it.accuracyM <= GOOD_ENOUGH_ACCURACY_M }
         return good >= GOOD_ENOUGH_MIN_SAMPLES
     }

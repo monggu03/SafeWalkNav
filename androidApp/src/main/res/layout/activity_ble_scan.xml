@@ -42,7 +42,7 @@
                 android:layout_marginBottom="12dp"
                 android:accessibilityHeading="true"
                 android:gravity="center"
-                android:text="음향신호기 켜기 (준비 중)"
+                android:text="음향신호기 (준비 중)"
                 android:textColor="#FFFFFF"
                 android:textSize="28sp"
                 android:textStyle="bold" />
@@ -67,9 +67,10 @@
         android:textColor="#4FC3F7"
         android:textSize="20sp" />
 
+    <!-- 버튼 줄 96dp — 글꼴을 키우면 "다시 찾기"·"설정 열기"가 두 줄이 되는데, 80dp 에선 글자가 너무 작아졌다. -->
     <LinearLayout
         android:layout_width="match_parent"
-        android:layout_height="80dp"
+        android:layout_height="96dp"
         android:layout_marginTop="12dp"
         android:orientation="horizontal">
 

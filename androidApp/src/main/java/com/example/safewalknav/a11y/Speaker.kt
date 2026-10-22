@@ -4,10 +4,13 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.view.accessibility.AccessibilityManager
 import android.widget.TextView
 import java.util.Locale
@@ -56,6 +59,19 @@ class Speaker(
         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
         .build()
 
+    /** 마지막으로 말한(또는 상태 줄에 쓴) 문장 — 볼륨 아래 키 "다시 듣기"용. */
+    private var lastSpoken: String? = null
+
+    /** 말하는 동안 음악·다른 앱 소리를 줄인다. 말이 끝나면 돌려준다. */
+    private val focus = SpeechFocus(appContext, attributes)
+    private val mainHandler = Handler(Looper.getMainLooper())
+    /** 아직 말하는 중이면(일부 엔진은 끝난 직후에도 잠깐 true) 조금 뒤 다시 본다 — 한 번만 보면 포커스가 남는다. */
+    private val releaseFocusIfIdle: Runnable = object : Runnable {
+        override fun run() {
+            if (ready && tts.isSpeaking) mainHandler.postDelayed(this, FOCUS_RELEASE_DELAY_MS) else focus.release()
+        }
+    }
+
     private val tts: TextToSpeech = TextToSpeech(appContext, this)
 
     override fun onInit(status: Int) {
@@ -69,9 +85,22 @@ class Speaker(
             return
         }
         tts.setAudioAttributes(attributes)
+        // 말이 다 끝나면(다음 말이 바로 이어지지 않으면) 줄였던 다른 소리를 돌려준다.
+        tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {}
+            override fun onDone(utteranceId: String?) = scheduleFocusRelease()
+            @Suppress("OVERRIDE_DEPRECATION")   // 추상 메서드라 구현은 해야 한다
+            override fun onError(utteranceId: String?) = scheduleFocusRelease()
+            override fun onStop(utteranceId: String?, interrupted: Boolean) = scheduleFocusRelease()
+        })
         ready = true
         pending?.let { speakTts(it, interrupt = true) }
         pending = null
+    }
+
+    private fun scheduleFocusRelease() {
+        mainHandler.removeCallbacks(releaseFocusIfIdle)
+        mainHandler.postDelayed(releaseFocusIfIdle, FOCUS_RELEASE_DELAY_MS)
     }
 
     /** TalkBack(터치 탐색)이 켜져 있는가. */
@@ -84,12 +113,16 @@ class Speaker(
                 .getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
             return am?.isEnabled == true && am.isTouchExplorationEnabled
         }
+
+        /** 말이 끝나고 이만큼 다음 말이 없으면 다른 앱 소리를 돌려준다(문장 사이마다 음악이 출렁이지 않게). */
+        private const val FOCUS_RELEASE_DELAY_MS = 400L
     }
 
     /**
      * @param interrupt true 면 말하던 것을 끊고 바로 말한다(사용자가 방금 누른 것에 대한 응답).
      */
     fun speak(text: String, interrupt: Boolean = true) {
+        lastSpoken = text
         statusView?.let { setLiveText(it, text) }
         if (isScreenReaderOn()) return   // TalkBack 이 라이브 리전으로 읽는다
         warnIfMuted()
@@ -109,6 +142,18 @@ class Speaker(
     fun stop() {
         pending = null
         if (ready) tts.stop()
+        mainHandler.removeCallbacks(releaseFocusIfIdle)
+        focus.release()
+    }
+
+    /**
+     * 마지막 안내를 다시 말한다(볼륨 아래 키). 다시 들려줄 것이 없으면 false.
+     * 안내가 "지금 방향" 처럼 그 순간에만 맞는 화면은 이걸 쓰지 말고 새로 만들어 말할 것.
+     */
+    fun repeatLast(): Boolean {
+        val text = lastSpoken ?: return false
+        speak(text, interrupt = true)
+        return true
     }
 
     /**
@@ -121,6 +166,8 @@ class Speaker(
 
     fun shutdown() {
         pending = null
+        mainHandler.removeCallbacks(releaseFocusIfIdle)
+        focus.release()
         tts.stop()
         tts.shutdown()
     }
@@ -179,7 +226,17 @@ class Speaker(
     }
 
     private fun speakTts(text: String, interrupt: Boolean) {
-        val mode = if (interrupt) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-        tts.speak(text, mode, null, "safewalk-${System.nanoTime()}")
+        mainHandler.removeCallbacks(releaseFocusIfIdle)
+        focus.acquire()
+        var mode = if (interrupt) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+        // 블루투스 이어폰은 첫 음절이 잘린다 — 짧은 무음으로 먼저 깨운다(AudioRouting 주석).
+        if (AudioRouting.isBluetoothOutput(appContext)) {
+            tts.playSilentUtterance(AudioRouting.BLUETOOTH_WAKE_MS, mode, "safewalk-wake-${System.nanoTime()}")
+            mode = TextToSpeech.QUEUE_ADD
+        }
+        // 엔진이 거절하면 완료 콜백이 오지 않는다 — 포커스를 쥔 채 남지 않게 반납을 예약한다.
+        if (tts.speak(text, mode, null, "safewalk-${System.nanoTime()}") == TextToSpeech.ERROR) {
+            scheduleFocusRelease()
+        }
     }
 }

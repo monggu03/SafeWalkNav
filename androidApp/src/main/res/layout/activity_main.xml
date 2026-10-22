@@ -41,22 +41,31 @@ SafeWalk — 카메라 단일 기능 화면.
         android:background="#00000000"
         android:importantForAccessibility="no" />
 
-    <!-- 큰 상태 글씨 (빨간불/초록불/안내). 멀리서도 보이게 그림자 + 대형. -->
+    <!--
+    큰 상태 글씨 (색 + 해야 할 행동). 저시력자·보호자용.
+     - 반투명 검정 판(#CC000000) 위에 흰 글씨: 하늘이나 초록 덧칠 위에서는 그림자만으로 대비가 1.6:1 까지
+       떨어졌다. 판 위에서는 약 14:1.
+     - 높이 고정 + 글자 크기 자동 맞춤: 52sp 고정이면 글꼴 200%·최대 화면 크기에서 "비춰 주/세요"처럼
+       글자 중간에서 끊기거나 위아래가 잘렸다. 정해진 판 안에 맞춰 줄인다.
+    -->
     <TextView
         android:id="@+id/overlayStatusText"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="220dp"
         android:layout_gravity="center"
-        android:text="신호등을 비춰 주세요"
-        android:textSize="52sp"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:background="#CC000000"
+        android:text="신호등을\n비춰 주세요"
         android:textStyle="bold"
         android:textColor="#FFFFFF"
         android:gravity="center"
-        android:padding="24dp"
-        android:shadowColor="#000000"
-        android:shadowDx="0"
-        android:shadowDy="0"
-        android:shadowRadius="16"
-        tools:text="빨간불 · 정지" />
+        android:padding="16dp"
+        android:autoSizeTextType="uniform"
+        android:autoSizeMinTextSize="24sp"
+        android:autoSizeMaxTextSize="64sp"
+        android:autoSizeStepGranularity="2sp"
+        android:lineBreakWordStyle="phrase"
+        tools:text="빨간불\n정지" />
 
 </FrameLayout>

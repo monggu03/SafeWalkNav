@@ -86,6 +86,12 @@ class AimingFeedback(
     /** 진폭 제어가 없는 기기에서는 amplitude 배열을 쓰지 않는다 (무시되거나 이상하게 동작). */
     private val hasAmplitudeControl: Boolean = vibrator.hasAmplitudeControl()
 
+    /**
+     * 톡 한 번의 길이. 세기 조절이 안 되는 보급형 모터(ERM)는 20ms 로는 제대로 돌지도 못해
+     * 장갑·케이스 너머로 거의 안 느껴진다 — 그런 기기는 길게 준다.
+     */
+    private val pulseMs: Long = if (hasAmplitudeControl) PULSE_MS else PULSE_MS_NO_AMPLITUDE
+
     private var currentTier: Tier = Tier.NONE
 
     /**
@@ -234,7 +240,10 @@ class AimingFeedback(
      * 무한 반복이 아니므로 [armed] 는 건드리지 않는다 — 취소할 것이 남지 않는다.
      */
     private fun playAcquired() {
-        val timings = longArrayOf(0, ACQUIRE_PULSE_MS, ACQUIRE_GAP_MS, ACQUIRE_PULSE_MS)
+        // 세기 조절이 안 되는 기기는 "더 세게"로 구별할 수 없고 소나도 40ms 로 길어져서,
+        // 45ms 2연타가 정렬 소나와 거의 같게 느껴진다 — 그런 기기는 길이로 확실히 다르게.
+        val pulse = if (hasAmplitudeControl) ACQUIRE_PULSE_MS else ACQUIRE_PULSE_MS_NO_AMPLITUDE
+        val timings = longArrayOf(0, pulse, ACQUIRE_GAP_MS, pulse)
         val effect = if (hasAmplitudeControl) {
             VibrationEffect.createWaveform(timings, intArrayOf(0, 255, 0, 255), -1)
         } else {
@@ -249,8 +258,8 @@ class AimingFeedback(
 
     /** repeat = 0 → timings 를 인덱스 0 부터 무한 반복. [cancel] 전까지 계속 뛴다. */
     private fun arm(gapMs: Long) {
-        val off = (gapMs - PULSE_MS).coerceAtLeast(1L)
-        val timings = longArrayOf(0L, PULSE_MS, off)
+        val off = (gapMs - pulseMs).coerceAtLeast(1L)
+        val timings = longArrayOf(0L, pulseMs, off)
         val effect = if (hasAmplitudeControl) {
             VibrationEffect.createWaveform(timings, intArrayOf(0, PULSE_AMPLITUDE, 0), 0)
         } else {
@@ -285,6 +294,7 @@ class AimingFeedback(
     companion object {
         /** 한 번의 톡 — 짧게. 길면 연속 진동처럼 뭉개져 박자가 안 느껴진다. */
         private const val PULSE_MS = 20L
+        private const val PULSE_MS_NO_AMPLITUDE = 40L
 
         /** 0~255. 걸으면서도 느껴지되 손이 피로하지 않은 선. */
         private const val PULSE_AMPLITUDE = 160
@@ -295,6 +305,7 @@ class AimingFeedback(
         // ── "찾았다" 패턴 ──
         /** 소나의 20ms 보다 확실히 길게 — 손이 "다른 신호"로 인식할 만큼. */
         private const val ACQUIRE_PULSE_MS = 45L
+        private const val ACQUIRE_PULSE_MS_NO_AMPLITUDE = 90L
         private const val ACQUIRE_GAP_MS = 70L
 
         /**

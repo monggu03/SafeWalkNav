@@ -104,14 +104,43 @@ class NearbyTest {
     @Test
     fun 조기종료_기준() {
         assertFalse(LocationFusion.isGoodEnough(listOf(LocationSample(lat0, lon0, 5f, 0))))
-        assertTrue(
+        // 좋은 픽스 둘이라도 1초 사이면 아직 — 멀티패스 오차는 짧은 시간 안에서 같은 쪽으로 틀려 맞아 보인다
+        assertFalse(
             LocationFusion.isGoodEnough(
                 listOf(LocationSample(lat0, lon0, 5f, 0), LocationSample(lat0, lon0, 7f, 1000))
             )
         )
+        // 4개 이상 + 3초 이상 + 좋은 픽스 2개 → 조기 종료
+        assertTrue(
+            LocationFusion.isGoodEnough(
+                listOf(
+                    LocationSample(lat0, lon0, 20f, 0), LocationSample(lat0, lon0, 12f, 1000),
+                    LocationSample(lat0, lon0, 5f, 2000), LocationSample(lat0, lon0, 7f, 3000),
+                )
+            )
+        )
+        // 4개라도 시간 폭이 3초 미만이면 아직
         assertFalse(
             LocationFusion.isGoodEnough(
-                listOf(LocationSample(lat0, lon0, 12f, 0), LocationSample(lat0, lon0, 15f, 1000))
+                listOf(
+                    LocationSample(lat0, lon0, 5f, 0), LocationSample(lat0, lon0, 5f, 500),
+                    LocationSample(lat0, lon0, 5f, 1000), LocationSample(lat0, lon0, 5f, 2000),
+                )
+            )
+        )
+        // 3초가 넘어도 3개뿐이면 아직
+        assertFalse(
+            LocationFusion.isGoodEnough(
+                listOf(LocationSample(lat0, lon0, 5f, 0), LocationSample(lat0, lon0, 5f, 2000), LocationSample(lat0, lon0, 5f, 4000))
+            )
+        )
+        // 수·시간이 충분해도 좋은 픽스가 모자라면 아직
+        assertFalse(
+            LocationFusion.isGoodEnough(
+                listOf(
+                    LocationSample(lat0, lon0, 12f, 0), LocationSample(lat0, lon0, 15f, 1000),
+                    LocationSample(lat0, lon0, 5f, 2000), LocationSample(lat0, lon0, 15f, 3000),
+                )
             )
         )
     }
@@ -264,7 +293,11 @@ class NearbyTest {
         val s = NearbyPhrases.placeDetail(p, 2, null, beaconStarted = true)
         assertTrue(s.startsWith("CU. 2시 방향, 약 30미터."))
         assertTrue(s.contains("진동"))
-        assertTrue(s.contains("다시 누르면 멈춥니다"))
+        // 끄는 법까지 한 번에 알려 준다
+        assertTrue(s.contains("진동을 끄려면 같은 장소를 다시 누르세요"))
+        // 끄기·시간 종료 안내는 "방향 찾기" 대신 느끼는 것(진동)으로 말한다
+        assertEquals("진동을 껐습니다.", NearbyPhrases.BEACON_STOPPED)
+        assertTrue(NearbyPhrases.BEACON_TIMEOUT.startsWith("진동이 끝났습니다."))
     }
 
     // ───────── 문구 ─────────
@@ -288,6 +321,14 @@ class NearbyTest {
         val rough = NearbyPhrases.placeDetail(p, 2, null, withinError = true)
         assertTrue(rough.contains("정확하지 않을 수"))
         assertTrue(rough.contains("대략 2시 방향"), rough)
+        assertTrue(rough.contains("위치 오차가 커서"), rough)
+        // 보고 오차는 작은데 가까워서 걸린 경우 — 이유를 사실대로("오차가 커서"라고 하지 않는다)
+        val close = NearbyPhrases.placeDetail(p, 2, null, withinError = true, closeRange = true)
+        assertTrue(close.contains("가까운 곳이라"), close)
+        assertFalse(close.contains("오차가 커서"), close)
+        // 진동을 일부러 안 켰으면 그렇다고 말한다 — 말없이 안 켜면 고장 난 줄 안다
+        val withheld = NearbyPhrases.placeDetail(p, 2, null, withinError = true, beaconWithheld = true)
+        assertTrue(withheld.contains("진동 안내는 하지 않습니다"), withheld)
         // 위치가 오래됐으면 방향도 거리도 말하지 않는다
         val stale = NearbyPhrases.placeDetail(p, null, NearbyPhrases.NoDirectionReason.STALE_LOCATION)
         assertFalse(stale.contains("시 방향"))
@@ -340,7 +381,10 @@ class NearbyTest {
     @Test
     fun 현재위치문구_오차가_크면_경고() {
         assertFalse(NearbyPhrases.currentLocation(addr, emptyList(), 8f) { null }.contains("정확하지"))
-        assertTrue(NearbyPhrases.currentLocation(addr, emptyList(), 35f) { null }.contains("정확하지"))
+        val poor = NearbyPhrases.currentLocation(addr, emptyList(), 35f) { null }
+        assertTrue(poor.contains("정확하지"))
+        // 화면 위치 말("아래")을 쓰지 않는다 — 듣는 사람에게는 위아래가 없다
+        assertFalse(poor.contains("아래"), poor)
     }
 
     @Test

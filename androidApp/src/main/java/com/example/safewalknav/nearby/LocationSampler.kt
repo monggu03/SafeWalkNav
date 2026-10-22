@@ -20,7 +20,8 @@ import kotlinx.coroutines.withTimeoutOrNull
  * 몇 초 동안 위치 픽스를 모은다 (GPS 오차 보정의 수집 단계).
  *
  * - 고정밀(PRIORITY_HIGH_ACCURACY)로 1초마다 받는다.
- * - 오차 8m 이하 픽스가 2개 모이면 일찍 끝낸다 ([LocationFusion.isGoodEnough]).
+ * - 픽스 4개 이상·3초 이상 모였고 그중 오차 8m 이하가 2개면 일찍 끝낸다 ([LocationFusion.isGoodEnough]).
+ *   (1초 간격 2개만 보고 끝내던 예전 기준은 도심 멀티패스에서 "오차 5m"를 그대로 믿었다)
  * - 오래된 캐시 픽스(10초 넘은 것)는 버린다 — Fused 는 첫 결과로 예전 위치를 줄 수 있는데,
  *   그건 "지금 여기"가 아니다.
  *
@@ -56,7 +57,14 @@ class LocationSampler(context: Context) {
                     if (!loc.hasAccuracy()) continue
                     // 캐시된 옛 위치 거르기
                     if (startedAtNanos - loc.elapsedRealtimeNanos > STALE_FIX_NANOS) continue
-                    samples += LocationSample(loc.latitude, loc.longitude, loc.accuracy, loc.time)
+                    // 시각도 단조 시계로 — loc.time 은 제공자마다 시계가 달라(GPS 시각 vs 휴대폰 시계)
+                    // 섞이면 픽스 사이 시간 폭(조기 종료 기준 3초)이 엉뚱하게 계산된다.
+                    // 시작 전에 생긴(캐시된) 픽스는 시작 시각으로 친다 — 안 그러면 몇 초 전 캐시 하나가
+                    // "3초 이상 모았다" 조건을 채워 줘, 새 픽스 2초어치만으로 일찍 끝났다.
+                    val nanos = maxOf(loc.elapsedRealtimeNanos, startedAtNanos)
+                    samples += LocationSample(
+                        loc.latitude, loc.longitude, loc.accuracy, nanos / 1_000_000L
+                    )
                 }
                 if (!enough.isCompleted && LocationFusion.isGoodEnough(samples)) enough.complete(Unit)
             }
